@@ -57,6 +57,8 @@ def init_db():
             debit TEXT NOT NULL,
             credit TEXT NOT NULL,
             tax_year TEXT DEFAULT '',
+            vat_rate REAL DEFAULT 0,
+            vat_direction TEXT DEFAULT '',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -76,6 +78,12 @@ def init_db():
         );
         """
     )
+    # migrate older databases that predate the VAT columns
+    existing_cols = {row[1] for row in db.execute("PRAGMA table_info(transactions)").fetchall()}
+    if "vat_rate" not in existing_cols:
+        db.execute("ALTER TABLE transactions ADD COLUMN vat_rate REAL DEFAULT 0")
+    if "vat_direction" not in existing_cols:
+        db.execute("ALTER TABLE transactions ADD COLUMN vat_direction TEXT DEFAULT ''")
     db.commit()
     db.close()
 
@@ -227,11 +235,16 @@ def update_settings(company_id):
 def list_transactions(company_id):
     db = get_db()
     rows = db.execute(
-        "SELECT id, date, desc, amount, debit, credit, tax_year as taxYear "
+        "SELECT id, date, desc, amount, debit, credit, tax_year as taxYear, "
+        "vat_rate as vatRate, vat_direction as vatDirection "
         "FROM transactions WHERE company_id = ? ORDER BY date",
         (company_id,),
     ).fetchall()
     return jsonify([dict(r) for r in rows])
+
+
+def _valid_vat_direction(v):
+    return v in ("", "input", "output")
 
 
 @app.route("/api/companies/<int:company_id>/transactions", methods=["POST"])
@@ -242,13 +255,18 @@ def create_transaction(company_id):
     date, desc, amount, debit, credit = (
         data.get("date"), data.get("desc"), data.get("amount"), data.get("debit"), data.get("credit")
     )
+    vat_rate = float(data.get("vatRate") or 0)
+    vat_direction = data.get("vatDirection") or ""
     if not all([date, desc, debit, credit]) or not amount or float(amount) <= 0 or debit == credit:
         return jsonify({"error": "Invalid transaction."}), 400
+    if not _valid_vat_direction(vat_direction):
+        return jsonify({"error": "Invalid VAT direction."}), 400
 
     db = get_db()
     cur = db.execute(
-        "INSERT INTO transactions (company_id, date, desc, amount, debit, credit, tax_year) VALUES (?,?,?,?,?,?,?)",
-        (company_id, date, desc, float(amount), debit, credit, data.get("taxYear", "")),
+        "INSERT INTO transactions (company_id, date, desc, amount, debit, credit, tax_year, vat_rate, vat_direction) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (company_id, date, desc, float(amount), debit, credit, data.get("taxYear", ""), vat_rate, vat_direction),
     )
     db.execute(
         "INSERT INTO presets (company_id, desc_key, debit, credit) VALUES (?,?,?,?) "
@@ -270,11 +288,16 @@ def bulk_create_transactions(company_id):
         date, desc, amount, debit, credit = (
             it.get("date"), it.get("desc"), it.get("amount"), it.get("debit"), it.get("credit")
         )
+        vat_rate = float(it.get("vatRate") or 0)
+        vat_direction = it.get("vatDirection") or ""
         if not all([date, desc, debit, credit]) or not amount or float(amount) <= 0 or debit == credit:
             continue
+        if not _valid_vat_direction(vat_direction):
+            continue
         db.execute(
-            "INSERT INTO transactions (company_id, date, desc, amount, debit, credit, tax_year) VALUES (?,?,?,?,?,?,?)",
-            (company_id, date, desc, float(amount), debit, credit, it.get("taxYear", "")),
+            "INSERT INTO transactions (company_id, date, desc, amount, debit, credit, tax_year, vat_rate, vat_direction) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (company_id, date, desc, float(amount), debit, credit, it.get("taxYear", ""), vat_rate, vat_direction),
         )
         db.execute(
             "INSERT INTO presets (company_id, desc_key, debit, credit) VALUES (?,?,?,?) "

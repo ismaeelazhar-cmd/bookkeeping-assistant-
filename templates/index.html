@@ -131,7 +131,7 @@
       <input type="text" id="f-desc" placeholder="e.g. Laptop purchase" oninput="suggestFromDescription()" autocomplete="off">
       <div id="suggest-hint" style="font-size:11px; color:var(--good); margin-top:2px; min-height:14px;"></div>
       <label>Amount</label>
-      <input type="number" id="f-amount" step="0.01" min="0" placeholder="0.00">
+      <input type="number" id="f-amount" step="0.01" min="0" placeholder="0.00" oninput="updateVatPreview()">
       <div class="row2">
         <div>
           <label>Debit account (where value goes)</label>
@@ -147,6 +147,23 @@
       <input list="account-list" id="f-default-credit" placeholder="e.g. Cash" oninput="saveSettings()">
       <label>Tax year (optional)</label>
       <input type="text" id="f-taxyear" placeholder="e.g. 2025/26">
+
+      <label>VAT</label>
+      <div class="row2">
+        <select id="f-vat-rate" onchange="updateVatPreview()">
+          <option value="0">No VAT</option>
+          <option value="20">20% (Standard)</option>
+          <option value="5">5% (Reduced)</option>
+          <option value="0.001">0% (Zero-rated)</option>
+        </select>
+        <select id="f-vat-direction">
+          <option value="">—</option>
+          <option value="input">Input VAT (purchase/expense)</option>
+          <option value="output">Output VAT (sale)</option>
+        </select>
+      </div>
+      <div class="sub" id="vat-preview" style="margin:4px 0 0;"></div>
+
       <button class="btn-primary" onclick="addTransaction()">Post Transaction</button>
       <div id="form-error" style="color:#ff5d5d; font-size:12px; margin-top:8px;"></div>
 
@@ -202,7 +219,7 @@
       <div class="panel">
         <h2>Journal (all transactions)</h2>
         <table class="journal">
-          <thead><tr><th>Date</th><th>Description</th><th>Debit</th><th>Credit</th><th class="num">Amount</th><th></th></tr></thead>
+          <thead><tr><th>Date</th><th>Description</th><th>Debit</th><th>Credit</th><th class="num">Amount</th><th>VAT</th><th></th></tr></thead>
           <tbody id="journal-body"></tbody>
         </table>
       </div>
@@ -238,6 +255,17 @@
     <div class="toolbar" style="margin-top:14px; margin-bottom:0;">
       <button class="btn-secondary" onclick="printFinancialStatements()">Print / Export Financial Statements</button>
     </div>
+  </div>
+
+  <div class="panel" style="margin-top:20px;">
+    <h2>VAT Return</h2>
+    <div class="sub" style="margin-bottom:12px;">Simplified UK VAT return boxes, calculated from transactions tagged with Input/Output VAT in the period below. This is a working figure for review with your accountant/MTD software, not a filing in itself.</div>
+    <div class="row2">
+      <div><label>From</label><input type="date" id="vat-from"></div>
+      <div><label>To</label><input type="date" id="vat-to"></div>
+    </div>
+    <button class="btn-primary" onclick="renderVatReturn()">Calculate VAT Return</button>
+    <table class="trial" style="margin-top:14px;"><tbody id="vat-return-body"></tbody></table>
   </div>
 </div>
 
@@ -421,18 +449,61 @@ async function addTransaction() {
     errEl.textContent = 'Fill in date, description, a positive amount, and both accounts.'; return;
   }
   if (debit === credit) { errEl.textContent = 'Debit and credit accounts must differ.'; return; }
+
+  let vatRateSel = parseFloat(document.getElementById('f-vat-rate').value);
+  const vatDirection = vatRateSel === 0 ? '' : document.getElementById('f-vat-direction').value;
+  if (vatRateSel > 0 && !vatDirection) { errEl.textContent = 'Pick whether this is Input or Output VAT.'; return; }
+  const vatRate = vatRateSel === 0.001 ? 0 : vatRateSel; // 0.001 is the "zero-rated" sentinel — stored as a real 0% rate
+
   errEl.textContent = '';
 
   await api(`/api/companies/${currentCompany.id}/transactions`, {
-    method: 'POST', body: JSON.stringify({ date, desc, amount, debit, credit, taxYear })
+    method: 'POST', body: JSON.stringify({ date, desc, amount, debit, credit, taxYear, vatRate, vatDirection })
   });
 
   document.getElementById('f-desc').value = '';
   document.getElementById('f-amount').value = '';
   document.getElementById('f-debit').value = '';
   document.getElementById('f-credit').value = '';
+  document.getElementById('f-vat-rate').value = '0';
+  document.getElementById('f-vat-direction').value = '';
   document.getElementById('suggest-hint').textContent = '';
+  document.getElementById('vat-preview').textContent = '';
   await refreshAll();
+}
+
+function updateVatPreview() {
+  const amount = parseFloat(document.getElementById('f-amount').value);
+  const rateSel = parseFloat(document.getElementById('f-vat-rate').value);
+  const previewEl = document.getElementById('vat-preview');
+  if (!amount || !rateSel) { previewEl.textContent = ''; return; }
+  const rate = rateSel === 0.001 ? 0 : rateSel;
+  const net = amount / (1 + rate / 100);
+  const vat = amount - net;
+  previewEl.textContent = `Amount entered is gross. Net ${fmt(net)} + VAT ${fmt(vat)} = ${fmt(amount)}.`;
+}
+
+const VAT_ACCOUNT = 'VAT Control Account';
+
+function expandTransactionLines(t) {
+  const rate = (t.vatRate || 0) / 100;
+  const vat = rate > 0 ? t.amount - t.amount / (1 + rate) : 0;
+  if (!t.vatDirection || vat < 0.005) {
+    return [{ account: t.debit, side: 'debit', amount: t.amount }, { account: t.credit, side: 'credit', amount: t.amount }];
+  }
+  const net = t.amount - vat;
+  if (t.vatDirection === 'input') {
+    return [
+      { account: t.debit, side: 'debit', amount: net },
+      { account: VAT_ACCOUNT, side: 'debit', amount: vat },
+      { account: t.credit, side: 'credit', amount: t.amount }
+    ];
+  }
+  return [
+    { account: t.debit, side: 'debit', amount: t.amount },
+    { account: t.credit, side: 'credit', amount: net },
+    { account: VAT_ACCOUNT, side: 'credit', amount: vat }
+  ];
 }
 
 async function deleteTransaction(id) {
@@ -449,7 +520,12 @@ function buildAccounts() {
   const accounts = {};
   function ensure(name) { if (!accounts[name]) accounts[name] = { debits: [], credits: [] }; return accounts[name]; }
   const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
-  for (const t of sorted) { ensure(t.debit).debits.push(t); ensure(t.credit).credits.push(t); }
+  for (const t of sorted) {
+    for (const line of expandTransactionLines(t)) {
+      const entry = Object.assign({}, t, { amount: line.amount, _isVatLine: line.account === VAT_ACCOUNT });
+      ensure(line.account)[line.side === 'debit' ? 'debits' : 'credits'].push(entry);
+    }
+  }
   return accounts;
 }
 
@@ -464,8 +540,9 @@ function renderAccounts() {
     const creditTotal = acc.credits.reduce((s, t) => s + t.amount, 0);
     const bal = debitTotal - creditTotal;
     const balLabel = bal === 0 ? 'balanced' : (bal > 0 ? `Dr ${fmt(bal)}` : `Cr ${fmt(-bal)}`);
-    const debitLines = acc.debits.map(t => `<div class="tline"><span class="desc" title="${escapeHtml(t.desc)} (vs ${escapeHtml(t.credit)})">${fmtDate(t.date)} — ${escapeHtml(t.desc)}</span><span class="amt debit">${fmt(t.amount)}</span></div>`).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
-    const creditLines = acc.credits.map(t => `<div class="tline"><span class="desc" title="${escapeHtml(t.desc)} (vs ${escapeHtml(t.debit)})">${fmtDate(t.date)} — ${escapeHtml(t.desc)}</span><span class="amt credit">${fmt(t.amount)}</span></div>`).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
+    const vatTag = t => t._isVatLine ? ' (VAT)' : '';
+    const debitLines = acc.debits.map(t => `<div class="tline"><span class="desc" title="${escapeHtml(t.desc)}${vatTag(t)} (vs ${escapeHtml(t.credit)})">${fmtDate(t.date)} — ${escapeHtml(t.desc)}${vatTag(t)}</span><span class="amt debit">${fmt(t.amount)}</span></div>`).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
+    const creditLines = acc.credits.map(t => `<div class="tline"><span class="desc" title="${escapeHtml(t.desc)}${vatTag(t)} (vs ${escapeHtml(t.debit)})">${fmtDate(t.date)} — ${escapeHtml(t.desc)}${vatTag(t)}</span><span class="amt credit">${fmt(t.amount)}</span></div>`).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
     return `
       <div class="taccount">
         <div class="taccount-title"><span>${escapeHtml(name)}</span><span class="bal">${balLabel}</span></div>
@@ -487,6 +564,7 @@ function renderJournal() {
       <td style="color:var(--debit)">${escapeHtml(t.debit)}</td>
       <td style="color:var(--credit)">${escapeHtml(t.credit)}</td>
       <td class="num">${fmt(t.amount)}</td>
+      <td>${t.vatDirection ? `<span class="pill">${t.vatRate}% ${t.vatDirection}</span>` : ''}</td>
       <td><button class="btn-danger" onclick="deleteTransaction(${t.id})">Delete</button></td>
     </tr>`).join('');
   document.getElementById('tx-count').textContent = `${transactions.length} transaction${transactions.length === 1 ? '' : 's'}`;
@@ -818,6 +896,7 @@ const DEBIT_NORMAL = { cash: true, cogs: true, expense: true, current_asset: tru
 function guessAccountType(name) {
   const n = name.toLowerCase();
   if (n === 'cash' || n.includes('bank')) return 'cash';
+  if (n.includes('vat')) return 'current_liability';
   if (n.includes('drawing')) return 'drawings';
   if (n === 'capital' || n.includes('capital introduced') || n.includes('share capital') || n.includes('share premium')) return 'equity';
   if (n.includes('loan')) return 'noncurrent_liability';
@@ -942,14 +1021,16 @@ function renderFinancialStatements() {
   const totals = { operating: 0, investing: 0, financing: 0 };
   const breakdown = { operating: {}, investing: {}, financing: {} };
   for (const t of transactions) {
-    const debitIsCash = cashAccountNames.has(t.debit);
-    const creditIsCash = cashAccountNames.has(t.credit);
-    if (debitIsCash === creditIsCash) continue;
-    const counterpart = debitIsCash ? t.credit : t.debit;
-    const sign = debitIsCash ? 1 : -1;
-    const bucket = flowTypeBucket(getAccountType(counterpart));
-    totals[bucket] += sign * t.amount;
-    breakdown[bucket][counterpart] = (breakdown[bucket][counterpart] || 0) + sign * t.amount;
+    const lines = expandTransactionLines(t);
+    const hasCashLine = lines.some(l => cashAccountNames.has(l.account));
+    if (!hasCashLine) continue;
+    for (const line of lines) {
+      if (cashAccountNames.has(line.account)) continue; // the cash side itself isn't a "counterpart"
+      const sign = line.side === 'credit' ? 1 : -1; // derivation: cashEffect = sum(non-cash credits) - sum(non-cash debits)
+      const bucket = flowTypeBucket(getAccountType(line.account));
+      totals[bucket] += sign * line.amount;
+      breakdown[bucket][line.account] = (breakdown[bucket][line.account] || 0) + sign * line.amount;
+    }
   }
   const cashBalance = [...cashAccountNames].reduce((s, n) => s + accountNetBalance(accounts[n], 'cash'), 0);
   const netChange = totals.operating + totals.investing + totals.financing;
@@ -992,6 +1073,33 @@ function printFinancialStatements() {
     <h2>Statement of Cash Flows</h2><table>${cf}</table>
     </body></html>`);
   win.document.close(); win.focus(); setTimeout(() => win.print(), 300);
+}
+
+function renderVatReturn() {
+  const from = document.getElementById('vat-from').value;
+  const to = document.getElementById('vat-to').value;
+  const inRange = t => (!from || t.date >= from) && (!to || t.date <= to);
+  const vatTxns = transactions.filter(t => t.vatDirection && inRange(t));
+
+  let outputVat = 0, inputVat = 0, netSales = 0, netPurchases = 0;
+  for (const t of vatTxns) {
+    const rate = (t.vatRate || 0) / 100;
+    const vat = rate > 0 ? t.amount - t.amount / (1 + rate) : 0;
+    const net = t.amount - vat;
+    if (t.vatDirection === 'output') { outputVat += vat; netSales += net; }
+    else { inputVat += vat; netPurchases += net; }
+  }
+  const netVatDue = outputVat - inputVat;
+
+  const body = document.getElementById('vat-return-body');
+  body.innerHTML = [
+    lineRow('Box 1 — VAT due on sales and other outputs', outputVat),
+    lineRow('Box 4 — VAT reclaimed on purchases and other inputs', inputVat),
+    lineRow(netVatDue >= 0 ? 'Box 5 — Net VAT to pay to HMRC' : 'Box 5 — Net VAT reclaimable from HMRC', Math.abs(netVatDue), { total: true }),
+    lineRow('Box 6 — Total value of sales, excluding VAT', netSales),
+    lineRow('Box 7 — Total value of purchases, excluding VAT', netPurchases),
+  ].join('');
+  if (!vatTxns.length) body.innerHTML = '<tr><td class="empty">No VAT-tagged transactions in this period.</td></tr>';
 }
 
 document.getElementById('f-date').valueAsDate = new Date();
