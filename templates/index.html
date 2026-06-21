@@ -174,6 +174,11 @@
         <input type="file" id="import-file" accept=".csv" style="display:none" onchange="importCSV(event)">
       </div>
       <button class="btn-secondary" style="width:100%; color:#ff5d5d;" onclick="if(confirm('Clear all transactions for this company?')) clearAll()">Clear all data</button>
+
+      <h2 style="margin-top:24px;">Period Lock</h2>
+      <div class="sub" style="margin-bottom:8px;">Once you've filed a VAT return or finalized accounts up to a date, lock it — transactions on or before that date can no longer be added, edited, or deleted by anyone.</div>
+      <label>Locked up to and including</label>
+      <input type="date" id="f-locked-until" oninput="saveSettings()">
     </div>
 
     <div>
@@ -294,6 +299,16 @@
     <button class="btn-primary" onclick="renderVatReturn()">Calculate VAT Return</button>
     <table class="trial" style="margin-top:14px;"><tbody id="vat-return-body"></tbody></table>
   </div>
+
+  <div class="panel" style="margin-top:20px;">
+    <h2>Audit Log <span class="pill" id="audit-count"></span></h2>
+    <div class="sub" style="margin-bottom:12px;">Every transaction created or deleted, who did it, and when. This list cannot be edited from the app — it's the record of what actually happened.</div>
+    <button class="btn-secondary" onclick="loadAuditLog()">Refresh</button>
+    <table class="journal" style="margin-top:10px;">
+      <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Transaction</th><th>Details</th></tr></thead>
+      <tbody id="audit-log-body"></tbody>
+    </table>
+  </div>
 </div>
 
 <script>
@@ -411,6 +426,7 @@ async function openCompany(id) {
   document.getElementById('company-name-header').textContent = `${currentCompany.name} — Ledger`;
   document.getElementById('f-default-credit').value = currentCompany.default_credit_account || '';
   document.getElementById('ai-api-key').value = currentCompany.ai_api_key || '';
+  document.getElementById('f-locked-until').value = currentCompany.locked_until || '';
   show('app-screen');
   await refreshAll();
 }
@@ -419,9 +435,14 @@ async function saveSettings() {
   if (!currentCompany) return;
   currentCompany.default_credit_account = document.getElementById('f-default-credit').value.trim();
   currentCompany.ai_api_key = document.getElementById('ai-api-key').value.trim();
+  currentCompany.locked_until = document.getElementById('f-locked-until').value;
   await api(`/api/companies/${currentCompany.id}/settings`, {
     method: 'PUT',
-    body: JSON.stringify({ defaultCreditAccount: currentCompany.default_credit_account, aiApiKey: currentCompany.ai_api_key })
+    body: JSON.stringify({
+      defaultCreditAccount: currentCompany.default_credit_account,
+      aiApiKey: currentCompany.ai_api_key,
+      lockedUntil: currentCompany.locked_until
+    })
   });
 }
 
@@ -448,6 +469,7 @@ async function refreshAll() {
     api(`/api/companies/${cid}/bank-lines`)
   ]);
   render();
+  loadAuditLog();
 }
 
 function suggestFromDescription() {
@@ -487,9 +509,11 @@ async function addTransaction() {
 
   errEl.textContent = '';
 
-  await api(`/api/companies/${currentCompany.id}/transactions`, {
-    method: 'POST', body: JSON.stringify({ date, desc, amount, debit, credit, taxYear, vatRate, vatDirection })
-  });
+  try {
+    await api(`/api/companies/${currentCompany.id}/transactions`, {
+      method: 'POST', body: JSON.stringify({ date, desc, amount, debit, credit, taxYear, vatRate, vatDirection })
+    });
+  } catch (e) { errEl.textContent = e.message; return; }
 
   document.getElementById('f-desc').value = '';
   document.getElementById('f-amount').value = '';
@@ -537,12 +561,15 @@ function expandTransactionLines(t) {
 }
 
 async function deleteTransaction(id) {
-  await api(`/api/companies/${currentCompany.id}/transactions/${id}`, { method: 'DELETE' });
+  try {
+    await api(`/api/companies/${currentCompany.id}/transactions/${id}`, { method: 'DELETE' });
+  } catch (e) { alert(e.message); return; }
   await refreshAll();
 }
 
 async function clearAll() {
-  await api(`/api/companies/${currentCompany.id}/transactions/clear`, { method: 'POST' });
+  const result = await api(`/api/companies/${currentCompany.id}/transactions/clear`, { method: 'POST' });
+  if (result.skippedLocked) alert(`${result.skippedLocked} transaction(s) in locked periods were kept; ${result.deleted} were cleared.`);
   await refreshAll();
 }
 
@@ -854,7 +881,8 @@ async function postSelectedCandidates() {
   if (!toPost.length) { document.getElementById('inbox-status').textContent = 'Nothing valid selected.'; return; }
   const result = await api(`/api/companies/${currentCompany.id}/transactions/bulk`, { method: 'POST', body: JSON.stringify(toPost) });
   candidates = candidates.filter(c => !c.selected);
-  document.getElementById('inbox-status').textContent = `Posted ${result.inserted} transaction(s) to the ledger.`;
+  document.getElementById('inbox-status').textContent = `Posted ${result.inserted} transaction(s) to the ledger.` +
+    (result.skippedLocked ? ` ${result.skippedLocked} fell in a locked period and were skipped.` : '');
   renderCandidates();
   await refreshAll();
 }
@@ -1065,10 +1093,13 @@ async function postAndMatchBrecLine(lineId) {
   const moneyIn = line.amount > 0;
   const debit = moneyIn ? line.cashAccount : cat.debit;
   const credit = moneyIn ? cat.credit : line.cashAccount;
-  const result = await api(`/api/companies/${currentCompany.id}/transactions`, {
-    method: 'POST',
-    body: JSON.stringify({ date: line.date, desc: line.desc, amount: Math.abs(line.amount), debit, credit, taxYear: '' })
-  });
+  let result;
+  try {
+    result = await api(`/api/companies/${currentCompany.id}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ date: line.date, desc: line.desc, amount: Math.abs(line.amount), debit, credit, taxYear: '' })
+    });
+  } catch (e) { alert(e.message); return; }
   await matchBankLine(lineId, result.id);
 }
 
@@ -1289,6 +1320,26 @@ function renderVatReturn() {
     lineRow('Box 7 — Total value of purchases, excluding VAT', netPurchases),
   ].join('');
   if (!vatTxns.length) body.innerHTML = '<tr><td class="empty">No VAT-tagged transactions in this period.</td></tr>';
+}
+
+// ---------- Audit log ----------
+
+async function loadAuditLog() {
+  const entries = await api(`/api/companies/${currentCompany.id}/audit-log`);
+  const body = document.getElementById('audit-log-body');
+  document.getElementById('audit-count').textContent = `${entries.length} entries`;
+  if (!entries.length) { body.innerHTML = '<tr><td colspan="5" class="empty">No audit history yet.</td></tr>'; return; }
+  body.innerHTML = entries.map(e => {
+    const data = JSON.parse(e.action === 'create' ? (e.afterJson || '{}') : (e.beforeJson || '{}'));
+    const detail = data.desc ? `${escapeHtml(data.desc)} — ${fmt(data.amount || 0)} (${escapeHtml(data.debit || '')} / ${escapeHtml(data.credit || '')})` : '';
+    return `<tr>
+      <td>${escapeHtml(e.createdAt)}</td>
+      <td>${escapeHtml(e.userEmail)}</td>
+      <td style="color:${e.action === 'delete' ? '#ff5d5d' : 'var(--good)'}">${escapeHtml(e.action)}</td>
+      <td>#${e.entityId}</td>
+      <td>${detail}</td>
+    </tr>`;
+  }).join('');
 }
 
 document.getElementById('f-date').valueAsDate = new Date();

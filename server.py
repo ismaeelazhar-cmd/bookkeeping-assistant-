@@ -1,5 +1,7 @@
 import sqlite3
 import secrets
+import json
+import datetime
 from pathlib import Path
 from functools import wraps
 
@@ -45,6 +47,7 @@ def init_db():
             name TEXT NOT NULL,
             default_credit_account TEXT DEFAULT '',
             ai_api_key TEXT DEFAULT '',
+            locked_until TEXT DEFAULT '',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -87,6 +90,18 @@ def init_db():
             matched_transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            user_email TEXT NOT NULL,
+            action TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id INTEGER,
+            before_json TEXT DEFAULT '',
+            after_json TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     # migrate older databases that predate the VAT columns
@@ -95,8 +110,28 @@ def init_db():
         db.execute("ALTER TABLE transactions ADD COLUMN vat_rate REAL DEFAULT 0")
     if "vat_direction" not in existing_cols:
         db.execute("ALTER TABLE transactions ADD COLUMN vat_direction TEXT DEFAULT ''")
+    company_cols = {row[1] for row in db.execute("PRAGMA table_info(companies)").fetchall()}
+    if "locked_until" not in company_cols:
+        db.execute("ALTER TABLE companies ADD COLUMN locked_until TEXT DEFAULT ''")
     db.commit()
     db.close()
+
+
+def log_audit(db, company_id, action, entity_type, entity_id, before=None, after=None):
+    db.execute(
+        "INSERT INTO audit_log (company_id, user_email, action, entity_type, entity_id, before_json, after_json) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (
+            company_id, session.get("email", "unknown"), action, entity_type, entity_id,
+            json.dumps(before) if before is not None else "",
+            json.dumps(after) if after is not None else "",
+        ),
+    )
+
+
+def is_locked(company_row, date_str):
+    locked_until = company_row["locked_until"] if company_row else ""
+    return bool(locked_until) and date_str <= locked_until
 
 
 # ---------- auth helpers ----------
@@ -193,7 +228,7 @@ def me():
 def list_companies():
     db = get_db()
     rows = db.execute(
-        "SELECT id, name, default_credit_account, ai_api_key FROM companies WHERE user_id = ? ORDER BY name",
+        "SELECT id, name, default_credit_account, ai_api_key, locked_until FROM companies WHERE user_id = ? ORDER BY name",
         (session["user_id"],),
     ).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -211,7 +246,7 @@ def create_company():
         "INSERT INTO companies (user_id, name) VALUES (?, ?)", (session["user_id"], name)
     )
     db.commit()
-    return jsonify({"id": cur.lastrowid, "name": name, "default_credit_account": "", "ai_api_key": ""})
+    return jsonify({"id": cur.lastrowid, "name": name, "default_credit_account": "", "ai_api_key": "", "locked_until": ""})
 
 
 @app.route("/api/companies/<int:company_id>", methods=["DELETE"])
@@ -231,8 +266,8 @@ def update_settings(company_id):
     data = request.get_json(force=True) or {}
     db = get_db()
     db.execute(
-        "UPDATE companies SET default_credit_account = ?, ai_api_key = ? WHERE id = ?",
-        (data.get("defaultCreditAccount", ""), data.get("aiApiKey", ""), company_id),
+        "UPDATE companies SET default_credit_account = ?, ai_api_key = ?, locked_until = ? WHERE id = ?",
+        (data.get("defaultCreditAccount", ""), data.get("aiApiKey", ""), data.get("lockedUntil", ""), company_id),
     )
     db.commit()
     return jsonify({"ok": True})
@@ -272,6 +307,8 @@ def create_transaction(company_id):
         return jsonify({"error": "Invalid transaction."}), 400
     if not _valid_vat_direction(vat_direction):
         return jsonify({"error": "Invalid VAT direction."}), 400
+    if is_locked(g.company, date):
+        return jsonify({"error": f"This period is locked until {g.company['locked_until']} — unlock it in settings first."}), 423
 
     db = get_db()
     cur = db.execute(
@@ -284,6 +321,9 @@ def create_transaction(company_id):
         "ON CONFLICT(company_id, desc_key) DO UPDATE SET debit = excluded.debit, credit = excluded.credit",
         (company_id, desc.strip().lower(), debit, credit),
     )
+    log_audit(db, company_id, "create", "transaction", cur.lastrowid, after={
+        "date": date, "desc": desc, "amount": amount, "debit": debit, "credit": credit
+    })
     db.commit()
     return jsonify({"id": cur.lastrowid})
 
@@ -295,6 +335,7 @@ def bulk_create_transactions(company_id):
     items = request.get_json(force=True) or []
     db = get_db()
     inserted = 0
+    skipped_locked = 0
     for it in items:
         date, desc, amount, debit, credit = (
             it.get("date"), it.get("desc"), it.get("amount"), it.get("debit"), it.get("credit")
@@ -305,7 +346,10 @@ def bulk_create_transactions(company_id):
             continue
         if not _valid_vat_direction(vat_direction):
             continue
-        db.execute(
+        if is_locked(g.company, date):
+            skipped_locked += 1
+            continue
+        cur = db.execute(
             "INSERT INTO transactions (company_id, date, desc, amount, debit, credit, tax_year, vat_rate, vat_direction) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
             (company_id, date, desc, float(amount), debit, credit, it.get("taxYear", ""), vat_rate, vat_direction),
@@ -315,9 +359,12 @@ def bulk_create_transactions(company_id):
             "ON CONFLICT(company_id, desc_key) DO UPDATE SET debit = excluded.debit, credit = excluded.credit",
             (company_id, desc.strip().lower(), debit, credit),
         )
+        log_audit(db, company_id, "create", "transaction", cur.lastrowid, after={
+            "date": date, "desc": desc, "amount": amount, "debit": debit, "credit": credit
+        })
         inserted += 1
     db.commit()
-    return jsonify({"inserted": inserted})
+    return jsonify({"inserted": inserted, "skippedLocked": skipped_locked})
 
 
 @app.route("/api/companies/<int:company_id>/transactions/<int:tx_id>", methods=["DELETE"])
@@ -325,7 +372,16 @@ def bulk_create_transactions(company_id):
 @company_required
 def delete_transaction(company_id, tx_id):
     db = get_db()
+    row = db.execute(
+        "SELECT date, desc, amount, debit, credit FROM transactions WHERE id = ? AND company_id = ?",
+        (tx_id, company_id),
+    ).fetchone()
+    if row is None:
+        return jsonify({"ok": True})
+    if is_locked(g.company, row["date"]):
+        return jsonify({"error": f"This period is locked until {g.company['locked_until']} — unlock it in settings first."}), 423
     db.execute("DELETE FROM transactions WHERE id = ? AND company_id = ?", (tx_id, company_id))
+    log_audit(db, company_id, "delete", "transaction", tx_id, before=dict(row))
     db.commit()
     return jsonify({"ok": True})
 
@@ -335,9 +391,19 @@ def delete_transaction(company_id, tx_id):
 @company_required
 def clear_transactions(company_id):
     db = get_db()
-    db.execute("DELETE FROM transactions WHERE company_id = ?", (company_id,))
+    locked_until = g.company["locked_until"] or ""
+    rows = db.execute(
+        "SELECT id, date, desc, amount, debit, credit FROM transactions WHERE company_id = ?", (company_id,)
+    ).fetchall()
+    deleted = 0
+    for row in rows:
+        if locked_until and row["date"] <= locked_until:
+            continue
+        db.execute("DELETE FROM transactions WHERE id = ?", (row["id"],))
+        log_audit(db, company_id, "delete", "transaction", row["id"], before=dict(row))
+        deleted += 1
     db.commit()
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "deleted": deleted, "skippedLocked": len(rows) - deleted})
 
 
 # ---------- presets ----------
@@ -351,6 +417,22 @@ def list_presets(company_id):
         "SELECT desc_key, debit, credit FROM presets WHERE company_id = ?", (company_id,)
     ).fetchall()
     return jsonify({r["desc_key"]: {"debit": r["debit"], "credit": r["credit"]} for r in rows})
+
+
+# ---------- audit log ----------
+
+@app.route("/api/companies/<int:company_id>/audit-log", methods=["GET"])
+@login_required
+@company_required
+def list_audit_log(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, user_email as userEmail, action, entity_type as entityType, entity_id as entityId, "
+        "before_json as beforeJson, after_json as afterJson, created_at as createdAt "
+        "FROM audit_log WHERE company_id = ? ORDER BY id DESC LIMIT 500",
+        (company_id,),
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
 
 
 # ---------- account types ----------
