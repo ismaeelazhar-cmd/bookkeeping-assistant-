@@ -238,6 +238,33 @@
   </div>
 
   <div class="panel" style="margin-top:20px;">
+    <h2>Bank Reconciliation</h2>
+    <div class="sub" style="margin-bottom:12px;">Import what your bank statement actually shows for an account, then match each line to a ledger transaction — or post a new one straight from the line. This is what actually catches missing/duplicate/wrong entries, not just categorization.</div>
+
+    <div class="row2">
+      <div>
+        <label>Cash/bank account</label>
+        <input list="account-list" id="brec-account" placeholder="e.g. Cash" value="Cash" oninput="renderBrecTable()">
+      </div>
+      <div>
+        <label>Upload PDF statement</label>
+        <input type="file" id="brec-pdf-file" accept="application/pdf" onchange="handleBrecPdfUpload(event)">
+      </div>
+    </div>
+    <label>Or paste statement lines (one per line — prefix outgoing amounts with a minus, e.g. "21/06/2026 -79.45 EON")</label>
+    <textarea id="brec-text" rows="3" placeholder="01/06/2026 -389.95 Card payment Laptop&#10;03/06/2026 500.00 Faster payment received"></textarea>
+    <button class="btn-primary" onclick="parseBrecLines()">Import lines</button>
+    <div id="brec-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+
+    <div id="brec-summary" class="row2" style="margin-top:14px;"></div>
+
+    <table class="inbox" style="margin-top:10px;">
+      <thead><tr><th>Date</th><th>Statement description</th><th class="num">Amount</th><th>Status</th><th>Match to ledger transaction</th><th></th></tr></thead>
+      <tbody id="brec-body"></tbody>
+    </table>
+  </div>
+
+  <div class="panel" style="margin-top:20px;">
     <h2>Account Classification</h2>
     <div class="sub" style="margin-bottom:12px;">Tell the app what each account represents, so it can build a Statement of Profit or Loss, Statement of Financial Position, and Statement of Cash Flows.</div>
     <table class="inbox"><thead><tr><th>Account</th><th>Type</th></tr></thead><tbody id="account-types-body"></tbody></table>
@@ -410,12 +437,15 @@ let transactions = [];
 let presets = {};
 let accountTypeOverrides = {};
 
+let bankLines = [];
+
 async function refreshAll() {
   const cid = currentCompany.id;
-  [transactions, presets, accountTypeOverrides] = await Promise.all([
+  [transactions, presets, accountTypeOverrides, bankLines] = await Promise.all([
     api(`/api/companies/${cid}/transactions`),
     api(`/api/companies/${cid}/presets`),
-    api(`/api/companies/${cid}/account-types`)
+    api(`/api/companies/${cid}/account-types`),
+    api(`/api/companies/${cid}/bank-lines`)
   ]);
   render();
 }
@@ -622,7 +652,7 @@ function printCompilation() {
 
 function render() {
   renderAccounts(); renderJournal(); renderAccountList(); renderTrialBalance();
-  renderAccountTypesTable(); renderFinancialStatements();
+  renderAccountTypesTable(); renderFinancialStatements(); renderBrecTable();
 }
 
 function exportCSV() {
@@ -881,6 +911,165 @@ ${text}`;
   } catch (e) {
     statusEl.textContent = 'AI analysis failed: ' + e.message;
   }
+}
+
+// ---------- Bank Reconciliation ----------
+
+function parseBrecLine(line, account) {
+  line = line.trim();
+  if (!line) return null;
+  let date = '';
+  const dateMatch = line.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if (dateMatch) {
+    let [, d, m, y] = dateMatch;
+    if (y.length === 2) y = '20' + y;
+    date = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+    line = line.replace(dateMatch[0], ' ');
+  } else date = new Date().toISOString().slice(0, 10);
+
+  const amountMatches = [...line.matchAll(/-?£?\$?\d[\d,]*\.\d{2}|-?£?\$?\d+/g)];
+  if (!amountMatches.length) return null;
+  let best = amountMatches[0];
+  for (const m of amountMatches) if (Math.abs(parseAmount(m[0])) > Math.abs(parseAmount(best[0]))) best = m;
+  const amount = parseAmount(best[0]);
+  if (!amount) return null;
+
+  let desc = line.replace(best[0], ' ').replace(/\s{2,}/g, ' ').trim().replace(/^[-,\s]+|[-,\s]+$/g, '');
+  if (!desc) desc = 'Statement line';
+  return { cashAccount: account, date, desc, amount };
+}
+
+async function parseBrecLines() {
+  const account = document.getElementById('brec-account').value.trim();
+  const statusEl = document.getElementById('brec-status');
+  if (!account) { statusEl.textContent = 'Pick which cash/bank account this statement belongs to.'; return; }
+  const lines = document.getElementById('brec-text').value.split('\n').map(l => l.trim()).filter(Boolean);
+  if (!lines.length) { statusEl.textContent = 'Nothing to import — paste statement lines first.'; return; }
+  const items = lines.map(l => parseBrecLine(l, account)).filter(Boolean);
+  const result = await api(`/api/companies/${currentCompany.id}/bank-lines/bulk`, { method: 'POST', body: JSON.stringify(items) });
+  statusEl.textContent = `Imported ${result.inserted} of ${lines.length} line(s).`;
+  document.getElementById('brec-text').value = '';
+  await refreshAll();
+}
+
+async function handleBrecPdfUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById('brec-status');
+  statusEl.textContent = 'Reading PDF…';
+  try {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    let allLines = [];
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      const rows = {};
+      for (const item of content.items) {
+        const y = Math.round(item.transform[5]);
+        if (!rows[y]) rows[y] = [];
+        rows[y].push(item.str);
+      }
+      const ys = Object.keys(rows).map(Number).sort((a, b) => b - a);
+      for (const y of ys) allLines.push(rows[y].join(' '));
+    }
+    document.getElementById('brec-text').value = allLines.filter(l => l.trim()).join('\n');
+    statusEl.textContent = `Extracted ${allLines.length} line(s) — check the signs (minus = money out) before importing, then click "Import lines".`;
+  } catch (e) {
+    statusEl.textContent = 'Could not read that PDF: ' + e.message;
+  }
+  event.target.value = '';
+}
+
+function ledgerLinesForCashAccount(account) {
+  // every ledger posting (incl. VAT-expanded) that touches this cash account, each carrying back a reference to its source transaction
+  const out = [];
+  for (const t of transactions) {
+    for (const line of expandTransactionLines(t)) {
+      if (line.account !== account) continue;
+      out.push({ transactionId: t.id, date: t.date, desc: t.desc, amount: line.side === 'debit' ? line.amount : -line.amount });
+    }
+  }
+  return out;
+}
+
+function renderBrecTable() {
+  const account = document.getElementById('brec-account').value.trim() || 'Cash';
+  const lines = bankLines.filter(l => l.cashAccount === account).sort((a, b) => a.date.localeCompare(b.date));
+  const ledgerLines = ledgerLinesForCashAccount(account);
+  const matchedTxIds = new Set(lines.filter(l => l.matchedTransactionId).map(l => l.matchedTransactionId));
+
+  const body = document.getElementById('brec-body');
+  if (!lines.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">No statement lines imported for this account yet.</td></tr>';
+  } else {
+    body.innerHTML = lines.map(l => {
+      const candidates = ledgerLines
+        .filter(tl => Math.abs(tl.amount - l.amount) < 0.005)
+        .sort((a, b) => Math.abs(a.date.localeCompare(l.date)) - Math.abs(b.date.localeCompare(l.date)));
+      const isMatched = !!l.matchedTransactionId;
+      const options = ['<option value="">— none —</option>'].concat(
+        candidates.map(c => `<option value="${c.transactionId}" ${l.matchedTransactionId === c.transactionId ? 'selected' : ''}>${fmtDate(c.date)} — ${escapeHtml(c.desc)} (${fmt(c.amount)})</option>`)
+      ).join('');
+      return `<tr>
+        <td>${fmtDate(l.date)}</td>
+        <td>${escapeHtml(l.desc)}</td>
+        <td class="num" style="color:${l.amount >= 0 ? 'var(--good)' : '#ff5d5d'}">${fmt(l.amount)}</td>
+        <td><span class="confidence ${isMatched ? 'high' : 'low'}">${isMatched ? 'matched' : 'unmatched'}</span></td>
+        <td><select onchange="matchBankLine(${l.id}, this.value)">${options}</select></td>
+        <td>
+          ${!isMatched ? `<button class="btn-secondary" onclick="postAndMatchBrecLine(${l.id})">Post &amp; match</button>` : ''}
+          <button class="btn-danger" onclick="deleteBrecLine(${l.id})">✕</button>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  const statementTotal = lines.reduce((s, l) => s + l.amount, 0);
+  const ledgerBalance = ledgerLines.reduce((s, l) => s + l.amount, 0);
+  const unmatchedLines = lines.filter(l => !l.matchedTransactionId).length;
+  const unmatchedLedger = ledgerLines.filter(tl => !matchedTxIds.has(tl.transactionId)).length;
+  const diff = ledgerBalance - statementTotal;
+
+  document.getElementById('brec-summary').innerHTML = `
+    <div class="panel" style="margin:0;">
+      <div class="sub" style="margin:0;">Ledger balance (${escapeHtml(account)})</div>
+      <div style="font-size:18px; font-weight:700;">${fmt(ledgerBalance)}</div>
+    </div>
+    <div class="panel" style="margin:0;">
+      <div class="sub" style="margin:0;">Statement total imported</div>
+      <div style="font-size:18px; font-weight:700;">${fmt(statementTotal)}</div>
+      <div class="sub" style="margin:4px 0 0; color:${Math.abs(diff) < 0.005 && unmatchedLines === 0 && unmatchedLedger === 0 ? 'var(--good)' : '#ff5d5d'};">
+        ${unmatchedLines === 0 && unmatchedLedger === 0 && Math.abs(diff) < 0.005 ? 'Fully reconciled' : `${unmatchedLines} statement line(s) and ${unmatchedLedger} ledger transaction(s) unmatched`}
+      </div>
+    </div>`;
+}
+
+async function matchBankLine(lineId, transactionId) {
+  await api(`/api/companies/${currentCompany.id}/bank-lines/${lineId}/match`, {
+    method: 'POST', body: JSON.stringify({ transactionId: transactionId ? parseInt(transactionId, 10) : null })
+  });
+  await refreshAll();
+}
+
+async function deleteBrecLine(lineId) {
+  await api(`/api/companies/${currentCompany.id}/bank-lines/${lineId}`, { method: 'DELETE' });
+  await refreshAll();
+}
+
+async function postAndMatchBrecLine(lineId) {
+  const line = bankLines.find(l => l.id === lineId);
+  if (!line) return;
+  const cat = categorize(line.desc);
+  const moneyIn = line.amount > 0;
+  const debit = moneyIn ? line.cashAccount : cat.debit;
+  const credit = moneyIn ? cat.credit : line.cashAccount;
+  const result = await api(`/api/companies/${currentCompany.id}/transactions`, {
+    method: 'POST',
+    body: JSON.stringify({ date: line.date, desc: line.desc, amount: Math.abs(line.amount), debit, credit, taxYear: '' })
+  });
+  await matchBankLine(lineId, result.id);
 }
 
 // ---------- Account classification + financial statements ----------

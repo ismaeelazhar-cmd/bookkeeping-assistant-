@@ -76,6 +76,17 @@ def init_db():
             type TEXT NOT NULL,
             PRIMARY KEY (company_id, account_name)
         );
+
+        CREATE TABLE IF NOT EXISTS bank_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            cash_account TEXT NOT NULL,
+            date TEXT NOT NULL,
+            desc TEXT NOT NULL,
+            amount REAL NOT NULL,
+            matched_transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     # migrate older databases that predate the VAT columns
@@ -368,6 +379,72 @@ def set_account_type(company_id):
         "INSERT INTO account_types (company_id, account_name, type) VALUES (?,?,?) "
         "ON CONFLICT(company_id, account_name) DO UPDATE SET type = excluded.type",
         (company_id, name, type_),
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------- bank reconciliation ----------
+
+@app.route("/api/companies/<int:company_id>/bank-lines", methods=["GET"])
+@login_required
+@company_required
+def list_bank_lines(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, cash_account as cashAccount, date, desc, amount, matched_transaction_id as matchedTransactionId "
+        "FROM bank_lines WHERE company_id = ? ORDER BY date",
+        (company_id,),
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/bank-lines/bulk", methods=["POST"])
+@login_required
+@company_required
+def bulk_create_bank_lines(company_id):
+    items = request.get_json(force=True) or []
+    db = get_db()
+    inserted = 0
+    for it in items:
+        cash_account, date, desc, amount = it.get("cashAccount"), it.get("date"), it.get("desc"), it.get("amount")
+        if not all([cash_account, date, desc]) or amount is None or float(amount) == 0:
+            continue
+        db.execute(
+            "INSERT INTO bank_lines (company_id, cash_account, date, desc, amount) VALUES (?,?,?,?,?)",
+            (company_id, cash_account, date, desc, float(amount)),
+        )
+        inserted += 1
+    db.commit()
+    return jsonify({"inserted": inserted})
+
+
+@app.route("/api/companies/<int:company_id>/bank-lines/<int:line_id>", methods=["DELETE"])
+@login_required
+@company_required
+def delete_bank_line(company_id, line_id):
+    db = get_db()
+    db.execute("DELETE FROM bank_lines WHERE id = ? AND company_id = ?", (line_id, company_id))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/bank-lines/<int:line_id>/match", methods=["POST"])
+@login_required
+@company_required
+def match_bank_line(company_id, line_id):
+    data = request.get_json(force=True) or {}
+    tx_id = data.get("transactionId")
+    db = get_db()
+    if tx_id is not None:
+        tx = db.execute(
+            "SELECT id FROM transactions WHERE id = ? AND company_id = ?", (tx_id, company_id)
+        ).fetchone()
+        if tx is None:
+            return jsonify({"error": "Transaction not found."}), 404
+    db.execute(
+        "UPDATE bank_lines SET matched_transaction_id = ? WHERE id = ? AND company_id = ?",
+        (tx_id, line_id, company_id),
     )
     db.commit()
     return jsonify({"ok": True})
