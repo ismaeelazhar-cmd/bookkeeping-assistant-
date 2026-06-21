@@ -6,36 +6,64 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <style>
   :root {
-    --bg: #0f1115; --panel: #181b22; --border: #2a2e38; --text: #e6e8ee;
-    --muted: #8b92a3; --accent: #4f8cff; --debit: #4f8cff; --credit: #ff7b54; --good: #3ddc97;
+    /* Claude-style warm, editorial palette */
+    --bg: #F5F2EA;            /* warm cream page background */
+    --panel: #FFFFFF;         /* card surfaces */
+    --panel-soft: #FAF7F0;    /* subtle alt surface (hovers, table stripes) */
+    --border: #E4DECF;        /* warm hairline border */
+    --text: #2B2825;          /* warm near-black */
+    --muted: #8C8273;         /* warm grey for secondary text */
+    --accent: #C2682F;        /* Claude terracotta */
+    --accent-hover: #A8551F;
+    --accent-soft: #F1E2D4;   /* terracotta tint for pills/badges */
+    --debit: #5B7A99;         /* muted slate blue */
+    --credit: #C2682F;        /* terracotta, matches accent */
+    --good: #4B7B5C;          /* muted sage green */
+    --bad: #B14A3B;           /* muted brick red */
+    --bad-soft: #F4E3DF;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); padding: 24px; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
+  body {
+    margin: 0;
+    font-family: "Iowan Old Style", "Georgia", "Times New Roman", serif;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 28px;
+    line-height: 1.45;
+  }
+  h1, h2 { font-family: Georgia, "Iowan Old Style", "Times New Roman", serif; font-weight: 600; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
   .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
   .layout { display: grid; grid-template-columns: 380px 1fr; gap: 20px; align-items: start; }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
-  .panel h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
-  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
-  input, select { width: 100%; background: #11141a; border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 6px; font-size: 14px; }
-  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; box-shadow: 0 1px 2px rgba(43,40,37,0.03); }
+  .panel h2 { font-size: 13px; margin: 0 0 12px; color: var(--accent); text-transform: uppercase; letter-spacing: .07em; font-weight: 700; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  input, select {
+    width: 100%; background: var(--panel-soft); border: 1px solid var(--border); color: var(--text);
+    padding: 8px 10px; border-radius: 7px; font-size: 14px; font-family: inherit;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  button { cursor: pointer; border: none; border-radius: 6px; padding: 9px 14px; font-size: 13px; font-weight: 600; }
+  button { cursor: pointer; border: none; border-radius: 7px; padding: 9px 16px; font-size: 13px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; transition: background .12s ease, opacity .12s ease; }
   .btn-primary { background: var(--accent); color: #fff; width: 100%; margin-top: 16px; }
-  .btn-secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); }
-  .btn-danger { background: transparent; color: #ff5d5d; border: 1px solid #3a2424; padding: 4px 8px; font-size: 11px; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-secondary { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover { background: var(--panel-soft); border-color: var(--accent); }
+  .btn-danger { background: transparent; color: var(--bad); border: 1px solid var(--bad-soft); padding: 4px 8px; font-size: 11px; }
+  .btn-danger:hover { background: var(--bad-soft); }
   .toolbar { display: flex; gap: 8px; margin-bottom: 16px; }
   .accounts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
-  .taccount { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
-  .taccount-title { padding: 10px 14px; font-weight: 700; font-size: 14px; border-bottom: 2px solid var(--border); display: flex; justify-content: space-between; align-items: baseline; }
-  .taccount-title .bal { font-size: 12px; color: var(--muted); font-weight: 500; }
+  .taccount { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .taccount-title { padding: 10px 14px; font-weight: 700; font-size: 14px; border-bottom: 2px solid var(--border); display: flex; justify-content: space-between; align-items: baseline; background: var(--panel-soft); font-family: Georgia, serif; }
+  .taccount-title .bal { font-size: 12px; color: var(--muted); font-weight: 500; font-family: -apple-system, sans-serif; }
   .tbody { display: grid; grid-template-columns: 1fr 1fr; }
   .tside { padding: 8px; min-height: 40px; }
   .tside.debit { border-right: 1px solid var(--border); }
   .tside-label { font-size: 10px; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; padding: 0 6px 6px; }
   .tline { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; padding: 4px 6px; border-radius: 4px; }
-  .tline:hover { background: #1f232c; }
+  .tline:hover { background: var(--panel-soft); }
   .tline .desc { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tline .amt.debit { color: var(--debit); font-weight: 600; }
   .tline .amt.credit { color: var(--credit); font-weight: 600; }
@@ -47,20 +75,20 @@
   table.journal th, table.journal td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; }
   table.journal th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
   table.journal td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  table.journal tr:hover { background: #1c1f27; }
-  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; background: #1f232c; color: var(--muted); }
+  table.journal tr:hover { background: var(--panel-soft); }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; background: var(--accent-soft); color: var(--accent-hover); font-weight: 600; }
   .empty { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
-  textarea { width: 100%; background: #11141a; border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 6px; font-size: 13px; font-family: inherit; resize: vertical; }
-  textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { width: 100%; background: var(--panel-soft); border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 7px; font-size: 13px; font-family: inherit; resize: vertical; }
+  textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
   table.inbox { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 10px; }
   table.inbox th, table.inbox td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; }
   table.inbox th { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; }
   table.inbox input, table.inbox select { padding: 5px 6px; font-size: 12.5px; }
   table.inbox td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   table.inbox td.chk { width: 26px; text-align: center; }
-  .confidence { font-size: 10px; padding: 1px 6px; border-radius: 999px; }
-  .confidence.high { background: rgba(61,220,151,.15); color: var(--good); }
-  .confidence.low { background: rgba(255,93,93,.15); color: #ff5d5d; }
+  .confidence { font-size: 10px; padding: 1px 6px; border-radius: 999px; font-weight: 600; }
+  .confidence.high { background: rgba(75,123,92,.13); color: var(--good); }
+  .confidence.low { background: var(--bad-soft); color: var(--bad); }
   table.trial { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
   table.trial td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; }
   table.trial td.num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -68,11 +96,11 @@
   .center-screen { min-height: 70vh; display: flex; align-items: center; justify-content: center; }
   .auth-card { width: 360px; }
   .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-  .topbar .who { font-size: 13px; color: var(--muted); }
-  .company-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
-  .company-card:hover { border-color: var(--accent); }
+  .topbar .who { font-size: 13px; color: var(--muted); font-family: -apple-system, sans-serif; }
+  .company-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: border-color .12s ease; }
+  .company-card:hover { border-color: var(--accent); box-shadow: 0 1px 4px rgba(43,40,37,0.06); }
   .company-list { max-width: 480px; margin: 0 auto; }
-  .err { color: #ff5d5d; font-size: 12px; margin-top: 8px; min-height: 14px; }
+  .err { color: var(--bad); font-size: 12px; margin-top: 8px; min-height: 14px; }
 </style>
 </head>
 <body>
@@ -165,7 +193,7 @@
       <div class="sub" id="vat-preview" style="margin:4px 0 0;"></div>
 
       <button class="btn-primary" onclick="addTransaction()">Post Transaction</button>
-      <div id="form-error" style="color:#ff5d5d; font-size:12px; margin-top:8px;"></div>
+      <div id="form-error" style="color:var(--bad); font-size:12px; margin-top:8px;"></div>
 
       <h2 style="margin-top:24px;">Data</h2>
       <div class="toolbar">
@@ -173,7 +201,7 @@
         <button class="btn-secondary" onclick="document.getElementById('import-file').click()">Import CSV</button>
         <input type="file" id="import-file" accept=".csv" style="display:none" onchange="importCSV(event)">
       </div>
-      <button class="btn-secondary" style="width:100%; color:#ff5d5d;" onclick="if(confirm('Clear all transactions for this company?')) clearAll()">Clear all data</button>
+      <button class="btn-secondary" style="width:100%; color:var(--bad);" onclick="if(confirm('Clear all transactions for this company?')) clearAll()">Clear all data</button>
 
       <h2 style="margin-top:24px;">Period Lock</h2>
       <div class="sub" style="margin-bottom:8px;">Once you've filed a VAT return or finalized accounts up to a date, lock it — transactions on or before that date can no longer be added, edited, or deleted by anyone.</div>
@@ -705,7 +733,7 @@ function renderTrialBalance() {
   if (!names.length) { statusEl.textContent = ''; return; }
   const balanced = Math.abs(debitSum - creditSum) < 0.005;
   statusEl.textContent = balanced ? 'balanced' : 'out of balance';
-  statusEl.style.color = balanced ? 'var(--good)' : '#ff5d5d';
+  statusEl.style.color = balanced ? 'var(--good)' : 'var(--bad)';
 }
 
 function printCompilation() {
@@ -1097,7 +1125,7 @@ function renderBrecTable() {
       return `<tr>
         <td>${fmtDate(l.date)}</td>
         <td>${escapeHtml(l.desc)}</td>
-        <td class="num" style="color:${l.amount >= 0 ? 'var(--good)' : '#ff5d5d'}">${fmt(l.amount)}</td>
+        <td class="num" style="color:${l.amount >= 0 ? 'var(--good)' : 'var(--bad)'}">${fmt(l.amount)}</td>
         <td><span class="confidence ${isMatched ? 'high' : 'low'}">${isMatched ? 'matched' : 'unmatched'}</span></td>
         <td><select onchange="matchBankLine(${l.id}, this.value)">${options}</select></td>
         <td>
@@ -1122,7 +1150,7 @@ function renderBrecTable() {
     <div class="panel" style="margin:0;">
       <div class="sub" style="margin:0;">Statement total imported</div>
       <div style="font-size:18px; font-weight:700;">${fmt(statementTotal)}</div>
-      <div class="sub" style="margin:4px 0 0; color:${Math.abs(diff) < 0.005 && unmatchedLines === 0 && unmatchedLedger === 0 ? 'var(--good)' : '#ff5d5d'};">
+      <div class="sub" style="margin:4px 0 0; color:${Math.abs(diff) < 0.005 && unmatchedLines === 0 && unmatchedLedger === 0 ? 'var(--good)' : 'var(--bad)'};">
         ${unmatchedLines === 0 && unmatchedLedger === 0 && Math.abs(diff) < 0.005 ? 'Fully reconciled' : `${unmatchedLines} statement line(s) and ${unmatchedLedger} ledger transaction(s) unmatched`}
       </div>
     </div>`;
@@ -1329,7 +1357,7 @@ function renderFinancialStatements() {
   const checkEl = document.getElementById('cashflow-check');
   const matches = Math.abs(netChange - cashBalance) < 0.005;
   checkEl.textContent = matches ? 'reconciles to ledger' : `check: ledger cash = ${fmt(cashBalance)}`;
-  checkEl.style.color = matches ? 'var(--good)' : '#ff5d5d';
+  checkEl.style.color = matches ? 'var(--good)' : 'var(--bad)';
 }
 
 function printFinancialStatements() {
@@ -1553,7 +1581,7 @@ async function loadAuditLog() {
     return `<tr>
       <td>${escapeHtml(e.createdAt)}</td>
       <td>${escapeHtml(e.userEmail)}</td>
-      <td style="color:${e.action === 'delete' ? '#ff5d5d' : 'var(--good)'}">${escapeHtml(e.action)}</td>
+      <td style="color:${e.action === 'delete' ? 'var(--bad)' : 'var(--good)'}">${escapeHtml(e.action)}</td>
       <td>#${e.entityId}</td>
       <td>${detail}</td>
     </tr>`;
