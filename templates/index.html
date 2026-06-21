@@ -286,6 +286,42 @@
   </div>
 
   <div class="panel" style="margin-top:20px;">
+    <h2>Fixed Asset Register</h2>
+    <div class="sub" style="margin-bottom:12px;">Register a non-current asset to track its depreciation. "Run Depreciation" posts one month's charge per registered asset as a normal Dr Depreciation Expense / Cr Accumulated Depreciation transaction — so it flows straight into the P&L and reduces net book value on the Statement of Financial Position.</div>
+
+    <div class="row2">
+      <div><label>Asset name</label><input type="text" id="fa-name" placeholder="e.g. Laptop"></div>
+      <div><label>Asset account</label><input list="account-list" id="fa-account" placeholder="e.g. Computer Equipment"></div>
+    </div>
+    <div class="row2">
+      <div><label>Cost</label><input type="number" id="fa-cost" step="0.01" min="0" placeholder="0.00"></div>
+      <div><label>Purchase date</label><input type="date" id="fa-date"></div>
+    </div>
+    <div class="row2">
+      <div><label>Useful life (years)</label><input type="number" id="fa-life" step="0.5" min="0.5" placeholder="3"></div>
+      <div><label>Residual value (optional)</label><input type="number" id="fa-residual" step="0.01" min="0" placeholder="0.00"></div>
+    </div>
+    <label>Depreciation method</label>
+    <select id="fa-method">
+      <option value="straight_line">Straight-line</option>
+      <option value="reducing_balance">Reducing balance (uses 100/useful-life as the annual %)</option>
+    </select>
+    <button class="btn-primary" onclick="addFixedAsset()">Register asset</button>
+    <div id="fa-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+
+    <table class="inbox" style="margin-top:14px;">
+      <thead><tr><th>Asset</th><th>Account</th><th class="num">Cost</th><th class="num">Accum. Depreciation</th><th class="num">Net Book Value</th><th></th></tr></thead>
+      <tbody id="fa-body"></tbody>
+    </table>
+
+    <div class="row2" style="margin-top:14px;">
+      <div><label>Run depreciation for month</label><input type="month" id="fa-run-month"></div>
+      <div><label>&nbsp;</label><button class="btn-secondary" style="width:100%;" onclick="runDepreciation()">Run Depreciation</button></div>
+    </div>
+    <div id="fa-run-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+  </div>
+
+  <div class="panel" style="margin-top:20px;">
     <h2>Account Classification</h2>
     <div class="sub" style="margin-bottom:12px;">Tell the app what each account represents, so it can build a Statement of Profit or Loss, Statement of Financial Position, and Statement of Cash Flows.</div>
     <table class="inbox"><thead><tr><th>Account</th><th>Type</th></tr></thead><tbody id="account-types-body"></tbody></table>
@@ -479,11 +515,12 @@ let bankLines = [];
 
 async function refreshAll() {
   const cid = currentCompany.id;
-  [transactions, presets, accountTypeOverrides, bankLines] = await Promise.all([
+  [transactions, presets, accountTypeOverrides, bankLines, fixedAssets] = await Promise.all([
     api(`/api/companies/${cid}/transactions`),
     api(`/api/companies/${cid}/presets`),
     api(`/api/companies/${cid}/account-types`),
-    api(`/api/companies/${cid}/bank-lines`)
+    api(`/api/companies/${cid}/bank-lines`),
+    api(`/api/companies/${cid}/fixed-assets`)
   ]);
   render();
   loadAuditLog();
@@ -696,7 +733,7 @@ function printCompilation() {
 
 function render() {
   renderAccounts(); renderJournal(); renderAccountList(); renderTrialBalance();
-  renderAccountTypesTable(); renderFinancialStatements(); renderBrecTable();
+  renderAccountTypesTable(); renderFinancialStatements(); renderBrecTable(); renderFixedAssets();
 }
 
 function exportCSV() {
@@ -1141,6 +1178,8 @@ function guessAccountType(name) {
   if (n.includes('receivable') || n.includes('recievable')) return 'current_asset';
   if (n.includes('sale') || n.includes('revenue') || n.includes('income')) return 'revenue';
   if (n.includes('cost of sale') || n.includes('purchase')) return 'cogs';
+  if (n.includes('accumulated depreciation')) return 'noncurrent_asset'; // contra-asset: only ever credited, so it nets negative within this bucket
+  if (n.includes('depreciation')) return 'expense';
   if (n.includes('equipment') || n.includes('vehicle') || n.includes('property') || n.includes('premises') || n.includes('fixtures')) return 'noncurrent_asset';
   return 'expense';
 }
@@ -1337,6 +1376,125 @@ function renderVatReturn() {
     lineRow('Box 7 — Total value of purchases, excluding VAT', netPurchases),
   ].join('');
   if (!vatTxns.length) body.innerHTML = '<tr><td class="empty">No VAT-tagged transactions in this period.</td></tr>';
+}
+
+// ---------- Fixed asset register ----------
+
+let fixedAssets = [];
+
+function accumulatedDepreciation(accumAccount) {
+  const accounts = buildAccounts();
+  const acc = accounts[accumAccount];
+  if (!acc) return 0;
+  const debitTotal = acc.debits.reduce((s, t) => s + t.amount, 0);
+  const creditTotal = acc.credits.reduce((s, t) => s + t.amount, 0);
+  return creditTotal - debitTotal; // accumulated depreciation is a credit balance
+}
+
+function renderFixedAssets() {
+  const body = document.getElementById('fa-body');
+  if (!fixedAssets.length) { body.innerHTML = '<tr><td colspan="6" class="empty">No fixed assets registered yet.</td></tr>'; return; }
+  body.innerHTML = fixedAssets.map(a => {
+    const accum = accumulatedDepreciation(a.accumAccount);
+    const nbv = a.cost - accum;
+    return `<tr>
+      <td>${escapeHtml(a.name)}</td>
+      <td>${escapeHtml(a.assetAccount)}</td>
+      <td class="num">${fmt(a.cost)}</td>
+      <td class="num">${fmt(accum)}</td>
+      <td class="num">${fmt(nbv)}</td>
+      <td><button class="btn-danger" onclick="deleteFixedAsset(${a.id})">✕</button></td>
+    </tr>`;
+  }).join('');
+}
+
+async function addFixedAsset() {
+  const name = document.getElementById('fa-name').value.trim();
+  const assetAccount = document.getElementById('fa-account').value.trim();
+  const cost = parseFloat(document.getElementById('fa-cost').value);
+  const purchaseDate = document.getElementById('fa-date').value;
+  const usefulLifeYears = parseFloat(document.getElementById('fa-life').value);
+  const residualValue = parseFloat(document.getElementById('fa-residual').value) || 0;
+  const method = document.getElementById('fa-method').value;
+  const statusEl = document.getElementById('fa-status');
+
+  if (!name || !assetAccount || !cost || cost <= 0 || !purchaseDate || !usefulLifeYears || usefulLifeYears <= 0) {
+    statusEl.textContent = 'Fill in name, asset account, cost, purchase date, and useful life.'; return;
+  }
+  statusEl.textContent = '';
+
+  await api(`/api/companies/${currentCompany.id}/fixed-assets`, {
+    method: 'POST',
+    body: JSON.stringify({ name, assetAccount, cost, purchaseDate, usefulLifeYears, residualValue, method })
+  });
+
+  document.getElementById('fa-name').value = '';
+  document.getElementById('fa-account').value = '';
+  document.getElementById('fa-cost').value = '';
+  document.getElementById('fa-date').value = '';
+  document.getElementById('fa-life').value = '';
+  document.getElementById('fa-residual').value = '';
+  await loadFixedAssets();
+}
+
+async function deleteFixedAsset(id) {
+  if (!confirm('Remove this asset from the register? Depreciation already posted to the ledger stays — delete those transactions separately if needed.')) return;
+  await api(`/api/companies/${currentCompany.id}/fixed-assets/${id}`, { method: 'DELETE' });
+  await loadFixedAssets();
+}
+
+async function loadFixedAssets() {
+  fixedAssets = await api(`/api/companies/${currentCompany.id}/fixed-assets`);
+  renderFixedAssets();
+}
+
+function endOfMonth(monthStr) {
+  const [y, m] = monthStr.split('-').map(Number);
+  const last = new Date(y, m, 0).getDate();
+  return `${y}-${String(m).padStart(2, '0')}-${String(last).padStart(2, '0')}`;
+}
+
+async function runDepreciation() {
+  const monthStr = document.getElementById('fa-run-month').value;
+  const statusEl = document.getElementById('fa-run-status');
+  if (!monthStr) { statusEl.textContent = 'Pick a month first.'; return; }
+  const runDate = endOfMonth(monthStr);
+
+  const items = [];
+  const skippedAlready = [];
+  for (const a of fixedAssets) {
+    if (a.purchaseDate > runDate) continue; // not owned yet
+    const desc = `Depreciation — ${monthStr} — ${a.name}`;
+    if (transactions.some(t => t.desc === desc)) { skippedAlready.push(a.name); continue; }
+
+    const depreciable = a.cost - (a.residualValue || 0);
+    const accumSoFar = accumulatedDepreciation(a.accumAccount);
+    const remaining = depreciable - accumSoFar;
+    if (remaining <= 0.005) continue; // fully depreciated
+
+    let charge;
+    if (a.method === 'reducing_balance') {
+      const annualRate = 1 / a.usefulLifeYears;
+      charge = (a.cost - accumSoFar) * (annualRate / 12);
+    } else {
+      charge = depreciable / a.usefulLifeYears / 12;
+    }
+    charge = Math.min(charge, remaining);
+    if (charge <= 0.005) continue;
+
+    items.push({ date: runDate, desc, amount: charge, debit: a.depreciationAccount, credit: a.accumAccount, taxYear: '' });
+  }
+
+  if (!items.length) {
+    statusEl.textContent = skippedAlready.length ? `Already run for ${skippedAlready.join(', ')}.` : 'Nothing to depreciate for that month.';
+    return;
+  }
+
+  const result = await api(`/api/companies/${currentCompany.id}/transactions/bulk`, { method: 'POST', body: JSON.stringify(items) });
+  statusEl.textContent = `Posted depreciation for ${result.inserted} asset(s).` +
+    (skippedAlready.length ? ` Skipped ${skippedAlready.join(', ')} (already run for this month).` : '') +
+    (result.skippedLocked ? ` ${result.skippedLocked} fell in a locked period.` : '');
+  await refreshAll();
 }
 
 // ---------- Opening balances ----------

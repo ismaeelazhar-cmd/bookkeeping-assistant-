@@ -102,6 +102,21 @@ def init_db():
             after_json TEXT DEFAULT '',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS fixed_assets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            asset_account TEXT NOT NULL,
+            cost REAL NOT NULL,
+            purchase_date TEXT NOT NULL,
+            useful_life_years REAL NOT NULL,
+            residual_value REAL DEFAULT 0,
+            method TEXT DEFAULT 'straight_line',
+            depreciation_account TEXT DEFAULT 'Depreciation Expense',
+            accum_account TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     # migrate older databases that predate the VAT columns
@@ -417,6 +432,60 @@ def list_presets(company_id):
         "SELECT desc_key, debit, credit FROM presets WHERE company_id = ?", (company_id,)
     ).fetchall()
     return jsonify({r["desc_key"]: {"debit": r["debit"], "credit": r["credit"]} for r in rows})
+
+
+# ---------- fixed assets ----------
+
+@app.route("/api/companies/<int:company_id>/fixed-assets", methods=["GET"])
+@login_required
+@company_required
+def list_fixed_assets(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, name, asset_account as assetAccount, cost, purchase_date as purchaseDate, "
+        "useful_life_years as usefulLifeYears, residual_value as residualValue, method, "
+        "depreciation_account as depreciationAccount, accum_account as accumAccount "
+        "FROM fixed_assets WHERE company_id = ? ORDER BY purchase_date",
+        (company_id,),
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/fixed-assets", methods=["POST"])
+@login_required
+@company_required
+def create_fixed_asset(company_id):
+    data = request.get_json(force=True) or {}
+    name, asset_account, cost, purchase_date, useful_life = (
+        data.get("name"), data.get("assetAccount"), data.get("cost"),
+        data.get("purchaseDate"), data.get("usefulLifeYears")
+    )
+    if not all([name, asset_account, purchase_date]) or not cost or float(cost) <= 0 or not useful_life or float(useful_life) <= 0:
+        return jsonify({"error": "Name, asset account, cost, purchase date, and useful life are all required."}), 400
+
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO fixed_assets (company_id, name, asset_account, cost, purchase_date, useful_life_years, "
+        "residual_value, method, depreciation_account, accum_account) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            company_id, name, asset_account, float(cost), purchase_date, float(useful_life),
+            float(data.get("residualValue") or 0), data.get("method", "straight_line"),
+            data.get("depreciationAccount") or "Depreciation Expense",
+            data.get("accumAccount") or f"Accumulated Depreciation — {name}",
+        ),
+    )
+    db.commit()
+    return jsonify({"id": cur.lastrowid})
+
+
+@app.route("/api/companies/<int:company_id>/fixed-assets/<int:asset_id>", methods=["DELETE"])
+@login_required
+@company_required
+def delete_fixed_asset(company_id, asset_id):
+    db = get_db()
+    db.execute("DELETE FROM fixed_assets WHERE id = ? AND company_id = ?", (asset_id, company_id))
+    db.commit()
+    return jsonify({"ok": True})
 
 
 # ---------- audit log ----------
