@@ -270,6 +270,22 @@
   </div>
 
   <div class="panel" style="margin-top:20px;">
+    <h2>Opening Balances</h2>
+    <div class="sub" style="margin-bottom:12px;">Onboarding a business that already has history? Enter its balances as of a chosen date here instead of starting from zero. Each row posts as a normal transaction against "Opening Balance Equity" — it's regular double-entry, not a special case, so it shows up in the ledger and can be edited/deleted like anything else.</div>
+    <label>As of date</label>
+    <input type="date" id="ob-date">
+    <table class="inbox" style="margin-top:10px;">
+      <thead><tr><th>Account</th><th class="num">Amount</th><th>Side</th><th></th></tr></thead>
+      <tbody id="ob-rows"></tbody>
+    </table>
+    <div class="toolbar" style="margin-top:10px;">
+      <button class="btn-secondary" onclick="addOpeningBalanceRow()">+ Add row</button>
+      <button class="btn-primary" style="margin-top:0;" onclick="postOpeningBalances()">Post opening balances</button>
+    </div>
+    <div id="ob-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+  </div>
+
+  <div class="panel" style="margin-top:20px;">
     <h2>Account Classification</h2>
     <div class="sub" style="margin-bottom:12px;">Tell the app what each account represents, so it can build a Statement of Profit or Loss, Statement of Financial Position, and Statement of Cash Flows.</div>
     <table class="inbox"><thead><tr><th>Account</th><th>Type</th></tr></thead><tbody id="account-types-body"></tbody></table>
@@ -427,6 +443,7 @@ async function openCompany(id) {
   document.getElementById('f-default-credit').value = currentCompany.default_credit_account || '';
   document.getElementById('ai-api-key').value = currentCompany.ai_api_key || '';
   document.getElementById('f-locked-until').value = currentCompany.locked_until || '';
+  document.getElementById('ob-rows').innerHTML = ''; obRowCount = 0; addOpeningBalanceRow();
   show('app-screen');
   await refreshAll();
 }
@@ -1118,7 +1135,7 @@ function guessAccountType(name) {
   if (n === 'cash' || n.includes('bank')) return 'cash';
   if (n.includes('vat')) return 'current_liability';
   if (n.includes('drawing')) return 'drawings';
-  if (n === 'capital' || n.includes('capital introduced') || n.includes('share capital') || n.includes('share premium')) return 'equity';
+  if (n === 'capital' || n.includes('capital introduced') || n.includes('share capital') || n.includes('share premium') || n.includes('opening balance equity')) return 'equity';
   if (n.includes('loan')) return 'noncurrent_liability';
   if (n.includes('payable')) return 'current_liability';
   if (n.includes('receivable') || n.includes('recievable')) return 'current_asset';
@@ -1320,6 +1337,49 @@ function renderVatReturn() {
     lineRow('Box 7 — Total value of purchases, excluding VAT', netPurchases),
   ].join('');
   if (!vatTxns.length) body.innerHTML = '<tr><td class="empty">No VAT-tagged transactions in this period.</td></tr>';
+}
+
+// ---------- Opening balances ----------
+
+let obRowCount = 0;
+
+function addOpeningBalanceRow() {
+  obRowCount++;
+  const tbody = document.getElementById('ob-rows');
+  const tr = document.createElement('tr');
+  tr.id = `ob-row-${obRowCount}`;
+  tr.innerHTML = `
+    <td><input list="account-list" placeholder="e.g. Cash"></td>
+    <td class="num"><input type="number" step="0.01" min="0" placeholder="0.00" style="text-align:right;"></td>
+    <td><select><option value="debit">Debit</option><option value="credit">Credit</option></select></td>
+    <td><button class="btn-danger" onclick="document.getElementById('ob-row-${obRowCount}').remove()">✕</button></td>`;
+  tbody.appendChild(tr);
+}
+
+async function postOpeningBalances() {
+  const date = document.getElementById('ob-date').value;
+  const statusEl = document.getElementById('ob-status');
+  if (!date) { statusEl.textContent = 'Pick an "as of" date first.'; return; }
+
+  const rows = [...document.getElementById('ob-rows').querySelectorAll('tr')];
+  const items = [];
+  for (const row of rows) {
+    const [accountInput, amountInput, sideSelect] = row.querySelectorAll('input, select');
+    const account = accountInput.value.trim();
+    const amount = parseFloat(amountInput.value);
+    const side = sideSelect.value;
+    if (!account || !amount || amount <= 0) continue;
+    const debit = side === 'debit' ? account : 'Opening Balance Equity';
+    const credit = side === 'debit' ? 'Opening Balance Equity' : account;
+    items.push({ date, desc: `Opening balance — ${account}`, amount, debit, credit, taxYear: '' });
+  }
+  if (!items.length) { statusEl.textContent = 'Add at least one account with a positive amount.'; return; }
+
+  const result = await api(`/api/companies/${currentCompany.id}/transactions/bulk`, { method: 'POST', body: JSON.stringify(items) });
+  statusEl.textContent = `Posted ${result.inserted} opening balance(s).` + (result.skippedLocked ? ` ${result.skippedLocked} fell in a locked period.` : '');
+  document.getElementById('ob-rows').innerHTML = '';
+  obRowCount = 0;
+  await refreshAll();
 }
 
 // ---------- Audit log ----------
