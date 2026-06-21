@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Bookkeeping — T-Account Ledger</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --border: #2a2e38; --text: #e6e8ee;
+    --muted: #8b92a3; --accent: #4f8cff; --debit: #4f8cff; --credit: #ff7b54; --good: #3ddc97;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); padding: 24px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .layout { display: grid; grid-template-columns: 380px 1fr; gap: 20px; align-items: start; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .panel h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input, select { width: 100%; background: #11141a; border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 6px; font-size: 14px; }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  button { cursor: pointer; border: none; border-radius: 6px; padding: 9px 14px; font-size: 13px; font-weight: 600; }
+  .btn-primary { background: var(--accent); color: #fff; width: 100%; margin-top: 16px; }
+  .btn-secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .btn-danger { background: transparent; color: #ff5d5d; border: 1px solid #3a2424; padding: 4px 8px; font-size: 11px; }
+  .toolbar { display: flex; gap: 8px; margin-bottom: 16px; }
+  .accounts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+  .taccount { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .taccount-title { padding: 10px 14px; font-weight: 700; font-size: 14px; border-bottom: 2px solid var(--border); display: flex; justify-content: space-between; align-items: baseline; }
+  .taccount-title .bal { font-size: 12px; color: var(--muted); font-weight: 500; }
+  .tbody { display: grid; grid-template-columns: 1fr 1fr; }
+  .tside { padding: 8px; min-height: 40px; }
+  .tside.debit { border-right: 1px solid var(--border); }
+  .tside-label { font-size: 10px; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; padding: 0 6px 6px; }
+  .tline { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; padding: 4px 6px; border-radius: 4px; }
+  .tline:hover { background: #1f232c; }
+  .tline .desc { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tline .amt.debit { color: var(--debit); font-weight: 600; }
+  .tline .amt.credit { color: var(--credit); font-weight: 600; }
+  .tfoot { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--border); font-size: 12px; font-weight: 700; }
+  .tfoot div { padding: 6px 10px; }
+  .tfoot .debit { border-right: 1px solid var(--border); color: var(--debit); }
+  .tfoot .credit { color: var(--credit); }
+  table.journal { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  table.journal th, table.journal td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; }
+  table.journal th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+  table.journal td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.journal tr:hover { background: #1c1f27; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; background: #1f232c; color: var(--muted); }
+  .empty { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
+  textarea { width: 100%; background: #11141a; border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 6px; font-size: 13px; font-family: inherit; resize: vertical; }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  table.inbox { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 10px; }
+  table.inbox th, table.inbox td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; }
+  table.inbox th { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; }
+  table.inbox input, table.inbox select { padding: 5px 6px; font-size: 12.5px; }
+  table.inbox td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.inbox td.chk { width: 26px; text-align: center; }
+  .confidence { font-size: 10px; padding: 1px 6px; border-radius: 999px; }
+  .confidence.high { background: rgba(61,220,151,.15); color: var(--good); }
+  .confidence.low { background: rgba(255,93,93,.15); color: #ff5d5d; }
+  table.trial { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  table.trial td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; }
+  table.trial td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .center-screen { min-height: 70vh; display: flex; align-items: center; justify-content: center; }
+  .auth-card { width: 360px; }
+  .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .topbar .who { font-size: 13px; color: var(--muted); }
+  .company-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
+  .company-card:hover { border-color: var(--accent); }
+  .company-list { max-width: 480px; margin: 0 auto; }
+  .err { color: #ff5d5d; font-size: 12px; margin-top: 8px; min-height: 14px; }
+</style>
+</head>
+<body>
+
+<div id="auth-screen" class="center-screen" style="display:none;">
+  <div class="panel auth-card">
+    <h1 id="auth-title">Log in</h1>
+    <div class="sub">Bookkeeping — multi-company ledger</div>
+    <label>Email</label>
+    <input type="email" id="auth-email">
+    <label>Password</label>
+    <input type="password" id="auth-password">
+    <button class="btn-primary" id="auth-submit" onclick="submitAuth()">Log in</button>
+    <div class="err" id="auth-error"></div>
+    <div class="sub" style="margin-top:14px; margin-bottom:0;">
+      <span id="auth-toggle-text">Don't have an account?</span>
+      <a href="#" id="auth-toggle-link" onclick="toggleAuthMode(event)" style="color:var(--accent);">Sign up</a>
+    </div>
+  </div>
+</div>
+
+<div id="company-screen" style="display:none; max-width:600px; margin:0 auto;">
+  <div class="topbar">
+    <h1>Choose a company</h1>
+    <div class="who"><span id="who-email"></span> · <a href="#" onclick="logout(event)" style="color:var(--muted);">Log out</a></div>
+  </div>
+  <div class="sub">Each company keeps its own ledger, accounts, and presets — completely separate from your other companies.</div>
+  <div id="company-list" class="company-list"></div>
+  <div class="panel" style="margin-top:16px;">
+    <h2>Add a company</h2>
+    <input type="text" id="new-company-name" placeholder="e.g. Rahmah Elderly Care Ltd">
+    <button class="btn-primary" onclick="createCompany()">Create company</button>
+    <div class="err" id="company-error"></div>
+  </div>
+</div>
+
+<div id="app-screen" style="display:none;">
+  <div class="topbar">
+    <div>
+      <h1 id="company-name-header">Bookkeeping — Double Entry Ledger</h1>
+      <div class="sub" style="margin-bottom:0;">Enter a transaction once. It posts as a Debit and a Credit, and shows up on both accounts' T-tables.</div>
+    </div>
+    <div class="who">
+      <span id="who-email-2"></span> ·
+      <a href="#" onclick="goToCompanyPicker()" style="color:var(--accent);">Switch company</a> ·
+      <a href="#" onclick="logout(event)" style="color:var(--muted);">Log out</a>
+    </div>
+  </div>
+
+  <div class="layout">
+    <div class="panel">
+      <h2>New Transaction</h2>
+      <label>Date</label>
+      <input type="date" id="f-date">
+      <label>Description</label>
+      <input type="text" id="f-desc" placeholder="e.g. Laptop purchase" oninput="suggestFromDescription()" autocomplete="off">
+      <div id="suggest-hint" style="font-size:11px; color:var(--good); margin-top:2px; min-height:14px;"></div>
+      <label>Amount</label>
+      <input type="number" id="f-amount" step="0.01" min="0" placeholder="0.00">
+      <div class="row2">
+        <div>
+          <label>Debit account (where value goes)</label>
+          <input list="account-list" id="f-debit" placeholder="e.g. Computer Equipment">
+        </div>
+        <div>
+          <label>Credit account (where value comes from)</label>
+          <input list="account-list" id="f-credit" placeholder="e.g. Cash">
+        </div>
+      </div>
+      <datalist id="account-list"></datalist>
+      <label>Default credit account <span style="color:var(--muted); font-weight:400;">(auto-fills credit when posting)</span></label>
+      <input list="account-list" id="f-default-credit" placeholder="e.g. Cash" oninput="saveSettings()">
+      <label>Tax year (optional)</label>
+      <input type="text" id="f-taxyear" placeholder="e.g. 2025/26">
+      <button class="btn-primary" onclick="addTransaction()">Post Transaction</button>
+      <div id="form-error" style="color:#ff5d5d; font-size:12px; margin-top:8px;"></div>
+
+      <h2 style="margin-top:24px;">Data</h2>
+      <div class="toolbar">
+        <button class="btn-secondary" onclick="exportCSV()">Export CSV</button>
+        <button class="btn-secondary" onclick="document.getElementById('import-file').click()">Import CSV</button>
+        <input type="file" id="import-file" accept=".csv" style="display:none" onchange="importCSV(event)">
+      </div>
+      <button class="btn-secondary" style="width:100%; color:#ff5d5d;" onclick="if(confirm('Clear all transactions for this company?')) clearAll()">Clear all data</button>
+    </div>
+
+    <div>
+      <div class="panel" style="margin-bottom:20px;">
+        <h2>Movements Inbox</h2>
+        <div class="sub" style="margin-bottom:12px;">Upload a bank statement PDF, or type/paste movements (one per line). The app guesses the debit/credit accounts — review and post.</div>
+        <div class="row2">
+          <div>
+            <label>Upload PDF statement</label>
+            <input type="file" id="pdf-file" accept="application/pdf" onchange="handlePdfUpload(event)">
+          </div>
+          <div>
+            <label>&nbsp;</label>
+            <button class="btn-secondary" style="width:100%;" onclick="document.getElementById('movement-text').value=''; renderCandidates();">Clear inbox</button>
+          </div>
+        </div>
+        <label>Or write/paste movements (one per line)</label>
+        <textarea id="movement-text" rows="3" placeholder="21/06/2026 Paid EON 79.45&#10;Received invoice payment 500 Chikaan Rashid"></textarea>
+        <div class="row2" style="margin-top:10px;">
+          <button class="btn-secondary" style="width:100%; margin-top:0;" onclick="parseFreeformMovements()">Work it out (rules)</button>
+          <button class="btn-primary" style="width:100%; margin-top:0;" onclick="analyzeWithAI()">✨ Analyze with AI</button>
+        </div>
+        <div id="inbox-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+        <details style="margin-top:10px;">
+          <summary style="font-size:12px; color:var(--muted); cursor:pointer;">AI settings (Claude API key)</summary>
+          <div class="sub" style="margin:8px 0;">Stored against this company on the server (in this app's database), sent directly from your browser to Anthropic when you click Analyze.</div>
+          <input type="password" id="ai-api-key" placeholder="sk-ant-..." oninput="saveSettings()">
+        </details>
+        <div id="inbox-table-wrap" style="display:none;">
+          <table class="inbox">
+            <thead><tr><th class="chk"><input type="checkbox" id="inbox-select-all" onchange="toggleAllCandidates(this.checked)"></th><th>Date</th><th>Description</th><th class="num">Amount</th><th>Debit</th><th>Credit</th><th></th></tr></thead>
+            <tbody id="inbox-body"></tbody>
+          </table>
+          <button class="btn-primary" onclick="postSelectedCandidates()">Post selected to ledger</button>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-bottom:20px;">
+        <h2>T-Accounts <span class="pill" id="tx-count">0 transactions</span></h2>
+        <div id="accounts" class="accounts-grid"><div class="empty">No transactions yet — post one on the left.</div></div>
+      </div>
+
+      <div class="panel">
+        <h2>Journal (all transactions)</h2>
+        <table class="journal">
+          <thead><tr><th>Date</th><th>Description</th><th>Debit</th><th>Credit</th><th class="num">Amount</th><th></th></tr></thead>
+          <tbody id="journal-body"></tbody>
+        </table>
+      </div>
+
+      <div class="panel" style="margin-top:20px;">
+        <h2>Compilation of T-Accounts <span class="pill" id="trial-status"></span></h2>
+        <table class="trial">
+          <thead><tr><td><b>Account</b></td><td class="num"><b>Total Debit</b></td><td class="num"><b>Total Credit</b></td><td class="num"><b>Balance</b></td></tr></thead>
+          <tbody id="trial-body"></tbody>
+        </table>
+        <div class="toolbar" style="margin-top:14px; margin-bottom:0;">
+          <button class="btn-secondary" onclick="printCompilation()">Print / Export Compilation</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:20px;">
+    <h2>Account Classification</h2>
+    <div class="sub" style="margin-bottom:12px;">Tell the app what each account represents, so it can build a Statement of Profit or Loss, Statement of Financial Position, and Statement of Cash Flows.</div>
+    <table class="inbox"><thead><tr><th>Account</th><th>Type</th></tr></thead><tbody id="account-types-body"></tbody></table>
+  </div>
+
+  <div class="panel" style="margin-top:20px;">
+    <h2>Financial Statements <span class="pill" id="period-label"></span></h2>
+    <div class="row2" style="align-items:start;">
+      <div><h2 style="margin-top:0;">Statement of Profit or Loss</h2><table class="trial"><tbody id="pnl-body"></tbody></table></div>
+      <div><h2 style="margin-top:0;">Statement of Financial Position</h2><table class="trial"><tbody id="sofp-body"></tbody></table></div>
+    </div>
+    <h2 style="margin-top:20px;">Statement of Cash Flows <span class="pill" id="cashflow-check"></span></h2>
+    <div class="sub" style="margin-bottom:0;">Built directly from cash movements in your ledger (IAS 7 direct method).</div>
+    <table class="trial"><tbody id="cashflow-body"></tbody></table>
+    <div class="toolbar" style="margin-top:14px; margin-bottom:0;">
+      <button class="btn-secondary" onclick="printFinancialStatements()">Print / Export Financial Statements</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentUser = null;
+let companies = [];
+let currentCompany = null;
+let authMode = 'login';
+
+async function api(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+  opts.credentials = 'same-origin';
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+function show(id) {
+  ['auth-screen', 'company-screen', 'app-screen'].forEach(s =>
+    document.getElementById(s).style.display = s === id ? '' : 'none');
+}
+
+async function boot() {
+  const data = await api('/api/me');
+  if (!data.user) { show('auth-screen'); return; }
+  currentUser = data.user;
+  await loadCompanies();
+  show('company-screen');
+}
+
+function toggleAuthMode(e) {
+  e.preventDefault();
+  authMode = authMode === 'login' ? 'signup' : 'login';
+  document.getElementById('auth-title').textContent = authMode === 'login' ? 'Log in' : 'Sign up';
+  document.getElementById('auth-submit').textContent = authMode === 'login' ? 'Log in' : 'Create account';
+  document.getElementById('auth-toggle-text').textContent = authMode === 'login' ? "Don't have an account?" : 'Already have an account?';
+  document.getElementById('auth-toggle-link').textContent = authMode === 'login' ? 'Sign up' : 'Log in';
+  document.getElementById('auth-error').textContent = '';
+}
+
+async function submitAuth() {
+  const email = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password').value;
+  const errEl = document.getElementById('auth-error');
+  try {
+    const data = await api(authMode === 'login' ? '/api/login' : '/api/signup', {
+      method: 'POST', body: JSON.stringify({ email, password })
+    });
+    currentUser = data;
+    errEl.textContent = '';
+    await loadCompanies();
+    show('company-screen');
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
+}
+
+async function logout(e) {
+  if (e) e.preventDefault();
+  await api('/api/logout', { method: 'POST' });
+  currentUser = null; companies = []; currentCompany = null;
+  document.getElementById('auth-email').value = '';
+  document.getElementById('auth-password').value = '';
+  show('auth-screen');
+}
+
+async function loadCompanies() {
+  companies = await api('/api/companies');
+  document.getElementById('who-email').textContent = currentUser.email;
+  document.getElementById('who-email-2').textContent = currentUser.email;
+  renderCompanyList();
+}
+
+function renderCompanyList() {
+  const list = document.getElementById('company-list');
+  if (!companies.length) {
+    list.innerHTML = '<div class="empty">No companies yet — add one below.</div>';
+    return;
+  }
+  list.innerHTML = companies.map(c => `
+    <div class="company-card" onclick="openCompany(${c.id})">
+      <span>${escapeHtml(c.name)}</span>
+      <button class="btn-danger" onclick="event.stopPropagation(); deleteCompany(${c.id}, '${c.name.replace(/'/g, "\\'")}')">Delete</button>
+    </div>`).join('');
+}
+
+async function createCompany() {
+  const name = document.getElementById('new-company-name').value.trim();
+  const errEl = document.getElementById('company-error');
+  if (!name) { errEl.textContent = 'Enter a company name.'; return; }
+  try {
+    await api('/api/companies', { method: 'POST', body: JSON.stringify({ name }) });
+    document.getElementById('new-company-name').value = '';
+    errEl.textContent = '';
+    await loadCompanies();
+  } catch (e) { errEl.textContent = e.message; }
+}
+
+async function deleteCompany(id, name) {
+  if (!confirm(`Delete "${name}" and all its transactions? This cannot be undone.`)) return;
+  await api(`/api/companies/${id}`, { method: 'DELETE' });
+  await loadCompanies();
+}
+
+function goToCompanyPicker() {
+  currentCompany = null;
+  show('company-screen');
+}
+
+async function openCompany(id) {
+  currentCompany = companies.find(c => c.id === id);
+  document.getElementById('company-name-header').textContent = `${currentCompany.name} — Ledger`;
+  document.getElementById('f-default-credit').value = currentCompany.default_credit_account || '';
+  document.getElementById('ai-api-key').value = currentCompany.ai_api_key || '';
+  show('app-screen');
+  await refreshAll();
+}
+
+async function saveSettings() {
+  if (!currentCompany) return;
+  currentCompany.default_credit_account = document.getElementById('f-default-credit').value.trim();
+  currentCompany.ai_api_key = document.getElementById('ai-api-key').value.trim();
+  await api(`/api/companies/${currentCompany.id}/settings`, {
+    method: 'PUT',
+    body: JSON.stringify({ defaultCreditAccount: currentCompany.default_credit_account, aiApiKey: currentCompany.ai_api_key })
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fmt(n) { return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function fmtDate(iso) { if (!iso) return ''; const [y, m, d] = iso.split('-'); return `${d}/${m}/${y}`; }
+function normalizeDesc(s) { return s.trim().toLowerCase(); }
+
+// ---------- per-company state, loaded from server ----------
+let transactions = [];
+let presets = {};
+let accountTypeOverrides = {};
+
+async function refreshAll() {
+  const cid = currentCompany.id;
+  [transactions, presets, accountTypeOverrides] = await Promise.all([
+    api(`/api/companies/${cid}/transactions`),
+    api(`/api/companies/${cid}/presets`),
+    api(`/api/companies/${cid}/account-types`)
+  ]);
+  render();
+}
+
+function suggestFromDescription() {
+  const desc = document.getElementById('f-desc').value;
+  const hint = document.getElementById('suggest-hint');
+  const key = normalizeDesc(desc);
+  if (!key) { hint.textContent = ''; return; }
+  const match = presets[key];
+  const debitEl = document.getElementById('f-debit');
+  const creditEl = document.getElementById('f-credit');
+  if (match) {
+    if (!debitEl.value) debitEl.value = match.debit;
+    if (!creditEl.value) creditEl.value = match.credit;
+    hint.textContent = `Auto-filled from a previous "${desc}" entry`;
+  } else hint.textContent = '';
+}
+
+async function addTransaction() {
+  const date = document.getElementById('f-date').value;
+  const desc = document.getElementById('f-desc').value.trim();
+  const amount = parseFloat(document.getElementById('f-amount').value);
+  const debit = document.getElementById('f-debit').value.trim();
+  let credit = document.getElementById('f-credit').value.trim();
+  if (!credit) credit = currentCompany.default_credit_account || '';
+  const taxYear = document.getElementById('f-taxyear').value.trim();
+  const errEl = document.getElementById('form-error');
+
+  if (!date || !desc || !amount || amount <= 0 || !debit || !credit) {
+    errEl.textContent = 'Fill in date, description, a positive amount, and both accounts.'; return;
+  }
+  if (debit === credit) { errEl.textContent = 'Debit and credit accounts must differ.'; return; }
+  errEl.textContent = '';
+
+  await api(`/api/companies/${currentCompany.id}/transactions`, {
+    method: 'POST', body: JSON.stringify({ date, desc, amount, debit, credit, taxYear })
+  });
+
+  document.getElementById('f-desc').value = '';
+  document.getElementById('f-amount').value = '';
+  document.getElementById('f-debit').value = '';
+  document.getElementById('f-credit').value = '';
+  document.getElementById('suggest-hint').textContent = '';
+  await refreshAll();
+}
+
+async function deleteTransaction(id) {
+  await api(`/api/companies/${currentCompany.id}/transactions/${id}`, { method: 'DELETE' });
+  await refreshAll();
+}
+
+async function clearAll() {
+  await api(`/api/companies/${currentCompany.id}/transactions/clear`, { method: 'POST' });
+  await refreshAll();
+}
+
+function buildAccounts() {
+  const accounts = {};
+  function ensure(name) { if (!accounts[name]) accounts[name] = { debits: [], credits: [] }; return accounts[name]; }
+  const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
+  for (const t of sorted) { ensure(t.debit).debits.push(t); ensure(t.credit).credits.push(t); }
+  return accounts;
+}
+
+function renderAccounts() {
+  const container = document.getElementById('accounts');
+  const accounts = buildAccounts();
+  const names = Object.keys(accounts).sort();
+  if (!names.length) { container.innerHTML = '<div class="empty">No transactions yet — post one on the left.</div>'; return; }
+  container.innerHTML = names.map(name => {
+    const acc = accounts[name];
+    const debitTotal = acc.debits.reduce((s, t) => s + t.amount, 0);
+    const creditTotal = acc.credits.reduce((s, t) => s + t.amount, 0);
+    const bal = debitTotal - creditTotal;
+    const balLabel = bal === 0 ? 'balanced' : (bal > 0 ? `Dr ${fmt(bal)}` : `Cr ${fmt(-bal)}`);
+    const debitLines = acc.debits.map(t => `<div class="tline"><span class="desc" title="${escapeHtml(t.desc)} (vs ${escapeHtml(t.credit)})">${fmtDate(t.date)} — ${escapeHtml(t.desc)}</span><span class="amt debit">${fmt(t.amount)}</span></div>`).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
+    const creditLines = acc.credits.map(t => `<div class="tline"><span class="desc" title="${escapeHtml(t.desc)} (vs ${escapeHtml(t.debit)})">${fmtDate(t.date)} — ${escapeHtml(t.desc)}</span><span class="amt credit">${fmt(t.amount)}</span></div>`).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
+    return `
+      <div class="taccount">
+        <div class="taccount-title"><span>${escapeHtml(name)}</span><span class="bal">${balLabel}</span></div>
+        <div class="tbody">
+          <div class="tside debit"><div class="tside-label">Debit</div>${debitLines}</div>
+          <div class="tside credit"><div class="tside-label">Credit</div>${creditLines}</div>
+        </div>
+        <div class="tfoot"><div class="debit">${fmt(debitTotal)}</div><div class="credit">${fmt(creditTotal)}</div></div>
+      </div>`;
+  }).join('');
+}
+
+function renderJournal() {
+  const tbody = document.getElementById('journal-body');
+  const sorted = [...transactions].sort((a, b) => b.date.localeCompare(a.date));
+  tbody.innerHTML = sorted.map(t => `
+    <tr>
+      <td>${fmtDate(t.date)}</td><td>${escapeHtml(t.desc)}</td>
+      <td style="color:var(--debit)">${escapeHtml(t.debit)}</td>
+      <td style="color:var(--credit)">${escapeHtml(t.credit)}</td>
+      <td class="num">${fmt(t.amount)}</td>
+      <td><button class="btn-danger" onclick="deleteTransaction(${t.id})">Delete</button></td>
+    </tr>`).join('');
+  document.getElementById('tx-count').textContent = `${transactions.length} transaction${transactions.length === 1 ? '' : 's'}`;
+}
+
+function renderAccountList() {
+  const accounts = new Set();
+  transactions.forEach(t => { accounts.add(t.debit); accounts.add(t.credit); });
+  document.getElementById('account-list').innerHTML = [...accounts].sort().map(a => `<option value="${escapeHtml(a)}">`).join('');
+}
+
+function renderTrialBalance() {
+  const accounts = buildAccounts();
+  const names = Object.keys(accounts).sort();
+  const tbody = document.getElementById('trial-body');
+  let debitSum = 0, creditSum = 0;
+  tbody.innerHTML = names.map(name => {
+    const acc = accounts[name];
+    const debitTotal = acc.debits.reduce((s, t) => s + t.amount, 0);
+    const creditTotal = acc.credits.reduce((s, t) => s + t.amount, 0);
+    debitSum += debitTotal; creditSum += creditTotal;
+    const bal = debitTotal - creditTotal;
+    const balLabel = bal === 0 ? '—' : (bal > 0 ? `Dr ${fmt(bal)}` : `Cr ${fmt(-bal)}`);
+    return `<tr><td>${escapeHtml(name)}</td><td class="num" style="color:var(--debit)">${fmt(debitTotal)}</td><td class="num" style="color:var(--credit)">${fmt(creditTotal)}</td><td class="num">${balLabel}</td></tr>`;
+  }).join('') || `<tr><td colspan="4" class="empty">No transactions yet.</td></tr>`;
+  const statusEl = document.getElementById('trial-status');
+  if (!names.length) { statusEl.textContent = ''; return; }
+  const balanced = Math.abs(debitSum - creditSum) < 0.005;
+  statusEl.textContent = balanced ? 'balanced' : 'out of balance';
+  statusEl.style.color = balanced ? 'var(--good)' : '#ff5d5d';
+}
+
+function printCompilation() {
+  const names = Object.keys(buildAccounts()).sort();
+  if (!names.length) { alert('No transactions to compile yet.'); return; }
+  const accountsHtml = document.getElementById('accounts').innerHTML;
+  const trialHtml = document.getElementById('trial-body').innerHTML;
+  const win = window.open('', '_blank');
+  win.document.write(`<html><head><title>T-Account Compilation</title><style>
+    body{font-family:-apple-system,sans-serif;padding:24px;color:#111;} h1{font-size:18px;} h2{font-size:14px;margin-top:28px;}
+    .accounts-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;}
+    .taccount{border:1px solid #ccc;border-radius:8px;overflow:hidden;}
+    .taccount-title{padding:8px 12px;font-weight:700;border-bottom:2px solid #ccc;display:flex;justify-content:space-between;}
+    .tbody{display:grid;grid-template-columns:1fr 1fr;} .tside{padding:6px;min-height:30px;} .tside.debit{border-right:1px solid #ccc;}
+    .tside-label{font-size:10px;color:#666;padding:0 6px 4px;} .tline{display:flex;justify-content:space-between;font-size:11.5px;padding:2px 6px;}
+    .tfoot{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid #ccc;font-weight:700;font-size:11.5px;} .tfoot div{padding:5px 8px;} .tfoot .debit{border-right:1px solid #ccc;}
+    table{width:100%;border-collapse:collapse;font-size:12px;} th,td{padding:5px 8px;border-bottom:1px solid #ccc;text-align:left;} td.num,th.num{text-align:right;}
+    .bal{font-size:11px;color:#666;font-weight:500;} .amt.debit,.amt.credit{font-weight:600;}
+    </style></head><body><h1>T-Account Compilation — ${escapeHtml(currentCompany.name)}</h1>
+    <div class="accounts-grid">${accountsHtml}</div>
+    <h2>Trial Balance</h2><table><thead><tr><th>Account</th><th class="num">Total Debit</th><th class="num">Total Credit</th><th class="num">Balance</th></tr></thead><tbody>${trialHtml}</tbody></table>
+    </body></html>`);
+  win.document.close(); win.focus(); setTimeout(() => win.print(), 300);
+}
+
+function render() {
+  renderAccounts(); renderJournal(); renderAccountList(); renderTrialBalance();
+  renderAccountTypesTable(); renderFinancialStatements();
+}
+
+function exportCSV() {
+  const header = 'Bank Transaction Date,Debit,Credit,Description,Debit (Cat),Credit (Cat),TaxYear';
+  const lines = transactions.map(t => {
+    const desc = `"${String(t.desc).replace(/"/g, '""')}"`;
+    return `${fmtDate(t.date)},${t.amount},${t.amount},${desc},${t.debit},${t.credit},${t.taxYear || ''}`;
+  });
+  const blob = new Blob([[header, ...lines].join('\r\n')], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = `${currentCompany.name.replace(/\s+/g,'_')}_ledger.csv`; a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function importCSV(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const rows = parseCSV(reader.result);
+    if (!rows.length) return;
+    const header = rows[0].map(h => h.trim().toLowerCase());
+    const idx = name => header.indexOf(name);
+    const iDate = idx('bank transaction date'), iDebitAmt = idx('debit'), iDesc = idx('description'),
+          iDebitCat = idx('debit (cat)'), iCreditCat = idx('credit (cat)'), iTaxYear = idx('taxyear');
+    const items = [];
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r[iDate] || !r[iDebitAmt]) continue;
+      const [d, m, y] = r[iDate].split('/');
+      if (!d || !m || !y) continue;
+      const amount = parseFloat(String(r[iDebitAmt]).replace(/,/g, ''));
+      if (!amount) continue;
+      items.push({
+        date: `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`, desc: r[iDesc] || '', amount,
+        debit: r[iDebitCat] || 'Unknown', credit: r[iCreditCat] || 'Unknown',
+        taxYear: iTaxYear >= 0 ? (r[iTaxYear] || '') : ''
+      });
+    }
+    const result = await api(`/api/companies/${currentCompany.id}/transactions/bulk`, { method: 'POST', body: JSON.stringify(items) });
+    await refreshAll();
+    alert(`Imported ${result.inserted} transactions.`);
+  };
+  reader.readAsText(file);
+  event.target.value = '';
+}
+
+function parseCSV(text) {
+  const rows = []; let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') { if (text[i+1] === '"') { field += '"'; i++; } else inQuotes = false; }
+      else field += c;
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ',') { row.push(field); field = ''; }
+      else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+      else if (c === '\r') { /* skip */ }
+      else field += c;
+    }
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter(r => r.length > 1 || r[0] !== '');
+}
+
+// ---------- Movements Inbox: categorization + PDF/freeform parsing ----------
+
+const KEYWORD_RULES = [
+  { kws: ['rent'], debit: 'Rent Expenses', credit: 'Cash' },
+  { kws: ['agency wage', 'agency'], debit: 'Agency Wages', credit: 'Cash' },
+  { kws: ['wage', 'salary', 'payroll'], debit: 'Wages', credit: 'Cash' },
+  { kws: ['eon', 'e.on', 'utilit', 'electric', 'gas bill', 'water bill'], debit: 'Utilities', credit: 'Cash' },
+  { kws: ['insurance'], debit: 'Insurance', credit: 'Cash' },
+  { kws: ['subscript', 'microsoft', 'google', 'openai', 'contabo', 'software', 'saas'], debit: 'Subscriptions', credit: 'Cash' },
+  { kws: ['laptop', 'printer', 'docking station', 'computer', 'charger', 'ink cat'], debit: 'Computer Equipment', credit: 'Cash' },
+  { kws: ['travel', 'rightpay'], debit: 'Travel Expense', credit: 'Cash' },
+  { kws: ['accountan', 'shipley tax'], debit: 'Accountancy Fees', credit: 'Cash' },
+  { kws: ['consultan', 'cqc'], debit: 'Consultancy Fees', credit: 'Cash' },
+  { kws: ['hmrc', 'tax'], debit: 'Tax', credit: 'Cash' },
+  { kws: ['information commissioner', 'admin'], debit: 'Admin Exp', credit: 'Cash' },
+  { kws: ['bathroom', 'toilet', 'sanitary'], debit: 'Bathroom', credit: 'Cash' },
+  { kws: ['office', 'security equipment'], debit: 'Office Expenses', credit: 'Cash' },
+  { kws: ['maintenance'], debit: 'Maintenance Expense', credit: 'Cash' },
+  { kws: ['invoice', 'sale'], debit: 'Trade Recievables', credit: 'Sales' },
+  { kws: ['payment received', 'received payment', 'receipt'], debit: 'Cash', credit: 'Trade Recievables' },
+];
+
+function categorize(desc) {
+  const key = normalizeDesc(desc);
+  if (presets[key]) return { debit: presets[key].debit, credit: presets[key].credit, confidence: 'high' };
+  for (const [presetDesc, pair] of Object.entries(presets)) {
+    if (key.includes(presetDesc) || presetDesc.includes(key)) return { debit: pair.debit, credit: pair.credit, confidence: 'high' };
+  }
+  for (const rule of KEYWORD_RULES) {
+    if (rule.kws.some(kw => key.includes(kw))) return { debit: rule.debit, credit: rule.credit, confidence: 'high' };
+  }
+  return { debit: 'Uncategorized', credit: currentCompany.default_credit_account || 'Cash', confidence: 'low' };
+}
+
+let candidates = [];
+
+function parseAmount(token) { return parseFloat(String(token).replace(/[,£$]/g, '')); }
+
+function parseMovementLine(line) {
+  line = line.trim();
+  if (!line) return null;
+  let date = '';
+  const dateMatch = line.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if (dateMatch) {
+    let [, d, m, y] = dateMatch;
+    if (y.length === 2) y = '20' + y;
+    date = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+    line = line.replace(dateMatch[0], ' ');
+  } else date = new Date().toISOString().slice(0, 10);
+
+  const amountMatches = [...line.matchAll(/-?£?\$?\d[\d,]*\.\d{2}|-?£?\$?\d+/g)];
+  if (!amountMatches.length) return null;
+  let best = amountMatches[0];
+  for (const m of amountMatches) if (Math.abs(parseAmount(m[0])) > Math.abs(parseAmount(best[0]))) best = m;
+  const amount = Math.abs(parseAmount(best[0]));
+  if (!amount) return null;
+
+  let desc = line.replace(best[0], ' ').replace(/\s{2,}/g, ' ').trim().replace(/^[-,\s]+|[-,\s]+$/g, '');
+  if (!desc) desc = 'Movement';
+  const cat = categorize(desc);
+  return { id: Date.now() + Math.random().toString(36).slice(2, 7), date, desc, amount, debit: cat.debit, credit: cat.credit, confidence: cat.confidence, selected: true };
+}
+
+function parseFreeformMovements() {
+  const text = document.getElementById('movement-text').value;
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const statusEl = document.getElementById('inbox-status');
+  if (!lines.length) { statusEl.textContent = 'Nothing to parse — write a movement first.'; return; }
+  const parsed = lines.map(parseMovementLine).filter(Boolean);
+  candidates = candidates.concat(parsed);
+  statusEl.textContent = `${parsed.length} of ${lines.length} line(s) parsed. Review and post below.`;
+  document.getElementById('movement-text').value = '';
+  renderCandidates();
+}
+
+async function handlePdfUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById('inbox-status');
+  statusEl.textContent = 'Reading PDF…';
+  try {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    let allLines = [];
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      const rows = {};
+      for (const item of content.items) {
+        const y = Math.round(item.transform[5]);
+        if (!rows[y]) rows[y] = [];
+        rows[y].push(item.str);
+      }
+      const ys = Object.keys(rows).map(Number).sort((a, b) => b - a);
+      for (const y of ys) allLines.push(rows[y].join(' '));
+    }
+    const parsed = allLines.map(parseMovementLine).filter(Boolean);
+    candidates = candidates.concat(parsed);
+    document.getElementById('movement-text').value = allLines.filter(l => l.trim()).join('\n');
+    statusEl.textContent = `Extracted ${parsed.length} candidate movement(s) from ${pdf.numPages} page(s) using rules. The raw lines are also in the box above — click "Analyze with AI" for a smarter pass.`;
+    renderCandidates();
+  } catch (e) {
+    statusEl.textContent = 'Could not read that PDF: ' + e.message;
+  }
+  event.target.value = '';
+}
+
+function renderCandidates() {
+  const wrap = document.getElementById('inbox-table-wrap');
+  const body = document.getElementById('inbox-body');
+  if (!candidates.length) { wrap.style.display = 'none'; body.innerHTML = ''; return; }
+  wrap.style.display = '';
+  body.innerHTML = candidates.map(c => `
+    <tr>
+      <td class="chk"><input type="checkbox" ${c.selected ? 'checked' : ''} onchange="setCandidateSelected('${c.id}', this.checked)"></td>
+      <td><input type="date" value="${c.date}" onchange="updateCandidate('${c.id}','date',this.value)" style="width:120px;"></td>
+      <td><input type="text" value="${escapeHtml(c.desc)}" onchange="updateCandidate('${c.id}','desc',this.value)"></td>
+      <td class="num"><input type="number" step="0.01" value="${c.amount}" onchange="updateCandidate('${c.id}','amount',this.value)" style="width:80px; text-align:right;"></td>
+      <td><input list="account-list" value="${escapeHtml(c.debit)}" onchange="updateCandidate('${c.id}','debit',this.value)"></td>
+      <td><input list="account-list" value="${escapeHtml(c.credit)}" onchange="updateCandidate('${c.id}','credit',this.value)"></td>
+      <td><span class="confidence ${c.confidence}">${c.confidence === 'high' ? 'matched' : 'review'}</span> <button class="btn-danger" onclick="removeCandidate('${c.id}')">✕</button></td>
+    </tr>`).join('');
+}
+
+function setCandidateSelected(id, val) { const c = candidates.find(c => c.id == id); if (c) c.selected = val; }
+function toggleAllCandidates(val) { candidates.forEach(c => c.selected = val); renderCandidates(); }
+function updateCandidate(id, field, value) { const c = candidates.find(c => c.id == id); if (!c) return; c[field] = field === 'amount' ? parseFloat(value) : value; }
+function removeCandidate(id) { candidates = candidates.filter(c => c.id != id); renderCandidates(); }
+
+async function postSelectedCandidates() {
+  const toPost = candidates.filter(c => c.selected && c.date && c.desc && c.amount > 0 && c.debit && c.credit && c.debit !== c.credit);
+  if (!toPost.length) { document.getElementById('inbox-status').textContent = 'Nothing valid selected.'; return; }
+  const result = await api(`/api/companies/${currentCompany.id}/transactions/bulk`, { method: 'POST', body: JSON.stringify(toPost) });
+  candidates = candidates.filter(c => !c.selected);
+  document.getElementById('inbox-status').textContent = `Posted ${result.inserted} transaction(s) to the ledger.`;
+  renderCandidates();
+  await refreshAll();
+}
+
+// ---------- AI Assist (Claude API) ----------
+
+async function analyzeWithAI() {
+  const statusEl = document.getElementById('inbox-status');
+  const apiKey = currentCompany.ai_api_key;
+  if (!apiKey) { statusEl.textContent = 'Add your Claude API key under "AI settings" first.'; return; }
+  const text = document.getElementById('movement-text').value.trim();
+  if (!text) { statusEl.textContent = 'Nothing to analyze — write, paste, or upload a PDF of movements first.'; return; }
+  statusEl.textContent = 'Asking Claude to work out the debits and credits…';
+
+  const knownAccounts = [...new Set(Object.keys(buildAccounts()))].sort();
+  const today = new Date().toISOString().slice(0, 10);
+  const prompt = `You are a bookkeeping assistant doing double-entry classification for a small UK business.
+Known chart of accounts already in use (reuse these names exactly when they fit, only invent a new account name when nothing fits): ${knownAccounts.join(', ') || '(none yet — use sensible standard account names)'}
+
+For each line below, identify it as one bank/cash movement and decide:
+- date (YYYY-MM-DD; if no date is present, use ${today})
+- desc: a short clean description
+- amount: a positive number
+- debit: the account that receives value
+- credit: the account value comes from
+
+Money going OUT of the bank/cash account is typically Debit = expense/asset category, Credit = Cash.
+Money coming IN is typically Debit = Cash, Credit = Sales/Trade Recievables/income category.
+Skip lines that aren't real transactions (headers, balances, page numbers, etc).
+
+Return ONLY a JSON array, no prose, no markdown fences:
+[{"date":"YYYY-MM-DD","desc":"...","amount":0.00,"debit":"...","credit":"..."}]
+
+Lines:
+${text}`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 4096, messages: [{ role: 'user', content: prompt }] })
+    });
+    if (!res.ok) { const errBody = await res.text(); throw new Error(`${res.status} ${errBody.slice(0, 200)}`); }
+    const data = await res.json();
+    const raw = data.content.map(b => b.text || '').join('');
+    const jsonMatch = raw.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error('Claude did not return a parseable list.');
+    const items = JSON.parse(jsonMatch[0]);
+    const newCandidates = items.filter(it => it.date && it.desc && it.amount && it.debit && it.credit)
+      .map(it => ({ id: Date.now() + Math.random().toString(36).slice(2, 7), date: it.date, desc: it.desc, amount: Math.abs(parseFloat(it.amount)), debit: it.debit, credit: it.credit, confidence: 'high', selected: true }));
+    candidates = candidates.concat(newCandidates);
+    statusEl.textContent = `Claude classified ${newCandidates.length} movement(s). Review and post below.`;
+    renderCandidates();
+  } catch (e) {
+    statusEl.textContent = 'AI analysis failed: ' + e.message;
+  }
+}
+
+// ---------- Account classification + financial statements ----------
+
+const ACCOUNT_TYPE_LABELS = {
+  cash: 'Cash & cash equivalents', revenue: 'Revenue', cogs: 'Cost of sales', expense: 'Expense',
+  current_asset: 'Current asset', noncurrent_asset: 'Non-current asset', current_liability: 'Current liability',
+  noncurrent_liability: 'Non-current liability (e.g. loan)', equity: 'Equity / capital introduced', drawings: 'Drawings'
+};
+const DEBIT_NORMAL = { cash: true, cogs: true, expense: true, current_asset: true, noncurrent_asset: true, drawings: true,
+  revenue: false, current_liability: false, noncurrent_liability: false, equity: false };
+
+function guessAccountType(name) {
+  const n = name.toLowerCase();
+  if (n === 'cash' || n.includes('bank')) return 'cash';
+  if (n.includes('drawing')) return 'drawings';
+  if (n === 'capital' || n.includes('capital introduced') || n.includes('share capital') || n.includes('share premium')) return 'equity';
+  if (n.includes('loan')) return 'noncurrent_liability';
+  if (n.includes('payable')) return 'current_liability';
+  if (n.includes('receivable') || n.includes('recievable')) return 'current_asset';
+  if (n.includes('sale') || n.includes('revenue') || n.includes('income')) return 'revenue';
+  if (n.includes('cost of sale') || n.includes('purchase')) return 'cogs';
+  if (n.includes('equipment') || n.includes('vehicle') || n.includes('property') || n.includes('premises') || n.includes('fixtures')) return 'noncurrent_asset';
+  return 'expense';
+}
+function getAccountType(name) { return accountTypeOverrides[name] || guessAccountType(name); }
+
+async function saveAccountTypeOverride(name, type) {
+  accountTypeOverrides[name] = type;
+  await api(`/api/companies/${currentCompany.id}/account-types`, { method: 'PUT', body: JSON.stringify({ name, type }) });
+  renderFinancialStatements();
+}
+
+function renderAccountTypesTable() {
+  const names = Object.keys(buildAccounts()).sort();
+  const body = document.getElementById('account-types-body');
+  if (!names.length) { body.innerHTML = `<tr><td colspan="2" class="empty">No accounts yet.</td></tr>`; return; }
+  body.innerHTML = names.map(name => {
+    const current = getAccountType(name);
+    const options = Object.entries(ACCOUNT_TYPE_LABELS).map(([val, label]) => `<option value="${val}" ${val === current ? 'selected' : ''}>${label}</option>`).join('');
+    return `<tr><td>${escapeHtml(name)}</td><td><select onchange="saveAccountTypeOverride('${name.replace(/'/g,"\\'")}', this.value)">${options}</select></td></tr>`;
+  }).join('');
+}
+
+function accountNetBalance(acc, type) {
+  const debitTotal = acc.debits.reduce((s, t) => s + t.amount, 0);
+  const creditTotal = acc.credits.reduce((s, t) => s + t.amount, 0);
+  return DEBIT_NORMAL[type] ? (debitTotal - creditTotal) : (creditTotal - debitTotal);
+}
+
+function lineRow(label, value, opts) {
+  opts = opts || {};
+  const cls = opts.total ? ' style="font-weight:700; border-top:1px solid var(--border);"' : '';
+  const v = value === null ? '' : fmt(value);
+  return `<tr${cls}><td>${escapeHtml(label)}</td><td class="num">${v}</td></tr>`;
+}
+
+function renderFinancialStatements() {
+  const accounts = buildAccounts();
+  const names = Object.keys(accounts);
+  if (!names.length) {
+    ['pnl-body', 'sofp-body', 'cashflow-body'].forEach(id => document.getElementById(id).innerHTML = '<tr><td class="empty">No transactions yet.</td></tr>');
+    document.getElementById('cashflow-check').textContent = '';
+    document.getElementById('period-label').textContent = '';
+    return;
+  }
+  const dates = transactions.map(t => t.date).sort();
+  document.getElementById('period-label').textContent = `${fmtDate(dates[0])} – ${fmtDate(dates[dates.length - 1])}`;
+
+  const byType = {};
+  for (const name of names) {
+    const type = getAccountType(name);
+    if (!byType[type]) byType[type] = [];
+    byType[type].push({ name, balance: accountNetBalance(accounts[name], type) });
+  }
+  const sumType = t => (byType[t] || []).reduce((s, a) => s + a.balance, 0);
+
+  const revenue = sumType('revenue');
+  const cogs = sumType('cogs');
+  const grossProfit = revenue - cogs;
+  const expenseLines = byType['expense'] || [];
+  const totalExpenses = expenseLines.reduce((s, a) => s + a.balance, 0);
+  const netProfit = grossProfit - totalExpenses;
+
+  let pnl = '';
+  pnl += lineRow('Revenue', revenue);
+  if (cogs) pnl += lineRow('Cost of sales', -cogs);
+  pnl += lineRow('Gross profit', grossProfit, { total: true });
+  for (const a of expenseLines) pnl += lineRow(a.name, -a.balance);
+  pnl += lineRow(netProfit >= 0 ? 'Net profit' : 'Net loss', netProfit, { total: true });
+  document.getElementById('pnl-body').innerHTML = pnl;
+
+  const nonCurrentAssets = byType['noncurrent_asset'] || [];
+  const currentAssetLines = (byType['current_asset'] || []).concat((byType['cash'] || []));
+  const totalNonCurrentAssets = nonCurrentAssets.reduce((s, a) => s + a.balance, 0);
+  const totalCurrentAssets = currentAssetLines.reduce((s, a) => s + a.balance, 0);
+  const totalAssets = totalNonCurrentAssets + totalCurrentAssets;
+
+  const equityLines = byType['equity'] || [];
+  const totalEquityIntroduced = equityLines.reduce((s, a) => s + a.balance, 0);
+  const drawingsTotal = sumType('drawings');
+  const totalEquity = totalEquityIntroduced + netProfit - drawingsTotal;
+
+  const currentLiabLines = byType['current_liability'] || [];
+  const nonCurrentLiabLines = byType['noncurrent_liability'] || [];
+  const totalCurrentLiab = currentLiabLines.reduce((s, a) => s + a.balance, 0);
+  const totalNonCurrentLiab = nonCurrentLiabLines.reduce((s, a) => s + a.balance, 0);
+  const totalEquityAndLiab = totalEquity + totalCurrentLiab + totalNonCurrentLiab;
+
+  let sofp = '<tr><td style="font-weight:700;">Non-current assets</td><td></td></tr>';
+  for (const a of nonCurrentAssets) sofp += lineRow(a.name, a.balance);
+  sofp += lineRow('Total non-current assets', totalNonCurrentAssets, { total: true });
+  sofp += '<tr><td style="font-weight:700;">Current assets</td><td></td></tr>';
+  for (const a of currentAssetLines) sofp += lineRow(a.name, a.balance);
+  sofp += lineRow('Total current assets', totalCurrentAssets, { total: true });
+  sofp += lineRow('Total assets', totalAssets, { total: true });
+  sofp += '<tr><td style="font-weight:700;">Equity</td><td></td></tr>';
+  for (const a of equityLines) sofp += lineRow(a.name, a.balance);
+  sofp += lineRow(netProfit >= 0 ? 'Retained profit' : 'Retained loss', netProfit);
+  if (drawingsTotal) sofp += lineRow('Drawings', -drawingsTotal);
+  sofp += lineRow('Total equity', totalEquity, { total: true });
+  if (nonCurrentLiabLines.length) {
+    sofp += '<tr><td style="font-weight:700;">Non-current liabilities</td><td></td></tr>';
+    for (const a of nonCurrentLiabLines) sofp += lineRow(a.name, a.balance);
+  }
+  sofp += '<tr><td style="font-weight:700;">Current liabilities</td><td></td></tr>';
+  for (const a of currentLiabLines) sofp += lineRow(a.name, a.balance);
+  sofp += lineRow('Total equity and liabilities', totalEquityAndLiab, { total: true });
+  document.getElementById('sofp-body').innerHTML = sofp;
+
+  const cashAccountNames = new Set(names.filter(n => getAccountType(n) === 'cash'));
+  const flowTypeBucket = type => {
+    if (type === 'noncurrent_asset') return 'investing';
+    if (type === 'equity' || type === 'drawings' || type === 'noncurrent_liability') return 'financing';
+    return 'operating';
+  };
+  const totals = { operating: 0, investing: 0, financing: 0 };
+  const breakdown = { operating: {}, investing: {}, financing: {} };
+  for (const t of transactions) {
+    const debitIsCash = cashAccountNames.has(t.debit);
+    const creditIsCash = cashAccountNames.has(t.credit);
+    if (debitIsCash === creditIsCash) continue;
+    const counterpart = debitIsCash ? t.credit : t.debit;
+    const sign = debitIsCash ? 1 : -1;
+    const bucket = flowTypeBucket(getAccountType(counterpart));
+    totals[bucket] += sign * t.amount;
+    breakdown[bucket][counterpart] = (breakdown[bucket][counterpart] || 0) + sign * t.amount;
+  }
+  const cashBalance = [...cashAccountNames].reduce((s, n) => s + accountNetBalance(accounts[n], 'cash'), 0);
+  const netChange = totals.operating + totals.investing + totals.financing;
+
+  let cf = '';
+  const section = (title, key) => {
+    let h = `<tr><td style="font-weight:700;">${title}</td><td></td></tr>`;
+    for (const [name, amt] of Object.entries(breakdown[key])) h += lineRow(name, amt);
+    h += lineRow(`Net cash ${totals[key] >= 0 ? 'from' : 'used in'} ${title.toLowerCase()}`, totals[key], { total: true });
+    return h;
+  };
+  cf += section('Operating activities', 'operating');
+  cf += section('Investing activities', 'investing');
+  cf += section('Financing activities', 'financing');
+  cf += lineRow('Net increase / (decrease) in cash and cash equivalents', netChange, { total: true });
+  cf += lineRow('Cash and cash equivalents at beginning of period', 0);
+  cf += lineRow('Cash and cash equivalents at end of period', netChange, { total: true });
+  document.getElementById('cashflow-body').innerHTML = cf;
+
+  const checkEl = document.getElementById('cashflow-check');
+  const matches = Math.abs(netChange - cashBalance) < 0.005;
+  checkEl.textContent = matches ? 'reconciles to ledger' : `check: ledger cash = ${fmt(cashBalance)}`;
+  checkEl.style.color = matches ? 'var(--good)' : '#ff5d5d';
+}
+
+function printFinancialStatements() {
+  if (!transactions.length) { alert('No transactions to report yet.'); return; }
+  const pnl = document.getElementById('pnl-body').innerHTML;
+  const sofp = document.getElementById('sofp-body').innerHTML;
+  const cf = document.getElementById('cashflow-body').innerHTML;
+  const period = document.getElementById('period-label').textContent;
+  const win = window.open('', '_blank');
+  win.document.write(`<html><head><title>Financial Statements</title><style>
+    body{font-family:-apple-system,sans-serif;padding:24px;color:#111;} h1{font-size:18px;} h2{font-size:14px;margin-top:24px;}
+    table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px;} td{padding:5px 8px;} td:last-child{text-align:right;font-variant-numeric:tabular-nums;}
+    .sub{color:#666;font-size:12px;} </style></head><body>
+    <h1>Financial Statements — ${escapeHtml(currentCompany.name)}</h1><div class="sub">Period: ${period}</div>
+    <h2>Statement of Profit or Loss</h2><table>${pnl}</table>
+    <h2>Statement of Financial Position</h2><table>${sofp}</table>
+    <h2>Statement of Cash Flows</h2><table>${cf}</table>
+    </body></html>`);
+  win.document.close(); win.focus(); setTimeout(() => win.print(), 300);
+}
+
+document.getElementById('f-date').valueAsDate = new Date();
+boot();
+</script>
+</body>
+</html>
