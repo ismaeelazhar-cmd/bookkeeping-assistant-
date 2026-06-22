@@ -3126,6 +3126,68 @@ def period_close(company_id):
     return jsonify({"posted": posted, "skipped": skipped})
 
 
+# ---------- payroll journal wizard ----------
+
+@app.route("/api/companies/<int:company_id>/payroll-journal", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def post_payroll_journal(company_id):
+    """The most common compound journal a small business runs: one gross pay figure splits into
+    what's owed to HMRC (PAYE + both employee and employer NI), what's owed to the pension
+    provider (both employee and employer contributions), and what actually hits the employee's
+    bank account. Posted as DR Salary Expense (the full cost: gross + employer NI + employer
+    pension) against four credit legs sharing one journal_id — mathematically the same shape as
+    the existing compound-journal endpoint (one pivot, several lines), just with payroll-specific
+    inputs and a server-computed net pay instead of requiring the caller to do the arithmetic."""
+    data = request.get_json(force=True) or {}
+    date = data.get("date")
+    label = (data.get("label") or "Payroll").strip()
+    gross_pay = float(data.get("grossPay") or 0)
+    employer_ni = float(data.get("employerNi") or 0)
+    employee_ni = float(data.get("employeeNi") or 0)
+    paye = float(data.get("paye") or 0)
+    employee_pension = float(data.get("employeePension") or 0)
+    employer_pension = float(data.get("employerPension") or 0)
+
+    if not date or gross_pay <= 0:
+        return jsonify({"error": "Date and a positive gross pay are required."}), 400
+    if any(v < 0 for v in (employer_ni, employee_ni, paye, employee_pension, employer_pension)):
+        return jsonify({"error": "Deduction amounts can't be negative."}), 400
+
+    net_pay = round(gross_pay - employee_ni - paye - employee_pension, 2)
+    if net_pay <= 0:
+        return jsonify({"error": "Net pay works out to zero or negative — check the deduction amounts against gross pay."}), 400
+
+    db = get_db()
+    salary_account = resolve_account(db, company_id, "Salary Expense", "expense")
+    credit_legs = [
+        (resolve_account(db, company_id, "NI Payable", "current_liability"), round(employee_ni + employer_ni, 2)),
+        (resolve_account(db, company_id, "PAYE Payable", "current_liability"), round(paye, 2)),
+        (resolve_account(db, company_id, "Pension Payable", "current_liability"), round(employee_pension + employer_pension, 2)),
+        (resolve_account(db, company_id, "Net Pay Payable", "current_liability"), net_pay),
+    ]
+    credit_legs = [(acc, amt) for acc, amt in credit_legs if amt > 0]
+    if not credit_legs:
+        return jsonify({"error": "Nothing to post — all amounts are zero."}), 400
+
+    journal_id = uuid.uuid4().hex
+    posted = []
+    try:
+        for acc, amt in credit_legs:
+            tx_id = post_ledger_transaction(
+                db, company_id, date, f"{label} ({acc})", amt, salary_account, acc, journal_id=journal_id
+            )
+            posted.append(tx_id)
+    except LedgerError as e:
+        db.rollback()
+        return jsonify({"error": e.message}), e.status
+
+    db.commit()
+    total_cost = sum(amt for _, amt in credit_legs)
+    return jsonify({"journalId": journal_id, "transactionIds": posted, "netPay": net_pay, "totalCost": total_cost})
+
+
 init_db()  # runs on import too, not just `python3 server.py` directly — gunicorn imports this module without executing __main__
 
 if __name__ == "__main__":

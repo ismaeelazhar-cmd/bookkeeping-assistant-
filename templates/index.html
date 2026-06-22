@@ -392,6 +392,30 @@
       <button class="btn-primary" onclick="postCompoundJournal()">Post compound journal</button>
       <div id="cj-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Payroll Journal</h2>
+      <div class="sub" style="margin-bottom:12px;">Enter the figures from your payroll run (or payslip) — this posts DR Salary Expense against CR NI Payable / PAYE Payable / Pension Payable / Net Pay Payable in one linked journal. Net pay is calculated, not entered.</div>
+      <div class="row2">
+        <div><label>Date</label><input type="date" id="pr-date"></div>
+        <div><label>Label</label><input type="text" id="pr-label" placeholder="e.g. June payroll"></div>
+      </div>
+      <label>Gross pay</label>
+      <input type="number" id="pr-gross" step="0.01" min="0" placeholder="0.00" oninput="updatePayrollPreview()">
+      <div class="row2">
+        <div><label>Employee NI</label><input type="number" id="pr-employee-ni" step="0.01" min="0" placeholder="0.00" oninput="updatePayrollPreview()"></div>
+        <div><label>Employer NI</label><input type="number" id="pr-employer-ni" step="0.01" min="0" placeholder="0.00" oninput="updatePayrollPreview()"></div>
+      </div>
+      <div class="row2">
+        <div><label>Employee pension</label><input type="number" id="pr-employee-pension" step="0.01" min="0" placeholder="0.00" oninput="updatePayrollPreview()"></div>
+        <div><label>Employer pension</label><input type="number" id="pr-employer-pension" step="0.01" min="0" placeholder="0.00" oninput="updatePayrollPreview()"></div>
+      </div>
+      <label>PAYE</label>
+      <input type="number" id="pr-paye" step="0.01" min="0" placeholder="0.00" oninput="updatePayrollPreview()">
+      <div class="sub" id="pr-preview" style="margin:8px 0; font-weight:600;"></div>
+      <button class="btn-primary" onclick="postPayrollJournal()">Post payroll journal</button>
+      <div id="pr-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
   </div>
 
   <div class="page" data-page="bank" style="display:none;">
@@ -2960,6 +2984,55 @@ async function postCompoundJournal() {
   updateCompoundJournalTotal();
   addCompoundJournalRow();
   addCompoundJournalRow();
+  await refreshAll();
+}
+
+// ---------- payroll journal wizard ----------
+
+function readPayrollForm() {
+  const num = id => parseFloat(document.getElementById(id).value) || 0;
+  const gross = num('pr-gross');
+  const employeeNi = num('pr-employee-ni');
+  const employerNi = num('pr-employer-ni');
+  const employeePension = num('pr-employee-pension');
+  const employerPension = num('pr-employer-pension');
+  const paye = num('pr-paye');
+  const netPay = Math.round((gross - employeeNi - paye - employeePension) * 100) / 100;
+  return { gross, employeeNi, employerNi, employeePension, employerPension, paye, netPay };
+}
+
+function updatePayrollPreview() {
+  const { gross, employerNi, employerPension, netPay } = readPayrollForm();
+  const previewEl = document.getElementById('pr-preview');
+  if (!gross) { previewEl.textContent = ''; return; }
+  const totalCost = gross + employerNi + employerPension;
+  previewEl.textContent = `Net pay: ${fmt(netPay)} · Total cost to the business (incl. employer NI + pension): ${fmt(totalCost)}`;
+}
+
+async function postPayrollJournal() {
+  const date = document.getElementById('pr-date').value;
+  const label = document.getElementById('pr-label').value.trim() || 'Payroll';
+  const statusEl = document.getElementById('pr-status');
+  const form = readPayrollForm();
+  if (!date || form.gross <= 0) { statusEl.textContent = 'Date and a positive gross pay are required.'; return; }
+  if (form.netPay <= 0) { statusEl.textContent = 'Net pay works out to zero or negative — check the deductions against gross pay.'; return; }
+
+  try {
+    const result = await api(`/api/companies/${currentCompany.id}/payroll-journal`, {
+      method: 'POST',
+      body: JSON.stringify({
+        date, label, grossPay: form.gross, employerNi: form.employerNi, employeeNi: form.employeeNi,
+        paye: form.paye, employeePension: form.employeePension, employerPension: form.employerPension,
+      })
+    });
+    showToast(`Payroll posted — net pay ${fmt(result.netPay)}, total cost ${fmt(result.totalCost)}.`, 'success');
+    statusEl.textContent = '';
+  } catch (e) { statusEl.textContent = e.message; showToast(e.message, 'error'); return; }
+
+  ['pr-label', 'pr-gross', 'pr-employee-ni', 'pr-employer-ni', 'pr-employee-pension', 'pr-employer-pension', 'pr-paye'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('pr-preview').textContent = '';
   await refreshAll();
 }
 
