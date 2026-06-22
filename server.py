@@ -22,9 +22,21 @@ UPLOADS_DIR = BASE_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # 10MB
 
+def load_or_create_secret_key():
+    """Stage 7: persist the session secret to disk so a server restart doesn't log
+    everyone out. The file is gitignored, same treatment as data.sqlite."""
+    secret_path = BASE_DIR / ".secret_key"
+    if secret_path.exists():
+        return secret_path.read_text().strip()
+    key = secrets.token_hex(32)
+    secret_path.write_text(key)
+    secret_path.chmod(0o600)
+    return key
+
+
 app = Flask(__name__, static_folder=str(BASE_DIR / "static"))
+app.secret_key = load_or_create_secret_key()
 app.config["MAX_CONTENT_LENGTH"] = MAX_ATTACHMENT_BYTES
-app.secret_key = secrets.token_hex(32)  # regenerates on restart -> logs everyone out on deploy; fine for now
 
 
 def get_db():
