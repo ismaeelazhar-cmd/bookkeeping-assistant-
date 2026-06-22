@@ -364,6 +364,18 @@ def init_db():
             UNIQUE (company_id, name COLLATE NOCASE)
         );
 
+        -- Cost centres / departments, opt-in (companies.cost_centres_enabled): tag a transaction
+        -- with a department to get a P&L broken down by department. Same mechanism as funds
+        -- (deliberate creation, not auto-create — a typo in a department name shouldn't silently
+        -- spawn a new one) but for trading companies rather than nonprofits.
+        CREATE TABLE IF NOT EXISTS departments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (company_id, name COLLATE NOCASE)
+        );
+
         -- Multi-entity consolidation: a simple named grouping of companies the same user owns.
         -- The consolidated report sums matching account lines across members — it's a plain
         -- aggregation, not true consolidation accounting (no intercompany eliminations).
@@ -489,6 +501,10 @@ def init_db():
     )
     if "fund_id" not in tx_cols:
         db.execute("ALTER TABLE transactions ADD COLUMN fund_id INTEGER DEFAULT NULL REFERENCES funds(id)")
+    if "department_id" not in tx_cols:
+        db.execute("ALTER TABLE transactions ADD COLUMN department_id INTEGER DEFAULT NULL REFERENCES departments(id)")
+    if "cost_centres_enabled" not in company_cols:
+        db.execute("ALTER TABLE companies ADD COLUMN cost_centres_enabled INTEGER DEFAULT 0")
     if "currency" not in company_cols:
         db.execute("ALTER TABLE companies ADD COLUMN currency TEXT NOT NULL DEFAULT 'GBP'")
     if "confidence_threshold" not in company_cols:
@@ -617,6 +633,17 @@ def resolve_fund_id(db, company_id, fund_name):
     ).fetchone()
     if row is None:
         raise LedgerError(f'No fund named "{fund_name}" — create it first under Funds.')
+    return row["id"]
+
+
+def resolve_department_id(db, company_id, department_name):
+    if not department_name:
+        return None
+    row = db.execute(
+        "SELECT id FROM departments WHERE company_id = ? AND name = ? COLLATE NOCASE", (company_id, department_name)
+    ).fetchone()
+    if row is None:
+        raise LedgerError(f'No department named "{department_name}" — create it first under Departments.')
     return row["id"]
 
 
@@ -916,12 +943,12 @@ def list_companies():
     db = get_db()
     rows = db.execute(
         "SELECT id, name, default_credit_account, ai_api_key, locked_until, period_start_date, "
-        "fund_accounting_enabled, plaid_client_id, plaid_secret, plaid_env, confidence_threshold, "
+        "fund_accounting_enabled, plaid_client_id, plaid_secret, plaid_env, confidence_threshold, cost_centres_enabled, "
         "'owner' as permission "
         "FROM companies WHERE user_id = ? "
         "UNION ALL "
         "SELECT c.id, c.name, c.default_credit_account, c.ai_api_key, c.locked_until, c.period_start_date, "
-        "c.fund_accounting_enabled, c.plaid_client_id, c.plaid_secret, c.plaid_env, c.confidence_threshold, "
+        "c.fund_accounting_enabled, c.plaid_client_id, c.plaid_secret, c.plaid_env, c.confidence_threshold, c.cost_centres_enabled, "
         "cm.permission "
         "FROM companies c JOIN company_members cm ON cm.company_id = c.id "
         "WHERE cm.user_id = ? "
@@ -954,7 +981,7 @@ def create_company():
         "id": cur.lastrowid, "name": name, "default_credit_account": "", "ai_api_key_set": False,
         "locked_until": "", "period_start_date": "", "fund_accounting_enabled": 0,
         "plaid_client_id": "", "plaid_secret_set": False, "plaid_env": "sandbox", "permission": "owner",
-        "confidence_threshold": 0.7,
+        "confidence_threshold": 0.7, "cost_centres_enabled": 0,
     })
 
 
@@ -980,11 +1007,13 @@ def update_settings(company_id):
     confidence_threshold = min(1.0, max(0.0, confidence_threshold))
     db.execute(
         "UPDATE companies SET default_credit_account = ?, locked_until = ?, period_start_date = ?, "
-        "fund_accounting_enabled = ?, plaid_client_id = ?, plaid_env = ?, confidence_threshold = ? WHERE id = ?",
+        "fund_accounting_enabled = ?, plaid_client_id = ?, plaid_env = ?, confidence_threshold = ?, "
+        "cost_centres_enabled = ? WHERE id = ?",
         (
             data.get("defaultCreditAccount", ""), data.get("lockedUntil", ""), data.get("periodStartDate", ""),
             1 if data.get("fundAccountingEnabled") else 0,
-            data.get("plaidClientId", ""), data.get("plaidEnv") or "sandbox", confidence_threshold, company_id,
+            data.get("plaidClientId", ""), data.get("plaidEnv") or "sandbox", confidence_threshold,
+            1 if data.get("costCentresEnabled") else 0, company_id,
         ),
     )
     # The AI key and Plaid secret are write-only from the client's perspective: a blank field
@@ -1340,6 +1369,56 @@ def delete_fund(company_id, fund_id):
     return jsonify({"ok": True})
 
 
+# ---------- departments / cost centres, opt-in ----------
+
+@app.route("/api/companies/<int:company_id>/departments", methods=["GET"])
+@login_required
+@company_required
+def list_departments(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, name FROM departments WHERE company_id = ? ORDER BY name", (company_id,)
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/departments", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def create_department(company_id):
+    data = request.get_json(force=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Department name is required."}), 400
+    db = get_db()
+    existing = db.execute(
+        "SELECT id FROM departments WHERE company_id = ? AND name = ? COLLATE NOCASE", (company_id, name)
+    ).fetchone()
+    if existing:
+        return jsonify({"error": f'A department named "{name}" already exists.'}), 409
+    cur = db.execute("INSERT INTO departments (company_id, name) VALUES (?,?)", (company_id, name))
+    db.commit()
+    return jsonify({"id": cur.lastrowid})
+
+
+@app.route("/api/companies/<int:company_id>/departments/<int:department_id>", methods=["DELETE"])
+@login_required
+@company_required
+@write_required
+def delete_department(company_id, department_id):
+    db = get_db()
+    in_use = db.execute(
+        "SELECT COUNT(*) as n FROM transactions WHERE company_id = ? AND department_id = ? AND voided_at IS NULL",
+        (company_id, department_id),
+    ).fetchone()["n"]
+    if in_use:
+        return jsonify({"error": f"This department is used by {in_use} transaction(s) and can't be deleted."}), 409
+    db.execute("DELETE FROM departments WHERE id = ? AND company_id = ?", (department_id, company_id))
+    db.commit()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/companies/<int:company_id>/sofa", methods=["GET"])
 @login_required
 @company_required
@@ -1469,9 +1548,9 @@ def list_transactions(company_id):
         f"SELECT t.id, t.date, t.desc, t.amount_pence as amountPence, t.debit, t.credit, t.tax_year as taxYear, "
         f"t.vat_rate as vatRate, t.vat_direction as vatDirection, t.confidence, t.journal_id as journalId, "
         f"t.voided_at as voidedAt, t.voided_by as voidedBy, t.reviewed_by as reviewedBy, t.reviewed_at as reviewedAt, "
-        f"f.name as fund, "
+        f"f.name as fund, d.name as department, "
         f"(SELECT COUNT(*) FROM attachments a WHERE a.transaction_id = t.id) as attachmentCount "
-        f"FROM transactions t LEFT JOIN funds f ON f.id = t.fund_id "
+        f"FROM transactions t LEFT JOIN funds f ON f.id = t.fund_id LEFT JOIN departments d ON d.id = t.department_id "
         f"WHERE t.company_id = ? {voided_clause} ORDER BY t.date",
         (company_id,),
     ).fetchall()
@@ -1516,7 +1595,8 @@ class LedgerError(Exception):
 
 
 def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit,
-                             vat_rate=0, vat_direction="", confidence="high", journal_id=None, fund_id=None):
+                             vat_rate=0, vat_direction="", confidence="high", journal_id=None, fund_id=None,
+                             department_id=None):
     """Shared insert path for anything that writes to the ledger — manual entries, bulk
     imports, invoice/bill send-and-pay postings, and (Stage 2) compound journal legs — so
     they all get the same account resolution, locking check, preset learning, and audit trail.
@@ -1557,9 +1637,9 @@ def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit,
     leg_journal_id = journal_id or (uuid.uuid4().hex if vat_pence else None)
 
     cur = db.execute(
-        "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (company_id, date, desc, net_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, leg_journal_id, fund_id),
+        "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id, department_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (company_id, date, desc, net_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, leg_journal_id, fund_id, department_id),
     )
     main_id = cur.lastrowid
 
@@ -1570,9 +1650,9 @@ def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit,
         else:  # output: sale, VAT is owed to HMRC, sits as a credit
             vat_debit, vat_credit = debit, vat_account
         db.execute(
-            "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (company_id, date, f"{desc} (VAT)", vat_pence, vat_debit, vat_credit, tax_year, vat_rate, vat_direction, confidence, leg_journal_id, fund_id),
+            "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id, department_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (company_id, date, f"{desc} (VAT)", vat_pence, vat_debit, vat_credit, tax_year, vat_rate, vat_direction, confidence, leg_journal_id, fund_id, department_id),
         )
 
     db.execute(
@@ -1595,11 +1675,12 @@ def create_transaction(company_id):
     db = get_db()
     try:
         fund_id = resolve_fund_id(db, company_id, data.get("fund"))
+        department_id = resolve_department_id(db, company_id, data.get("department"))
         tx_id = post_ledger_transaction(
             db, company_id, data.get("date"), data.get("desc"), data.get("amount"),
             data.get("debit"), data.get("credit"),
             float(data.get("vatRate") or 0), data.get("vatDirection") or "",
-            data.get("confidence") or "high", fund_id=fund_id,
+            data.get("confidence") or "high", fund_id=fund_id, department_id=department_id,
         )
     except LedgerError as e:
         return jsonify({"error": e.message}), e.status

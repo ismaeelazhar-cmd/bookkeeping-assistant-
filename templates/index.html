@@ -314,6 +314,11 @@
           <select id="f-fund"><option value="">— none —</option></select>
         </div>
 
+        <div id="f-department-row" style="display:none;">
+          <label>Department <span style="color:var(--muted); font-weight:400;">(optional)</span></label>
+          <select id="f-department"><option value="">— none —</option></select>
+        </div>
+
         <button class="btn-primary" onclick="addTransaction()">Post Transaction</button>
         <div id="form-error" style="color:var(--bad); font-size:12px; margin-top:8px;"></div>
 
@@ -729,6 +734,21 @@
       </table>
     </div>
 
+    <div class="panel" id="cost-centres-panels" style="margin-top:20px; display:none;">
+      <h2>Departments</h2>
+      <div class="sub" style="margin-bottom:12px;">Departments need a deliberate creation step — they don't auto-create from typing like accounts do.</div>
+      <table class="inbox"><thead><tr><th>Name</th><th></th></tr></thead><tbody id="departments-body"></tbody></table>
+      <div class="row2" style="margin-top:12px;">
+        <div><label>New department name</label><input type="text" id="department-new-name" placeholder="e.g. Operations"></div>
+        <div><label>&nbsp;</label><button class="btn-primary" style="width:100%;" onclick="addDepartment()">Add department</button></div>
+      </div>
+      <div id="department-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+
+      <h2 style="margin-top:24px;">P&amp;L by Department</h2>
+      <div class="sub" style="margin-bottom:12px;">Revenue, COGS, and expenses for the selected period, broken down by department. Transactions with no department tag are grouped under "Untagged".</div>
+      <table class="trial" id="dept-pnl-table" style="margin-top:10px;"></table>
+    </div>
+
     <div class="panel" style="margin-top:20px;">
       <h2>VAT Return</h2>
       <div class="sub" style="margin-bottom:12px;">Simplified UK VAT return boxes, calculated from transactions tagged with Input/Output VAT in the period below. This is a working figure for review with your accountant/MTD software, not a filing in itself.</div>
@@ -785,6 +805,12 @@
       <div class="sub" style="margin-bottom:8px;">For charities/nonprofits: tag transactions with a fund (restricted/designated/unrestricted) and get a Statement of Financial Activities. Off by default — turning it on changes nothing else about how this company works.</div>
       <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); margin:0;">
         <input type="checkbox" id="f-fund-accounting" style="width:auto;" onchange="saveSettings(); toggleFundAccountingUI();"> Enable fund accounting
+      </label>
+
+      <h2 style="margin-top:24px;">Cost Centres / Departments</h2>
+      <div class="sub" style="margin-bottom:8px;">For trading companies: tag transactions with a department (Sales, Operations, HR) and get a P&L broken down by department. Off by default — turning it on changes nothing else about how this company works.</div>
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); margin:0;">
+        <input type="checkbox" id="f-cost-centres" style="width:auto;" onchange="saveSettings(); toggleCostCentresUI();"> Enable cost centres
       </label>
     </div>
 
@@ -1153,6 +1179,8 @@ async function openCompany(id) {
   document.getElementById('f-period-start').value = currentCompany.period_start_date || '';
   document.getElementById('f-fund-accounting').checked = !!currentCompany.fund_accounting_enabled;
   toggleFundAccountingUI();
+  document.getElementById('f-cost-centres').checked = !!currentCompany.cost_centres_enabled;
+  toggleCostCentresUI();
   document.getElementById('plaid-client-id').value = currentCompany.plaid_client_id || '';
   document.getElementById('plaid-env').value = currentCompany.plaid_env || 'sandbox';
   document.getElementById('plaid-secret').value = '';
@@ -1178,6 +1206,7 @@ async function saveSettings() {
   currentCompany.locked_until = document.getElementById('f-locked-until').value;
   currentCompany.period_start_date = document.getElementById('f-period-start').value;
   currentCompany.fund_accounting_enabled = document.getElementById('f-fund-accounting').checked;
+  currentCompany.cost_centres_enabled = document.getElementById('f-cost-centres').checked;
   currentCompany.confidence_threshold = parseFloat(document.getElementById('f-confidence-threshold').value);
   const newKey = document.getElementById('ai-api-key').value.trim();
   await api(`/api/companies/${currentCompany.id}/settings`, {
@@ -1188,6 +1217,7 @@ async function saveSettings() {
       lockedUntil: currentCompany.locked_until,
       periodStartDate: currentCompany.period_start_date,
       fundAccountingEnabled: currentCompany.fund_accounting_enabled,
+      costCentresEnabled: currentCompany.cost_centres_enabled,
       confidenceThreshold: currentCompany.confidence_threshold
     })
   });
@@ -1348,7 +1378,7 @@ let bankConnections = [];
 
 async function refreshAll() {
   const cid = currentCompany.id;
-  [transactions, presets, chartAccounts, bankLines, fixedAssets, openingBalances, contacts, invoicesBills, agingReport, teamMembers, funds, bankConnections, purchaseOrders] = await Promise.all([
+  [transactions, presets, chartAccounts, bankLines, fixedAssets, openingBalances, contacts, invoicesBills, agingReport, teamMembers, funds, bankConnections, purchaseOrders, departments] = await Promise.all([
     api(`/api/companies/${cid}/transactions`),
     api(`/api/companies/${cid}/presets`),
     api(`/api/companies/${cid}/accounts`),
@@ -1361,13 +1391,16 @@ async function refreshAll() {
     api(`/api/companies/${cid}/members`),
     api(`/api/companies/${cid}/funds`),
     api(`/api/companies/${cid}/bank-connections`),
-    api(`/api/companies/${cid}/purchase-orders`)
+    api(`/api/companies/${cid}/purchase-orders`),
+    api(`/api/companies/${cid}/departments`)
   ]);
   renderBankConnections();
   populateAccountSelects();
   populateContactSelect();
   populateFundSelect();
+  populateDepartmentSelect();
   renderFunds();
+  renderDepartments();
   render();
   renderTeam();
   loadAuditLog();
@@ -1411,11 +1444,12 @@ async function addTransaction() {
 
   errEl.textContent = '';
   const fund = document.getElementById('f-fund').value;
+  const department = document.getElementById('f-department').value;
 
   let result;
   try {
     result = await api(`/api/companies/${currentCompany.id}/transactions`, {
-      method: 'POST', body: JSON.stringify({ date, desc, amount, debit, credit, vatRate, vatDirection, fund })
+      method: 'POST', body: JSON.stringify({ date, desc, amount, debit, credit, vatRate, vatDirection, fund, department })
     });
   } catch (e) { errEl.textContent = e.message; showToast(e.message, 'error'); return; }
 
@@ -1429,6 +1463,7 @@ async function addTransaction() {
   document.getElementById('f-vat-rate').value = '0';
   document.getElementById('f-vat-direction').value = '';
   document.getElementById('f-fund').value = '';
+  document.getElementById('f-department').value = '';
   document.getElementById('suggest-hint').textContent = '';
   document.getElementById('vat-preview').textContent = '';
   await refreshAll();
@@ -1657,7 +1692,7 @@ function render() {
   renderAccounts(); renderJournal(); renderTrialBalance();
   renderChartOfAccounts(); renderFinancialStatements(); renderBrecTable(); renderFixedAssets();
   renderOpeningBalances(); renderContacts(); renderInvoicesBills(); renderAgingReport();
-  renderDashboard(); renderAnomalies(); renderPurchaseOrders(); renderBudgetVsActual();
+  renderDashboard(); renderAnomalies(); renderPurchaseOrders(); renderBudgetVsActual(); renderDeptPnl();
 }
 
 function renderAnomalies() {
@@ -3528,6 +3563,86 @@ async function loadSofa() {
     </tr>`).join('');
   document.getElementById('sofa-total-row').innerHTML =
     `<td>Total</td><td class="num">${fmt(data.totalIncoming)}</td><td class="num">${fmt(data.totalExpended)}</td><td class="num">${fmt(data.netMovement)}</td>`;
+}
+
+// ---------- Departments / cost centres (opt-in) ----------
+
+let departments = [];
+
+function toggleCostCentresUI() {
+  const on = document.getElementById('f-cost-centres').checked;
+  document.getElementById('f-department-row').style.display = on ? '' : 'none';
+  document.getElementById('cost-centres-panels').style.display = on ? '' : 'none';
+  if (on) renderDeptPnl();
+}
+
+function populateDepartmentSelect() {
+  const el = document.getElementById('f-department');
+  if (!el) return;
+  const prev = el.value;
+  el.innerHTML = '<option value="">— none —</option>' + departments.map(d => `<option value="${escapeHtml(d.name)}">${escapeHtml(d.name)}</option>`).join('');
+  if (departments.some(d => d.name === prev)) el.value = prev;
+}
+
+function renderDepartments() {
+  const body = document.getElementById('departments-body');
+  if (!body) return;
+  body.innerHTML = departments.length ? departments.map(d => `
+    <tr>
+      <td>${escapeHtml(d.name)}</td>
+      <td><button class="btn-danger" onclick="deleteDepartment(${d.id}, '${d.name.replace(/'/g, "\\'")}')">✕</button></td>
+    </tr>`).join('') : '<tr><td colspan="2" class="empty">No departments yet.</td></tr>';
+}
+
+async function addDepartment() {
+  const name = document.getElementById('department-new-name').value.trim();
+  const statusEl = document.getElementById('department-status');
+  if (!name) { statusEl.textContent = 'Enter a department name.'; return; }
+  try {
+    await api(`/api/companies/${currentCompany.id}/departments`, { method: 'POST', body: JSON.stringify({ name }) });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = '';
+  document.getElementById('department-new-name').value = '';
+  departments = await api(`/api/companies/${currentCompany.id}/departments`);
+  populateDepartmentSelect();
+  renderDepartments();
+}
+
+async function deleteDepartment(id, name) {
+  if (!(await confirmAction(`Delete department "${name}"? Only possible if no transactions use it.`))) return;
+  try {
+    await api(`/api/companies/${currentCompany.id}/departments/${id}`, { method: 'DELETE' });
+  } catch (e) { alert(e.message); return; }
+  departments = await api(`/api/companies/${currentCompany.id}/departments`);
+  populateDepartmentSelect();
+  renderDepartments();
+}
+
+function renderDeptPnl() {
+  const table = document.getElementById('dept-pnl-table');
+  if (!table || !document.getElementById('f-cost-centres').checked) return;
+  const byDept = {}; // deptName -> { revenue, cogs, expense }
+  const ensure = name => byDept[name] || (byDept[name] = { revenue: 0, cogs: 0, expense: 0 });
+  for (const t of transactions) {
+    const deptName = t.department || 'Untagged';
+    for (const line of expandTransactionLines(t)) {
+      const type = getAccountType(line.account);
+      if (type !== 'revenue' && type !== 'cogs' && type !== 'expense') continue;
+      const bucket = ensure(deptName);
+      const sign = (type === 'revenue') ? (line.side === 'credit' ? 1 : -1) : (line.side === 'debit' ? 1 : -1);
+      bucket[type] += sign * line.amount;
+    }
+  }
+  const names = Object.keys(byDept).sort();
+  if (!names.length) { table.innerHTML = '<tr><td class="empty">No transactions yet.</td></tr>'; return; }
+  let html = '<thead><tr><td><b>Department</b></td><td class="num"><b>Revenue</b></td><td class="num"><b>COGS</b></td><td class="num"><b>Expenses</b></td><td class="num"><b>Net</b></td></tr></thead><tbody>';
+  for (const name of names) {
+    const b = byDept[name];
+    const net = b.revenue - b.cogs - b.expense;
+    html += `<tr><td>${escapeHtml(name)}</td><td class="num">${fmt(b.revenue)}</td><td class="num">${fmt(b.cogs)}</td><td class="num">${fmt(b.expense)}</td><td class="num">${fmt(net)}</td></tr>`;
+  }
+  html += '</tbody>';
+  table.innerHTML = html;
 }
 
 // ---------- Team & permissions ----------
