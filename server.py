@@ -371,6 +371,36 @@ def init_db():
             company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
             PRIMARY KEY (group_id, company_id)
         );
+
+        -- A formal reconciliation "session" against one cash account for one statement date —
+        -- separate from bank_lines (the individual imported statement rows), which already
+        -- existed. This adds the higher-level open/close workflow: a rec is open while lines are
+        -- being matched, then closed once the cleared balance ties to the statement.
+        CREATE TABLE IF NOT EXISTS bank_reconciliations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            account TEXT NOT NULL,
+            statement_date TEXT NOT NULL,
+            statement_closing_balance_pence INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- A template for a journal that repeats on a fixed cadence (rent, loan interest,
+        -- subscriptions). period-close posts every due one as a normal transaction and advances
+        -- next_due — it doesn't run automatically on a schedule, only when period-close is called.
+        CREATE TABLE IF NOT EXISTS recurring_journals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            label TEXT NOT NULL,
+            frequency TEXT NOT NULL DEFAULT 'monthly',
+            next_due TEXT NOT NULL,
+            debit TEXT NOT NULL,
+            credit TEXT NOT NULL,
+            amount_pence INTEGER NOT NULL,
+            end_date TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     # additive column for compound journals — safe to ALTER in place, no need to wipe data for this one
@@ -2304,6 +2334,47 @@ def delete_fixed_asset(company_id, asset_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/companies/<int:company_id>/fixed-assets/<int:asset_id>/run-depreciation", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def run_depreciation(company_id, asset_id):
+    """Posts one straight-line monthly depreciation charge for a single asset: Dr depreciation
+    account / Cr accumulated depreciation account, tagged with the given (or today's) date. Capped
+    at the asset's remaining depreciable amount (cost - residual - depreciation already posted) so
+    repeated runs can't depreciate an asset below its residual value."""
+    db = get_db()
+    asset = db.execute(
+        "SELECT * FROM fixed_assets WHERE id = ? AND company_id = ?", (asset_id, company_id)
+    ).fetchone()
+    if asset is None:
+        return jsonify({"error": "Not found."}), 404
+    data = request.get_json(force=True) or {}
+    run_date = data.get("date") or datetime.date.today().isoformat()
+
+    depreciable_pence = asset["cost_pence"] - asset["residual_value_pence"]
+    already_posted = db.execute(
+        "SELECT COALESCE(SUM(amount_pence), 0) as total FROM transactions "
+        "WHERE company_id = ? AND credit = ? AND voided_at IS NULL",
+        (company_id, asset["accum_account"]),
+    ).fetchone()["total"]
+    remaining_pence = depreciable_pence - already_posted
+    charge_pence = round(depreciable_pence / asset["useful_life_years"] / 12)
+    charge_pence = max(0, min(charge_pence, remaining_pence))
+    if charge_pence <= 0:
+        return jsonify({"error": "This asset is already fully depreciated."}), 400
+
+    try:
+        tx_id = post_ledger_transaction(
+            db, company_id, run_date, f"Depreciation — {asset['name']}", from_pence(charge_pence),
+            asset["depreciation_account"], asset["accum_account"],
+        )
+    except LedgerError as e:
+        return jsonify({"error": e.message}), e.status
+    db.commit()
+    return jsonify({"transactionId": tx_id, "amount": from_pence(charge_pence)})
+
+
 # ---------- full data export ----------
 
 @app.route("/api/companies/<int:company_id>/export", methods=["GET"])
@@ -2624,6 +2695,222 @@ def match_bank_line(company_id, line_id):
     )
     db.commit()
     return jsonify({"ok": True})
+
+
+# ---------- bank reconciliations (formal open/close workflow, on top of bank_lines) ----------
+
+def _serialize_reconciliation(row):
+    d = dict(row)
+    d["statementClosingBalance"] = from_pence(d.pop("statement_closing_balance_pence"))
+    d["statementDate"] = d.pop("statement_date")
+    return d
+
+
+@app.route("/api/companies/<int:company_id>/reconciliations", methods=["GET"])
+@login_required
+@company_required
+def list_reconciliations(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, account, statement_date, statement_closing_balance_pence, status, created_at "
+        "FROM bank_reconciliations WHERE company_id = ? ORDER BY statement_date DESC",
+        (company_id,),
+    ).fetchall()
+    return jsonify([_serialize_reconciliation(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/reconciliations", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def create_reconciliation(company_id):
+    data = request.get_json(force=True) or {}
+    account = (data.get("account") or "").strip()
+    statement_date = data.get("statementDate")
+    statement_balance = data.get("statementClosingBalance")
+    if not account or not statement_date or statement_balance is None:
+        return jsonify({"error": "Account, statement date, and closing balance are required."}), 400
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO bank_reconciliations (company_id, account, statement_date, statement_closing_balance_pence) "
+        "VALUES (?,?,?,?)",
+        (company_id, account, statement_date, to_pence(statement_balance)),
+    )
+    db.commit()
+    return jsonify({"id": cur.lastrowid})
+
+
+@app.route("/api/companies/<int:company_id>/reconciliations/<int:rec_id>/clear-line", methods=["PUT"])
+@login_required
+@company_required
+@write_required
+def clear_reconciliation_line(company_id, rec_id):
+    db = get_db()
+    rec = db.execute(
+        "SELECT id FROM bank_reconciliations WHERE id = ? AND company_id = ?", (rec_id, company_id)
+    ).fetchone()
+    if rec is None:
+        return jsonify({"error": "Reconciliation not found."}), 404
+    data = request.get_json(force=True) or {}
+    line_id = data.get("lineId")
+    tx_id = data.get("transactionId")
+    if not line_id:
+        return jsonify({"error": "lineId is required."}), 400
+    if tx_id is not None:
+        tx = db.execute(
+            "SELECT id FROM transactions WHERE id = ? AND company_id = ?", (tx_id, company_id)
+        ).fetchone()
+        if tx is None:
+            return jsonify({"error": "Transaction not found."}), 404
+    db.execute(
+        "UPDATE bank_lines SET matched_transaction_id = ? WHERE id = ? AND company_id = ?",
+        (tx_id, line_id, company_id),
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/reconciliations/<int:rec_id>/close", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def close_reconciliation(company_id, rec_id):
+    db = get_db()
+    rec = db.execute(
+        "SELECT * FROM bank_reconciliations WHERE id = ? AND company_id = ?", (rec_id, company_id)
+    ).fetchone()
+    if rec is None:
+        return jsonify({"error": "Reconciliation not found."}), 404
+    if rec["status"] == "closed":
+        return jsonify({"error": "This reconciliation is already closed."}), 400
+
+    cleared_pence = db.execute(
+        "SELECT COALESCE(SUM(amount_pence), 0) as total FROM bank_lines "
+        "WHERE company_id = ? AND cash_account = ? AND matched_transaction_id IS NOT NULL",
+        (company_id, rec["account"]),
+    ).fetchone()["total"]
+    if cleared_pence != rec["statement_closing_balance_pence"]:
+        return jsonify({
+            "error": f"Cleared balance ({from_pence(cleared_pence)}) does not match the statement "
+                     f"closing balance ({from_pence(rec['statement_closing_balance_pence'])}).",
+            "clearedBalance": from_pence(cleared_pence),
+        }), 400
+
+    db.execute("UPDATE bank_reconciliations SET status = 'closed' WHERE id = ?", (rec_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------- recurring journals + period close ----------
+
+def _serialize_recurring_journal(row):
+    d = dict(row)
+    d["amount"] = from_pence(d.pop("amount_pence"))
+    d["nextDue"] = d.pop("next_due")
+    d["endDate"] = d.pop("end_date")
+    return d
+
+
+@app.route("/api/companies/<int:company_id>/recurring-journals", methods=["GET"])
+@login_required
+@company_required
+def list_recurring_journals(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, label, frequency, next_due, debit, credit, amount_pence, end_date "
+        "FROM recurring_journals WHERE company_id = ? ORDER BY next_due",
+        (company_id,),
+    ).fetchall()
+    return jsonify([_serialize_recurring_journal(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/recurring-journals", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def create_recurring_journal(company_id):
+    data = request.get_json(force=True) or {}
+    label, frequency, next_due, debit, credit, amount = (
+        data.get("label"), data.get("frequency", "monthly"), data.get("nextDue"),
+        data.get("debit"), data.get("credit"), data.get("amount"),
+    )
+    if not all([label, next_due, debit, credit]) or not amount or float(amount) <= 0:
+        return jsonify({"error": "Label, next due date, debit, credit, and a positive amount are all required."}), 400
+    if frequency not in ("weekly", "monthly", "quarterly", "annually"):
+        return jsonify({"error": "Frequency must be weekly, monthly, quarterly, or annually."}), 400
+    db = get_db()
+    debit = resolve_account(db, company_id, debit)
+    credit = resolve_account(db, company_id, credit)
+    cur = db.execute(
+        "INSERT INTO recurring_journals (company_id, label, frequency, next_due, debit, credit, amount_pence, end_date) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (company_id, label, frequency, next_due, debit, credit, to_pence(amount), data.get("endDate", "")),
+    )
+    db.commit()
+    return jsonify({"id": cur.lastrowid})
+
+
+@app.route("/api/companies/<int:company_id>/recurring-journals/<int:rj_id>", methods=["DELETE"])
+@login_required
+@company_required
+@write_required
+def delete_recurring_journal(company_id, rj_id):
+    db = get_db()
+    db.execute("DELETE FROM recurring_journals WHERE id = ? AND company_id = ?", (rj_id, company_id))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+def _advance_next_due(date_str, frequency):
+    d = datetime.date.fromisoformat(date_str)
+    if frequency == "weekly":
+        return (d + datetime.timedelta(days=7)).isoformat()
+    if frequency == "quarterly":
+        months_ahead = d.month - 1 + 3
+    elif frequency == "annually":
+        months_ahead = d.month - 1 + 12
+    else:  # monthly
+        months_ahead = d.month - 1 + 1
+    year = d.year + months_ahead // 12
+    month = months_ahead % 12 + 1
+    day = min(d.day, [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28,
+                       31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1])
+    return datetime.date(year, month, day).isoformat()
+
+
+@app.route("/api/companies/<int:company_id>/period-close", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def period_close(company_id):
+    """Posts every recurring journal that's due (next_due <= today and not past its end_date),
+    then advances next_due by one cadence step. Skips (and reports) anything that fails to post
+    — e.g. a recurring journal whose date now falls in a locked period — rather than aborting
+    the whole run."""
+    db = get_db()
+    today = datetime.date.today().isoformat()
+    due = db.execute(
+        "SELECT * FROM recurring_journals WHERE company_id = ? AND next_due <= ? "
+        "AND (end_date = '' OR end_date >= next_due)",
+        (company_id, today),
+    ).fetchall()
+
+    posted, skipped = [], []
+    for rj in due:
+        try:
+            tx_id = post_ledger_transaction(
+                db, company_id, rj["next_due"], rj["label"], from_pence(rj["amount_pence"]),
+                rj["debit"], rj["credit"],
+            )
+            posted.append({"recurringJournalId": rj["id"], "transactionId": tx_id, "date": rj["next_due"]})
+        except LedgerError as e:
+            skipped.append({"recurringJournalId": rj["id"], "reason": e.message})
+            continue
+        next_due = _advance_next_due(rj["next_due"], rj["frequency"])
+        db.execute("UPDATE recurring_journals SET next_due = ? WHERE id = ?", (next_due, rj["id"]))
+
+    db.commit()
+    return jsonify({"posted": posted, "skipped": skipped})
 
 
 init_db()  # runs on import too, not just `python3 server.py` directly — gunicorn imports this module without executing __main__
