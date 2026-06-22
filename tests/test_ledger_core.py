@@ -112,6 +112,19 @@ def test_export_never_contains_raw_ai_key(client):
     assert "sk-ant-shouldnotleak" not in str(dump)
 
 
+def test_ai_key_encrypted_at_rest(client):
+    import sqlite3
+    import server as server_module
+    cid = make_company(client)
+    client.put(f"/api/companies/{cid}/settings", json={"aiApiKey": "sk-ant-plaintext-secret"})
+
+    raw_db = sqlite3.connect(server_module.DB_PATH)
+    raw_column = raw_db.execute("SELECT ai_api_key FROM companies WHERE id = ?", (cid,)).fetchone()[0]
+    raw_db.close()
+    assert "sk-ant-plaintext-secret" not in raw_column  # stored ciphertext, not the plaintext
+    assert server_module.decrypt_secret(raw_column) == "sk-ant-plaintext-secret"  # but it round-trips correctly
+
+
 def test_ai_key_never_returned_by_companies_endpoint(client):
     cid = make_company(client)
     client.put(f"/api/companies/{cid}/settings", json={"aiApiKey": "sk-ant-secret"})

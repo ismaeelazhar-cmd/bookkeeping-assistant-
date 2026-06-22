@@ -20,6 +20,7 @@ import mimetypes
 from flask import Flask, request, jsonify, session, send_from_directory, g
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
+from cryptography.fernet import Fernet, InvalidToken
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "data.sqlite"
@@ -38,6 +39,36 @@ def load_or_create_secret_key():
     secret_path.chmod(0o600)
     return key
 
+
+def load_or_create_encryption_key():
+    """Separate key file from the session secret on purpose: a leak of the SQLite file alone
+    (e.g. a careless backup) isn't enough to recover stored AI API keys — you'd also need this
+    file, which lives only on the server, never in source control, never in an export."""
+    key_path = BASE_DIR / ".encryption_key"
+    if key_path.exists():
+        return key_path.read_bytes()
+    key = Fernet.generate_key()
+    key_path.write_bytes(key)
+    key_path.chmod(0o600)
+    return key
+
+
+def encrypt_secret(plaintext):
+    if not plaintext:
+        return ""
+    return _fernet.encrypt(plaintext.encode("utf-8")).decode("ascii")
+
+
+def decrypt_secret(ciphertext):
+    if not ciphertext:
+        return ""
+    try:
+        return _fernet.decrypt(ciphertext.encode("ascii")).decode("utf-8")
+    except (InvalidToken, ValueError):
+        return ""  # pre-encryption plaintext key, or corrupted — treat as unset, user re-enters it
+
+
+_fernet = Fernet(load_or_create_encryption_key())
 
 app = Flask(__name__, static_folder=str(BASE_DIR / "static"))
 app.secret_key = load_or_create_secret_key()
@@ -732,7 +763,7 @@ def update_settings(company_id):
     # whatever's already stored (the browser can't see the real value to "leave it unchanged"
     # any other way), and clearing it requires the explicit clearAiApiKey flag.
     if data.get("aiApiKey"):
-        db.execute("UPDATE companies SET ai_api_key = ? WHERE id = ?", (data["aiApiKey"], company_id))
+        db.execute("UPDATE companies SET ai_api_key = ? WHERE id = ?", (encrypt_secret(data["aiApiKey"]), company_id))
     elif data.get("clearAiApiKey"):
         db.execute("UPDATE companies SET ai_api_key = '' WHERE id = ?", (company_id,))
     db.commit()
@@ -1222,7 +1253,7 @@ def ai_categorize(company_id):
     text = (data.get("text") or "").strip()
     if not text:
         return jsonify({"error": "Nothing to analyze."}), 400
-    api_key = g.company["ai_api_key"]
+    api_key = decrypt_secret(g.company["ai_api_key"])
     if not api_key:
         return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
 
@@ -1297,7 +1328,7 @@ def ask_ledger(company_id):
     question = (data.get("question") or "").strip()
     if not question:
         return jsonify({"error": "Ask a question first."}), 400
-    api_key = g.company["ai_api_key"]
+    api_key = decrypt_secret(g.company["ai_api_key"])
     if not api_key:
         return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
 
@@ -1416,7 +1447,7 @@ def extract_attachment(company_id, attachment_id):
     """Stage 5 receipt OCR: send the stored file to Claude (vision for images, native
     document support for PDFs) and ask it to read off date/description/amount/vendor —
     same server-side-key pattern as ai_categorize, nothing new exposed to the browser."""
-    api_key = g.company["ai_api_key"]
+    api_key = decrypt_secret(g.company["ai_api_key"])
     if not api_key:
         return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
 
