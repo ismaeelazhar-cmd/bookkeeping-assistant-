@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <title>Bookkeeping — T-Account Ledger</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
 <style>
   :root {
     /* Claude-style warm, editorial palette */
@@ -383,6 +384,32 @@
   </div>
 
   <div class="panel" id="section-bank" style="margin-top:20px; scroll-margin-top:60px;">
+    <h2>Live Bank Feed</h2>
+    <div class="sub" style="margin-bottom:12px;">Link a real bank account or card via Plaid — transactions sync into the Bank Reconciliation lines below automatically (and in near-real-time once this app is deployed somewhere Plaid's webhook can reach; locally, use "Sync now"). This is the same regulated approach Xero/FreeAgent use — no custom bank scraping.</div>
+
+    <details>
+      <summary style="font-size:12px; color:var(--muted); cursor:pointer;">Plaid credentials</summary>
+      <div class="sub" style="margin:8px 0;">From a free account at <span style="color:var(--text);">dashboard.plaid.com</span>. Secret is write-only — encrypted at rest, never sent back to this browser.</div>
+      <div class="row2">
+        <div><label>Client ID</label><input type="text" id="plaid-client-id" oninput="savePlaidSettings()"></div>
+        <div><label>Environment</label>
+          <select id="plaid-env" onchange="savePlaidSettings()">
+            <option value="sandbox">Sandbox (test data, no real bank)</option>
+            <option value="development">Development</option>
+            <option value="production">Production (real banks)</option>
+          </select>
+        </div>
+      </div>
+      <label>Secret <span id="plaid-secret-status" style="color:var(--muted); font-weight:400;"></span></label>
+      <input type="password" id="plaid-secret" placeholder="enter to set/replace" oninput="savePlaidSettings()">
+    </details>
+
+    <div id="bank-connections-body" style="margin-top:12px;"></div>
+    <button class="btn-primary" onclick="connectBankAccount()">+ Connect bank account</button>
+    <div id="plaid-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+  </div>
+
+  <div class="panel" id="section-bank-rec" style="margin-top:20px;">
     <h2>Bank Reconciliation</h2>
     <div class="sub" style="margin-bottom:12px;">Import what your bank statement actually shows for an account, then match each line to a ledger transaction — or post a new one straight from the line. This is what actually catches missing/duplicate/wrong entries, not just categorization.</div>
 
@@ -940,6 +967,10 @@ async function openCompany(id) {
   document.getElementById('f-period-start').value = currentCompany.period_start_date || '';
   document.getElementById('f-fund-accounting').checked = !!currentCompany.fund_accounting_enabled;
   toggleFundAccountingUI();
+  document.getElementById('plaid-client-id').value = currentCompany.plaid_client_id || '';
+  document.getElementById('plaid-env').value = currentCompany.plaid_env || 'sandbox';
+  document.getElementById('plaid-secret').value = '';
+  document.getElementById('plaid-secret-status').textContent = currentCompany.plaid_secret_set ? '(set)' : '(not set)';
   document.getElementById('ob-rows').innerHTML = ''; obRowCount = 0;
   document.getElementById('cj-rows').innerHTML = ''; cjRowCount = 0;
   document.getElementById('cj-date').valueAsDate = new Date();
@@ -1041,10 +1072,11 @@ let agingReport = { invoice: {}, bill: {} };
 
 let teamMembers = [];
 let funds = [];
+let bankConnections = [];
 
 async function refreshAll() {
   const cid = currentCompany.id;
-  [transactions, presets, chartAccounts, bankLines, fixedAssets, openingBalances, contacts, invoicesBills, agingReport, teamMembers, funds] = await Promise.all([
+  [transactions, presets, chartAccounts, bankLines, fixedAssets, openingBalances, contacts, invoicesBills, agingReport, teamMembers, funds, bankConnections] = await Promise.all([
     api(`/api/companies/${cid}/transactions`),
     api(`/api/companies/${cid}/presets`),
     api(`/api/companies/${cid}/accounts`),
@@ -1055,8 +1087,10 @@ async function refreshAll() {
     api(`/api/companies/${cid}/invoices-bills`),
     api(`/api/companies/${cid}/aging-report`),
     api(`/api/companies/${cid}/members`),
-    api(`/api/companies/${cid}/funds`)
+    api(`/api/companies/${cid}/funds`),
+    api(`/api/companies/${cid}/bank-connections`)
   ]);
+  renderBankConnections();
   populateAccountSelects();
   populateContactSelect();
   populateFundSelect();
@@ -2643,6 +2677,94 @@ async function uploadAttachment() {
 async function deleteAttachmentItem(id) {
   await api(`/api/companies/${currentCompany.id}/attachments/${id}`, { method: 'DELETE' });
   await renderAttachmentsModal();
+  await refreshAll();
+}
+
+// ---------- Live bank feed (Plaid) ----------
+
+async function savePlaidSettings() {
+  if (!currentCompany) return;
+  currentCompany.plaid_client_id = document.getElementById('plaid-client-id').value.trim();
+  currentCompany.plaid_env = document.getElementById('plaid-env').value;
+  const newSecret = document.getElementById('plaid-secret').value.trim();
+  await api(`/api/companies/${currentCompany.id}/settings`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      defaultCreditAccount: currentCompany.default_credit_account,
+      lockedUntil: currentCompany.locked_until,
+      periodStartDate: currentCompany.period_start_date,
+      fundAccountingEnabled: currentCompany.fund_accounting_enabled,
+      plaidClientId: currentCompany.plaid_client_id,
+      plaidEnv: currentCompany.plaid_env,
+      plaidSecret: newSecret
+    })
+  });
+  if (newSecret) {
+    currentCompany.plaid_secret_set = true;
+    document.getElementById('plaid-secret').value = '';
+    document.getElementById('plaid-secret-status').textContent = '(set)';
+  }
+}
+
+function renderBankConnections() {
+  const body = document.getElementById('bank-connections-body');
+  body.innerHTML = bankConnections.length ? bankConnections.map(c => `
+    <div class="company-card" style="cursor:default;">
+      <span>${escapeHtml(c.institutionName || 'Connected account')} <span class="pill">${escapeHtml(c.cashAccount)}</span></span>
+      <span>
+        <button class="btn-secondary" onclick="syncBankConnection(${c.id})">Sync now</button>
+        <button class="btn-danger" onclick="deleteBankConnection(${c.id})">✕</button>
+      </span>
+    </div>`).join('') : '<div class="empty">No bank accounts connected yet.</div>';
+}
+
+async function connectBankAccount() {
+  const statusEl = document.getElementById('plaid-status');
+  if (!currentCompany.plaid_client_id || !currentCompany.plaid_secret_set) {
+    statusEl.textContent = 'Add your Plaid Client ID and Secret above first.'; return;
+  }
+  statusEl.textContent = 'Opening Plaid Link…';
+
+  let linkToken;
+  try {
+    const res = await api(`/api/companies/${currentCompany.id}/plaid/link-token`, { method: 'POST', body: JSON.stringify({}) });
+    linkToken = res.linkToken;
+  } catch (e) { statusEl.textContent = e.message; return; }
+
+  const handler = Plaid.create({
+    token: linkToken,
+    onSuccess: async (publicToken, metadata) => {
+      statusEl.textContent = 'Linking account…';
+      try {
+        await api(`/api/companies/${currentCompany.id}/plaid/exchange`, {
+          method: 'POST',
+          body: JSON.stringify({
+            publicToken, institutionName: metadata.institution ? metadata.institution.name : '',
+            cashAccount: 'Cash'
+          })
+        });
+      } catch (e) { statusEl.textContent = e.message; return; }
+      statusEl.textContent = 'Account connected. Click "Sync now" to pull transactions.';
+      await refreshAll();
+    },
+    onExit: (err) => { if (err) statusEl.textContent = `Plaid Link closed: ${err.error_message || err.error_code}`; },
+  });
+  handler.open();
+}
+
+async function syncBankConnection(id) {
+  const statusEl = document.getElementById('plaid-status');
+  statusEl.textContent = 'Syncing…';
+  try {
+    const res = await api(`/api/companies/${currentCompany.id}/bank-connections/${id}/sync`, { method: 'POST' });
+    statusEl.textContent = `Synced — ${res.inserted} new transaction(s) added to Bank Reconciliation below.`;
+  } catch (e) { statusEl.textContent = e.message; return; }
+  await refreshAll();
+}
+
+async function deleteBankConnection(id) {
+  if (!confirm('Disconnect this bank account? It can be relinked later, but Plaid will need to re-authenticate.')) return;
+  await api(`/api/companies/${currentCompany.id}/bank-connections/${id}`, { method: 'DELETE' });
   await refreshAll();
 }
 

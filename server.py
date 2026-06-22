@@ -232,6 +232,20 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- A linked bank account/card via Plaid. access_token is the live credential that reads
+        -- the user's real bank transactions — encrypted at rest with the same Fernet key used
+        -- for the AI API key, never returned to the browser in any response.
+        CREATE TABLE IF NOT EXISTS bank_connections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            item_id TEXT NOT NULL UNIQUE,
+            access_token TEXT NOT NULL,
+            institution_name TEXT DEFAULT '',
+            cash_account TEXT NOT NULL DEFAULT 'Cash',
+            sync_cursor TEXT DEFAULT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -359,6 +373,19 @@ def init_db():
     company_cols = {row[1] for row in db.execute("PRAGMA table_info(companies)").fetchall()}
     if "fund_accounting_enabled" not in company_cols:
         db.execute("ALTER TABLE companies ADD COLUMN fund_accounting_enabled INTEGER DEFAULT 0")
+    if "plaid_client_id" not in company_cols:
+        db.execute("ALTER TABLE companies ADD COLUMN plaid_client_id TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN plaid_secret TEXT DEFAULT ''")  # encrypted at rest, like ai_api_key
+        db.execute("ALTER TABLE companies ADD COLUMN plaid_env TEXT DEFAULT 'sandbox'")
+    bank_line_cols = {row[1] for row in db.execute("PRAGMA table_info(bank_lines)").fetchall()}
+    if "external_id" not in bank_line_cols:
+        db.execute("ALTER TABLE bank_lines ADD COLUMN external_id TEXT DEFAULT NULL")
+    # partial index (not a full UNIQUE constraint) so manually-pasted lines, which never set
+    # external_id, don't collide with each other — only Plaid-synced lines need de-duplication
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_lines_external "
+        "ON bank_lines(company_id, external_id) WHERE external_id IS NOT NULL"
+    )
     if "fund_id" not in tx_cols:
         db.execute("ALTER TABLE transactions ADD COLUMN fund_id INTEGER DEFAULT NULL REFERENCES funds(id)")
     db.execute("DELETE FROM schema_meta")
@@ -750,10 +777,12 @@ def list_companies():
     db = get_db()
     rows = db.execute(
         "SELECT id, name, default_credit_account, ai_api_key, locked_until, period_start_date, "
+        "fund_accounting_enabled, plaid_client_id, plaid_secret, plaid_env, "
         "'owner' as permission "
         "FROM companies WHERE user_id = ? "
         "UNION ALL "
         "SELECT c.id, c.name, c.default_credit_account, c.ai_api_key, c.locked_until, c.period_start_date, "
+        "c.fund_accounting_enabled, c.plaid_client_id, c.plaid_secret, c.plaid_env, "
         "cm.permission "
         "FROM companies c JOIN company_members cm ON cm.company_id = c.id "
         "WHERE cm.user_id = ? "
@@ -764,6 +793,7 @@ def list_companies():
     for r in rows:
         d = dict(r)
         d["ai_api_key_set"] = bool(d.pop("ai_api_key"))  # Stage 5: the raw key never leaves the server
+        d["plaid_secret_set"] = bool(d.pop("plaid_secret"))  # same write-only treatment
         result.append(d)
     return jsonify(result)
 
@@ -783,7 +813,8 @@ def create_company():
     db.commit()
     return jsonify({
         "id": cur.lastrowid, "name": name, "default_credit_account": "", "ai_api_key_set": False,
-        "locked_until": "", "period_start_date": "",
+        "locked_until": "", "period_start_date": "", "fund_accounting_enabled": 0,
+        "plaid_client_id": "", "plaid_secret_set": False, "plaid_env": "sandbox", "permission": "owner",
     })
 
 
@@ -807,19 +838,24 @@ def update_settings(company_id):
     db = get_db()
     db.execute(
         "UPDATE companies SET default_credit_account = ?, locked_until = ?, period_start_date = ?, "
-        "fund_accounting_enabled = ? WHERE id = ?",
+        "fund_accounting_enabled = ?, plaid_client_id = ?, plaid_env = ? WHERE id = ?",
         (
             data.get("defaultCreditAccount", ""), data.get("lockedUntil", ""), data.get("periodStartDate", ""),
-            1 if data.get("fundAccountingEnabled") else 0, company_id,
+            1 if data.get("fundAccountingEnabled") else 0,
+            data.get("plaidClientId", ""), data.get("plaidEnv") or "sandbox", company_id,
         ),
     )
-    # The AI key is write-only from the client's perspective: a blank field never overwrites
-    # whatever's already stored (the browser can't see the real value to "leave it unchanged"
-    # any other way), and clearing it requires the explicit clearAiApiKey flag.
+    # The AI key and Plaid secret are write-only from the client's perspective: a blank field
+    # never overwrites whatever's already stored (the browser can't see the real value to
+    # "leave it unchanged" any other way), and clearing either requires an explicit flag.
     if data.get("aiApiKey"):
         db.execute("UPDATE companies SET ai_api_key = ? WHERE id = ?", (encrypt_secret(data["aiApiKey"]), company_id))
     elif data.get("clearAiApiKey"):
         db.execute("UPDATE companies SET ai_api_key = '' WHERE id = ?", (company_id,))
+    if data.get("plaidSecret"):
+        db.execute("UPDATE companies SET plaid_secret = ? WHERE id = ?", (encrypt_secret(data["plaidSecret"]), company_id))
+    elif data.get("clearPlaidSecret"):
+        db.execute("UPDATE companies SET plaid_secret = '' WHERE id = ?", (company_id,))
     db.commit()
     return jsonify({"ok": True})
 
@@ -1593,6 +1629,46 @@ def call_claude(api_key, messages, max_tokens=1024):
     return "".join(block.get("text", "") for block in body.get("content", []))
 
 
+PLAID_HOSTS = {
+    "sandbox": "https://sandbox.plaid.com",
+    "development": "https://development.plaid.com",
+    "production": "https://production.plaid.com",
+}
+
+
+class PlaidError(Exception):
+    def __init__(self, message, status=502):
+        self.message = message
+        self.status = status
+
+
+def call_plaid(company, path, payload):
+    client_id = (company["plaid_client_id"] or "").strip()
+    secret = decrypt_secret(company["plaid_secret"])
+    if not client_id or not secret:
+        raise PlaidError("No Plaid credentials set for this company — add them in settings.", 400)
+    env = company["plaid_env"] or "sandbox"
+    host = PLAID_HOSTS.get(env, PLAID_HOSTS["sandbox"])
+
+    body = json.dumps({**payload, "client_id": client_id, "secret": secret}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{host}{path}", data=body, method="POST", headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", "replace")
+        try:
+            err_json = json.loads(err_body)
+            message = err_json.get("error_message", err_body[:300])
+        except json.JSONDecodeError:
+            message = err_body[:300]
+        raise PlaidError(f"Plaid error: {message}", 502)
+    except urllib.error.URLError as e:
+        raise PlaidError(f"Could not reach Plaid: {e.reason}", 502)
+
+
 @app.route("/api/companies/<int:company_id>/ask", methods=["POST"])
 @login_required
 @company_required
@@ -2200,6 +2276,167 @@ def list_audit_log(company_id):
         (company_id,),
     ).fetchall()
     return jsonify([dict(r) for r in rows])
+
+
+# ---------- live bank feed (Plaid) ----------
+#
+# This is the "buy don't build" Open Banking piece: actual bank/card connections go through
+# Plaid's regulated infrastructure, not anything custom. access_token is the live credential
+# that reads someone's real transactions — encrypted at rest, never returned to the browser.
+# Synced transactions land in the existing bank_lines table, so they flow straight into the
+# Bank Reconciliation screen already built — nothing about that UI needed to change.
+
+@app.route("/api/companies/<int:company_id>/plaid/link-token", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def create_plaid_link_token(company_id):
+    data = request.get_json(force=True) or {}
+    try:
+        result = call_plaid(g.company, "/link/token/create", {
+            "client_name": "Bookkeeping Assistant",
+            "language": "en",
+            "country_codes": ["GB", "US"],
+            "user": {"client_user_id": str(session["user_id"])},
+            "products": ["transactions"],
+        })
+    except PlaidError as e:
+        return jsonify({"error": e.message}), e.status
+    return jsonify({"linkToken": result.get("link_token")})
+
+
+@app.route("/api/companies/<int:company_id>/plaid/exchange", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def exchange_plaid_public_token(company_id):
+    data = request.get_json(force=True) or {}
+    public_token = data.get("publicToken")
+    institution_name = data.get("institutionName", "")
+    cash_account = data.get("cashAccount") or "Cash"
+    if not public_token:
+        return jsonify({"error": "Missing public token."}), 400
+
+    db = get_db()
+    try:
+        result = call_plaid(g.company, "/item/public_token/exchange", {"public_token": public_token})
+    except PlaidError as e:
+        return jsonify({"error": e.message}), e.status
+
+    cash_account = resolve_account(db, company_id, cash_account, "cash")
+    cur = db.execute(
+        "INSERT INTO bank_connections (company_id, item_id, access_token, institution_name, cash_account) "
+        "VALUES (?,?,?,?,?)",
+        (company_id, result["item_id"], encrypt_secret(result["access_token"]), institution_name, cash_account),
+    )
+    db.commit()
+    return jsonify({"id": cur.lastrowid})
+
+
+@app.route("/api/companies/<int:company_id>/bank-connections", methods=["GET"])
+@login_required
+@company_required
+def list_bank_connections(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, institution_name as institutionName, cash_account as cashAccount, created_at as createdAt "
+        "FROM bank_connections WHERE company_id = ? ORDER BY created_at",
+        (company_id,),
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/bank-connections/<int:connection_id>", methods=["DELETE"])
+@login_required
+@company_required
+@write_required
+def delete_bank_connection(company_id, connection_id):
+    db = get_db()
+    conn = db.execute(
+        "SELECT access_token FROM bank_connections WHERE id = ? AND company_id = ?", (connection_id, company_id)
+    ).fetchone()
+    if conn is None:
+        return jsonify({"ok": True})
+    try:
+        call_plaid(g.company, "/item/remove", {"access_token": decrypt_secret(conn["access_token"])})
+    except PlaidError:
+        pass  # still remove our record even if Plaid's side errors (e.g. already revoked)
+    db.execute("DELETE FROM bank_connections WHERE id = ?", (connection_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+def sync_bank_connection(db, company, connection_id):
+    """Pull new transactions since the last sync via Plaid's cursor-based /transactions/sync,
+    inserting each as a bank_line keyed by Plaid's own transaction_id so re-syncing (including
+    from the webhook) never creates duplicates."""
+    conn = db.execute("SELECT * FROM bank_connections WHERE id = ?", (connection_id,)).fetchone()
+    if conn is None:
+        raise PlaidError("Connection not found.", 404)
+
+    access_token = decrypt_secret(conn["access_token"])
+    cursor = conn["sync_cursor"]
+    inserted = 0
+    has_more = True
+    while has_more:
+        payload = {"access_token": access_token}
+        if cursor:
+            payload["cursor"] = cursor
+        result = call_plaid(company, "/transactions/sync", payload)
+        for tx in result.get("added", []):
+            amount = -float(tx["amount"])  # Plaid: positive = money out: flip sign to match this app's convention
+            db.execute(
+                "INSERT INTO bank_lines (company_id, cash_account, date, desc, amount_pence, external_id) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(company_id, external_id) WHERE external_id IS NOT NULL DO NOTHING",
+                (
+                    conn["company_id"], conn["cash_account"], tx["date"],
+                    tx.get("merchant_name") or tx.get("name") or "Bank transaction",
+                    to_pence(amount), tx["transaction_id"],
+                ),
+            )
+            inserted += 1
+        cursor = result.get("next_cursor")
+        has_more = result.get("has_more", False)
+    db.execute("UPDATE bank_connections SET sync_cursor = ? WHERE id = ?", (cursor, connection_id))
+    db.commit()
+    return inserted
+
+
+@app.route("/api/companies/<int:company_id>/bank-connections/<int:connection_id>/sync", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def sync_bank_connection_route(company_id, connection_id):
+    db = get_db()
+    try:
+        inserted = sync_bank_connection(db, g.company, connection_id)
+    except PlaidError as e:
+        return jsonify({"error": e.message}), e.status
+    return jsonify({"inserted": inserted})
+
+
+@app.route("/api/plaid/webhook", methods=["POST"])
+def plaid_webhook():
+    """Plaid calls this server-to-server the moment new transactions are ready — this is the
+    actual "real-time" half of the feature; the manual Sync button above is the fallback for
+    local/sandbox testing where Plaid's servers can't reach a localhost URL.
+    NOTE: production use should verify the Plaid-Verification JWT header before trusting this
+    payload — not implemented here, flagged as a known gap for a deployed instance."""
+    data = request.get_json(force=True) or {}
+    if data.get("webhook_type") != "TRANSACTIONS":
+        return jsonify({"ok": True})  # ignore webhook types we don't act on (ITEM_ERROR, etc.)
+
+    item_id = data.get("item_id")
+    db = get_db()
+    conn = db.execute("SELECT * FROM bank_connections WHERE item_id = ?", (item_id,)).fetchone()
+    if conn is None:
+        return jsonify({"ok": True})
+    company = db.execute("SELECT * FROM companies WHERE id = ?", (conn["company_id"],)).fetchone()
+    try:
+        sync_bank_connection(db, company, conn["id"])
+    except PlaidError:
+        pass  # webhook delivery isn't the place to surface this to a user; next manual sync will retry
+    return jsonify({"ok": True})
 
 
 # ---------- bank reconciliation ----------
