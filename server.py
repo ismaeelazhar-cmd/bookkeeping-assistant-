@@ -9,6 +9,9 @@ import uuid
 import re
 import base64
 import time
+import hmac
+import struct
+import hashlib
 import urllib.request
 import urllib.error
 import mimetypes
@@ -99,6 +102,8 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
+            totp_secret TEXT DEFAULT NULL,
+            totp_pending_secret TEXT DEFAULT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -266,6 +271,10 @@ def init_db():
     if "reviewed_by" not in tx_cols:
         db.execute("ALTER TABLE transactions ADD COLUMN reviewed_by TEXT DEFAULT NULL")
         db.execute("ALTER TABLE transactions ADD COLUMN reviewed_at TEXT DEFAULT NULL")
+    user_cols = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+    if "totp_secret" not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT NULL")
+        db.execute("ALTER TABLE users ADD COLUMN totp_pending_secret TEXT DEFAULT NULL")
     db.execute("DELETE FROM schema_meta")
     db.execute("INSERT INTO schema_meta (version) VALUES (?)", (SCHEMA_VERSION,))
     db.commit()
@@ -382,6 +391,33 @@ def log_audit(db, company_id, action, entity_type, entity_id, before=None, after
 def is_locked(company_row, date_str):
     locked_until = company_row["locked_until"] if company_row else ""
     return bool(locked_until) and date_str <= locked_until
+
+
+# ---------- TOTP 2FA (RFC 6238) — pure stdlib, no new dependency ----------
+
+def generate_totp_secret():
+    return base64.b32encode(secrets.token_bytes(10)).decode("ascii")  # 16-char base32, compatible with any TOTP app
+
+
+def totp_code(secret, for_time, step=30, digits=6):
+    counter = int(for_time // step)
+    key = base64.b32decode(secret.upper())
+    msg = struct.pack(">Q", counter)
+    h = hmac.new(key, msg, hashlib.sha1).digest()
+    offset = h[-1] & 0x0F
+    code_int = (struct.unpack(">I", h[offset:offset + 4])[0] & 0x7FFFFFFF) % (10 ** digits)
+    return str(code_int).zfill(digits)
+
+
+def verify_totp(secret, code, window=1, step=30):
+    if not secret or not code:
+        return False
+    now = time.time()
+    return any(totp_code(secret, now + i * step, step) == code.strip() for i in range(-window, window + 1))
+
+
+def totp_uri(secret, email):
+    return f"otpauth://totp/Bookkeeping%20App:{email}?secret={secret}&issuer=Bookkeeping%20App&digits=6&period=30"
 
 
 # ---------- auth helpers ----------
@@ -510,6 +546,29 @@ def login():
     if user is None or not check_password_hash(user["password_hash"], password):
         return jsonify({"error": "Incorrect email or password."}), 401
 
+    if user["totp_secret"]:
+        session.pop("user_id", None)
+        session["pending_2fa_user_id"] = user["id"]
+        return jsonify({"requires2fa": True})
+
+    session["user_id"] = user["id"]
+    session["email"] = user["email"]
+    return jsonify({"id": user["id"], "email": user["email"]})
+
+
+@app.route("/api/login/2fa", methods=["POST"])
+@rate_limit(max_attempts=10, window_seconds=300)
+def login_2fa():
+    data = request.get_json(force=True) or {}
+    code = (data.get("code") or "").strip()
+    pending_id = session.get("pending_2fa_user_id")
+    if not pending_id:
+        return jsonify({"error": "No pending 2FA login — log in with your password first."}), 400
+    db = get_db()
+    user = db.execute("SELECT * FROM users WHERE id = ?", (pending_id,)).fetchone()
+    if user is None or not verify_totp(user["totp_secret"], code):
+        return jsonify({"error": "Invalid code."}), 401
+    session.pop("pending_2fa_user_id", None)
     session["user_id"] = user["id"]
     session["email"] = user["email"]
     return jsonify({"id": user["id"], "email": user["email"]})
@@ -526,6 +585,61 @@ def me():
     if "user_id" not in session:
         return jsonify({"user": None})
     return jsonify({"user": {"id": session["user_id"], "email": session["email"]}})
+
+
+# ---------- 2FA management (requires an active session, separate from the login flow above) ----------
+
+@app.route("/api/2fa/status", methods=["GET"])
+@login_required
+def twofa_status():
+    db = get_db()
+    user = db.execute("SELECT totp_secret FROM users WHERE id = ?", (session["user_id"],)).fetchone()
+    return jsonify({"enabled": bool(user["totp_secret"])})
+
+
+@app.route("/api/2fa/setup", methods=["POST"])
+@login_required
+def twofa_setup():
+    secret = generate_totp_secret()
+    db = get_db()
+    db.execute("UPDATE users SET totp_pending_secret = ? WHERE id = ?", (secret, session["user_id"]))
+    db.commit()
+    return jsonify({"secret": secret, "otpauthUri": totp_uri(secret, session["email"])})
+
+
+@app.route("/api/2fa/confirm", methods=["POST"])
+@login_required
+def twofa_confirm():
+    data = request.get_json(force=True) or {}
+    code = (data.get("code") or "").strip()
+    db = get_db()
+    user = db.execute("SELECT totp_pending_secret FROM users WHERE id = ?", (session["user_id"],)).fetchone()
+    if not user["totp_pending_secret"]:
+        return jsonify({"error": "Start setup first."}), 400
+    if not verify_totp(user["totp_pending_secret"], code):
+        return jsonify({"error": "Invalid code — check your authenticator app and try again."}), 400
+    db.execute(
+        "UPDATE users SET totp_secret = totp_pending_secret, totp_pending_secret = NULL WHERE id = ?",
+        (session["user_id"],),
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/2fa/disable", methods=["POST"])
+@login_required
+def twofa_disable():
+    data = request.get_json(force=True) or {}
+    code = (data.get("code") or "").strip()
+    db = get_db()
+    user = db.execute("SELECT totp_secret FROM users WHERE id = ?", (session["user_id"],)).fetchone()
+    if not user["totp_secret"]:
+        return jsonify({"error": "2FA isn't enabled."}), 400
+    if not verify_totp(user["totp_secret"], code):
+        return jsonify({"error": "Invalid code."}), 400
+    db.execute("UPDATE users SET totp_secret = NULL, totp_pending_secret = NULL WHERE id = ?", (session["user_id"],))
+    db.commit()
+    return jsonify({"ok": True})
 
 
 # ---------- companies ----------

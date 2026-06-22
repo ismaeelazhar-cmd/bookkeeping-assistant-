@@ -106,7 +106,7 @@
 <body>
 
 <div id="auth-screen" class="center-screen" style="display:none;">
-  <div class="panel auth-card">
+  <div class="panel auth-card" id="auth-card-fields">
     <h1 id="auth-title">Log in</h1>
     <div class="sub">Bookkeeping — multi-company ledger</div>
     <label>Email</label>
@@ -119,6 +119,14 @@
       <span id="auth-toggle-text">Don't have an account?</span>
       <a href="#" id="auth-toggle-link" onclick="toggleAuthMode(event)" style="color:var(--accent);">Sign up</a>
     </div>
+  </div>
+  <div class="panel auth-card" id="auth-card-2fa" style="display:none;">
+    <h1>Two-factor code</h1>
+    <div class="sub">Enter the 6-digit code from your authenticator app.</div>
+    <label>Code</label>
+    <input type="text" id="auth-2fa-code" maxlength="6" inputmode="numeric" autocomplete="one-time-code" onkeydown="if(event.key==='Enter') submit2faLogin();">
+    <button class="btn-primary" onclick="submit2faLogin()">Verify</button>
+    <div class="err" id="auth-2fa-error"></div>
   </div>
 </div>
 
@@ -134,6 +142,28 @@
     <input type="text" id="new-company-name" placeholder="e.g. Rahmah Elderly Care Ltd">
     <button class="btn-primary" onclick="createCompany()">Create company</button>
     <div class="err" id="company-error"></div>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <h2>Account Security</h2>
+    <div class="sub" id="twofa-status-text" style="margin-bottom:10px;">Checking…</div>
+    <div id="twofa-setup-block" style="display:none;">
+      <div class="sub">Scan this into your authenticator app (Google Authenticator, Authy, 1Password, etc), or enter the secret manually if you can't scan a QR code.</div>
+      <label>Secret (manual entry)</label>
+      <input type="text" id="twofa-secret" readonly>
+      <label>otpauth:// URI</label>
+      <input type="text" id="twofa-uri" readonly>
+      <label>Enter the 6-digit code it shows to confirm</label>
+      <input type="text" id="twofa-confirm-code" maxlength="6" inputmode="numeric">
+      <button class="btn-primary" onclick="confirm2fa()">Confirm and enable</button>
+    </div>
+    <div id="twofa-disable-block" style="display:none;">
+      <label>Enter your current 6-digit code to disable 2FA</label>
+      <input type="text" id="twofa-disable-code" maxlength="6" inputmode="numeric">
+      <button class="btn-secondary" style="width:100%;" onclick="disable2fa()">Disable 2FA</button>
+    </div>
+    <button class="btn-primary" id="twofa-enable-btn" style="display:none;" onclick="start2faSetup()">Enable 2FA</button>
+    <div class="err" id="twofa-error"></div>
   </div>
 </div>
 
@@ -636,6 +666,13 @@ async function submitAuth() {
     const data = await api(authMode === 'login' ? '/api/login' : '/api/signup', {
       method: 'POST', body: JSON.stringify({ email, password })
     });
+    if (data.requires2fa) {
+      errEl.textContent = '';
+      document.getElementById('auth-card-fields').style.display = 'none';
+      document.getElementById('auth-card-2fa').style.display = '';
+      document.getElementById('auth-2fa-code').focus();
+      return;
+    }
     currentUser = data;
     errEl.textContent = '';
     await loadCompanies();
@@ -643,6 +680,20 @@ async function submitAuth() {
   } catch (e) {
     errEl.textContent = e.message;
   }
+}
+
+async function submit2faLogin() {
+  const code = document.getElementById('auth-2fa-code').value.trim();
+  const errEl = document.getElementById('auth-2fa-error');
+  try {
+    currentUser = await api('/api/login/2fa', { method: 'POST', body: JSON.stringify({ code }) });
+  } catch (e) { errEl.textContent = e.message; return; }
+  errEl.textContent = '';
+  document.getElementById('auth-card-2fa').style.display = 'none';
+  document.getElementById('auth-card-fields').style.display = '';
+  document.getElementById('auth-2fa-code').value = '';
+  await loadCompanies();
+  show('company-screen');
 }
 
 async function logout(e) {
@@ -659,6 +710,48 @@ async function loadCompanies() {
   document.getElementById('who-email').textContent = currentUser.email;
   document.getElementById('who-email-2').textContent = currentUser.email;
   renderCompanyList();
+  await refresh2faStatus();
+}
+
+// ---------- 2FA management ----------
+
+async function refresh2faStatus() {
+  const { enabled } = await api('/api/2fa/status');
+  document.getElementById('twofa-status-text').textContent = enabled
+    ? 'Two-factor authentication is ON.' : 'Two-factor authentication is OFF.';
+  document.getElementById('twofa-enable-btn').style.display = enabled ? 'none' : '';
+  document.getElementById('twofa-disable-block').style.display = enabled ? '' : 'none';
+  document.getElementById('twofa-setup-block').style.display = 'none';
+}
+
+async function start2faSetup() {
+  const data = await api('/api/2fa/setup', { method: 'POST' });
+  document.getElementById('twofa-secret').value = data.secret;
+  document.getElementById('twofa-uri').value = data.otpauthUri;
+  document.getElementById('twofa-setup-block').style.display = '';
+  document.getElementById('twofa-enable-btn').style.display = 'none';
+}
+
+async function confirm2fa() {
+  const code = document.getElementById('twofa-confirm-code').value.trim();
+  const errEl = document.getElementById('twofa-error');
+  try {
+    await api('/api/2fa/confirm', { method: 'POST', body: JSON.stringify({ code }) });
+  } catch (e) { errEl.textContent = e.message; return; }
+  errEl.textContent = '';
+  document.getElementById('twofa-confirm-code').value = '';
+  await refresh2faStatus();
+}
+
+async function disable2fa() {
+  const code = document.getElementById('twofa-disable-code').value.trim();
+  const errEl = document.getElementById('twofa-error');
+  try {
+    await api('/api/2fa/disable', { method: 'POST', body: JSON.stringify({ code }) });
+  } catch (e) { errEl.textContent = e.message; return; }
+  errEl.textContent = '';
+  document.getElementById('twofa-disable-code').value = '';
+  await refresh2faStatus();
 }
 
 function renderCompanyList() {
