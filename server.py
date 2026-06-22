@@ -8,6 +8,7 @@ from functools import wraps
 import uuid
 import re
 import base64
+import time
 import urllib.request
 import urllib.error
 import mimetypes
@@ -369,6 +370,30 @@ def is_locked(company_row, date_str):
 
 # ---------- auth helpers ----------
 
+# ---------- basic rate limiting (Stage 7) ----------
+# In-memory and per-process — fine for a single dev/small-deployment instance, won't survive
+# a restart or work across multiple workers. A real deployment behind a load balancer would
+# want this in Redis or similar, but that's a new dependency this app doesn't otherwise need.
+
+_rate_limit_buckets = {}
+
+
+def rate_limit(max_attempts=10, window_seconds=300):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            key = (fn.__name__, request.remote_addr)
+            now = time.time()
+            attempts = [t for t in _rate_limit_buckets.get(key, []) if now - t < window_seconds]
+            if len(attempts) >= max_attempts:
+                return jsonify({"error": "Too many attempts — wait a few minutes and try again."}), 429
+            attempts.append(now)
+            _rate_limit_buckets[key] = attempts
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
 def login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -403,6 +428,7 @@ def index():
 # ---------- auth endpoints ----------
 
 @app.route("/api/signup", methods=["POST"])
+@rate_limit(max_attempts=10, window_seconds=300)
 def signup():
     data = request.get_json(force=True) or {}
     email = (data.get("email") or "").strip().lower()
@@ -426,6 +452,7 @@ def signup():
 
 
 @app.route("/api/login", methods=["POST"])
+@rate_limit(max_attempts=15, window_seconds=300)
 def login():
     data = request.get_json(force=True) or {}
     email = (data.get("email") or "").strip().lower()
