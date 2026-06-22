@@ -1197,6 +1197,7 @@ def create_compound_journal(company_id):
 @app.route("/api/companies/<int:company_id>/ai-categorize", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def ai_categorize(company_id):
     data = request.get_json(force=True) or {}
     text = (data.get("text") or "").strip()
@@ -1268,6 +1269,7 @@ def call_claude(api_key, messages, max_tokens=1024):
 @app.route("/api/companies/<int:company_id>/ask", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def ask_ledger(company_id):
     """Stage 5 flagship feature: natural-language Q&A over this company's actual ledger.
     The model only sees a compact CSV export built fresh per request — no separate index to
@@ -1390,6 +1392,7 @@ def download_attachment(company_id, attachment_id):
 @app.route("/api/companies/<int:company_id>/attachments/<int:attachment_id>/extract", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def extract_attachment(company_id, attachment_id):
     """Stage 5 receipt OCR: send the stored file to Claude (vision for images, native
     document support for PDFs) and ask it to read off date/description/amount/vendor —
