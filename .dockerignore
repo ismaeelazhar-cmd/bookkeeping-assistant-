@@ -1,0 +1,11 @@
+data.sqlite
+server.log
+__pycache__/
+*.pyc
+uploads/
+.secret_key
+.encryption_key
+.pytest_cache/
+.git/
+tests/
+README.md

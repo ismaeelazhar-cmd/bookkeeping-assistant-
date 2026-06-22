@@ -27,8 +27,14 @@ from cryptography.fernet import Fernet, InvalidToken
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 BASE_DIR = Path(__file__).parent
-DB_PATH = BASE_DIR / "data.sqlite"
-UPLOADS_DIR = BASE_DIR / "uploads"
+# DATA_DIR is everything that must survive a redeploy/restart — the database, uploaded
+# attachments, and the two key files below. Defaults to BASE_DIR (no behavior change for local
+# dev); set to a mounted persistent volume's path (e.g. /data on Fly.io) in production, since the
+# container filesystem itself is ephemeral.
+DATA_DIR = Path(os.environ.get("DATA_DIR", str(BASE_DIR)))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = DATA_DIR / "data.sqlite"
+UPLOADS_DIR = DATA_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # 10MB
 
@@ -40,7 +46,7 @@ def load_or_create_secret_key():
     env_key = os.environ.get("SECRET_KEY")
     if env_key:
         return env_key
-    secret_path = BASE_DIR / ".secret_key"
+    secret_path = DATA_DIR / ".secret_key"
     if secret_path.exists():
         return secret_path.read_text().strip()
     key = secrets.token_hex(32)
@@ -53,7 +59,7 @@ def load_or_create_encryption_key():
     """Separate key file from the session secret on purpose: a leak of the SQLite file alone
     (e.g. a careless backup) isn't enough to recover stored AI API keys — you'd also need this
     file, which lives only on the server, never in source control, never in an export."""
-    key_path = BASE_DIR / ".encryption_key"
+    key_path = DATA_DIR / ".encryption_key"
     if key_path.exists():
         return key_path.read_bytes()
     key = Fernet.generate_key()
