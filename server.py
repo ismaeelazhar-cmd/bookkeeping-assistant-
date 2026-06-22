@@ -2948,4 +2948,11 @@ init_db()  # runs on import too, not just `python3 server.py` directly — gunic
 
 if __name__ == "__main__":
     debug = os.environ.get("FLASK_DEBUG", "1") == "1"  # default on for local dev; set FLASK_DEBUG=0 to turn off
-    app.run(host="127.0.0.1", port=5050, debug=debug)
+    # Local HTTPS dev only — set FLASK_HTTPS=1 to get a throwaway self-signed cert (Werkzeug's
+    # "adhoc" mode, using the `cryptography` package already a dependency here) for testing
+    # anything that requires a secure context (e.g. some browser APIs, OAuth redirect URIs).
+    # A real deployment should NOT use this: terminate TLS at nginx (or another reverse proxy)
+    # with a properly issued certificate, then run this app over plain HTTP behind it via gunicorn
+    # — see the deploy notes in the README.
+    use_https = os.environ.get("FLASK_HTTPS", "0") == "1"
+    app.run(host="127.0.0.1", port=5050, debug=debug, ssl_context="adhoc" if use_https else None)

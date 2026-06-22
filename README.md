@@ -82,6 +82,8 @@ gunicorn -c gunicorn.conf.py server:app
 
 **3. Back up two files outside of normal application backups**: `.secret_key` and `.encryption_key`. Losing `.secret_key` just logs everyone out (regenerate and move on). Losing `.encryption_key` means every stored AI API key becomes permanently unreadable — `decrypt_secret()` will silently treat them as unset, and each company's owner will need to re-enter theirs. Neither file is ever committed (both gitignored) and neither is included in the JSON export (deliberately — an export is exactly the kind of file that ends up emailed or dropped in a shared folder).
 
+Set the `SECRET_KEY` env var to hand the session secret to the app via your deploy platform's config instead of relying on the on-disk `.secret_key` file — it takes priority when set. `FLASK_HTTPS=1` is for *local* dev convenience only (a throwaway self-signed cert via Werkzeug's `ssl_context="adhoc"`, for testing anything that needs a secure context); it is not a substitute for #2 above and should never be set in production.
+
 ## Status
 
 Hardened so far: persistent session secret, basic rate limiting on auth endpoints, CSRF protection (Origin/Referer validation on state-changing requests), AI API key encrypted at rest (separate key file from the session secret), a full JSON backup endpoint, and server-side-only AI key handling (the key is write-only — never serialized back to the browser in any response). **Still not built**: 2FA backup/recovery codes (losing your authenticator device currently means losing account access — there's no recovery flow), and a built-in automated backup schedule (the export endpoint exists; nothing calls it on a timer).
