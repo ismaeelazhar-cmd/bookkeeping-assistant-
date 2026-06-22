@@ -741,6 +741,23 @@
     </div>
 
     <div class="panel" style="margin-top:20px;">
+      <h2>Budget vs Actual</h2>
+      <div class="sub" style="margin-bottom:12px;">Set a monthly budget per revenue/expense account, see the variance against what actually posted.</div>
+      <label>Month</label>
+      <input type="month" id="budget-period" onchange="renderBudgetVsActual()">
+      <table class="trial" style="margin-top:10px;">
+        <thead><tr><td><b>Account</b></td><td class="num"><b>Budget</b></td><td class="num"><b>Actual</b></td><td class="num"><b>Variance</b></td><td class="num"><b>Variance %</b></td><td></td></tr></thead>
+        <tbody id="budget-body"></tbody>
+      </table>
+      <div class="row2" style="margin-top:14px;">
+        <div><label>Account</label><select id="budget-new-account"></select></div>
+        <div><label>Budgeted amount</label><input type="number" id="budget-new-amount" step="0.01" min="0" placeholder="0.00"></div>
+      </div>
+      <button class="btn-secondary" onclick="addBudget()">Set budget for this month</button>
+      <div id="budget-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
       <h2>Anomalies <span class="pill" id="anomaly-count"></span></h2>
       <div class="sub" style="margin-bottom:12px;">Computed live from your ledger: accounts used for the first time recently, and transactions whose amount is far outside that account's usual range. Not AI — plain statistics, so it works without an API key.</div>
       <table class="journal"><thead><tr><th>Type</th><th>Account</th><th>Date</th><th>Description</th><th class="num">Amount</th><th>Why</th></tr></thead><tbody id="anomaly-body"></tbody></table>
@@ -1144,6 +1161,7 @@ async function openCompany(id) {
   document.getElementById('ob-rows').innerHTML = ''; obRowCount = 0;
   document.getElementById('cj-rows').innerHTML = ''; cjRowCount = 0;
   document.getElementById('cj-date').valueAsDate = new Date();
+  document.getElementById('budget-period').value = new Date().toISOString().slice(0, 7);
   recentlyPosted = []; renderUndoBar();
   askHistory = []; renderAskHistory();
   applyPermissionBanner();
@@ -1304,7 +1322,7 @@ function getAccountType(name) {
 function populateAccountSelects() {
   const sorted = [...chartAccounts].sort((a, b) => a.name.localeCompare(b.name));
   const optionsHtml = sorted.map(a => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)} (${a.code})</option>`).join('');
-  ['f-default-credit', 'brec-account', 'fa-account', 'ib-account', 'cj-pivot-account', 'po-account'].forEach(id => {
+  ['f-default-credit', 'brec-account', 'fa-account', 'ib-account', 'cj-pivot-account', 'po-account', 'budget-new-account'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     const prev = el.value;
@@ -1354,6 +1372,7 @@ async function refreshAll() {
   renderTeam();
   loadAuditLog();
   await loadClarificationQueue();
+  await loadBudgets();
 }
 
 function suggestFromDescription() {
@@ -1638,7 +1657,7 @@ function render() {
   renderAccounts(); renderJournal(); renderTrialBalance();
   renderChartOfAccounts(); renderFinancialStatements(); renderBrecTable(); renderFixedAssets();
   renderOpeningBalances(); renderContacts(); renderInvoicesBills(); renderAgingReport();
-  renderDashboard(); renderAnomalies(); renderPurchaseOrders();
+  renderDashboard(); renderAnomalies(); renderPurchaseOrders(); renderBudgetVsActual();
 }
 
 function renderAnomalies() {
@@ -2644,6 +2663,74 @@ function renderVatReturn() {
     lineRow('Box 7 — Total value of purchases, excluding VAT', netPurchases),
   ].join('');
   if (!vatTxns.length) body.innerHTML = '<tr><td class="empty">No VAT-tagged transactions in this period.</td></tr>';
+}
+
+// ---------- Budget vs Actual ----------
+
+let budgets = [];
+
+async function loadBudgets() {
+  budgets = await api(`/api/companies/${currentCompany.id}/budgets`);
+  renderBudgetVsActual();
+}
+
+function renderBudgetVsActual() {
+  const body = document.getElementById('budget-body');
+  if (!body) return;
+  const periodInput = document.getElementById('budget-period').value; // 'YYYY-MM'
+  if (!periodInput) { body.innerHTML = '<tr><td colspan="6" class="empty">Pick a month above.</td></tr>'; return; }
+
+  const periodBudgets = budgets.filter(b => b.period === periodInput);
+  const actualByAccount = {};
+  for (const t of transactions) {
+    if (!t.date.startsWith(periodInput)) continue;
+    for (const line of expandTransactionLines(t)) {
+      const type = getAccountType(line.account);
+      if (type !== 'revenue' && type !== 'cogs' && type !== 'expense') continue;
+      const sign = (type === 'revenue') ? (line.side === 'credit' ? 1 : -1) : (line.side === 'debit' ? 1 : -1);
+      actualByAccount[line.account] = (actualByAccount[line.account] || 0) + sign * line.amount;
+    }
+  }
+
+  if (!periodBudgets.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">No budgets set for this month yet — add one below.</td></tr>';
+    return;
+  }
+  body.innerHTML = periodBudgets.map(b => {
+    const actual = actualByAccount[b.account] || 0;
+    const variance = actual - b.amount;
+    const variancePct = b.amount ? (variance / b.amount * 100) : 0;
+    const color = (b.accountType === 'revenue') ? (variance >= 0 ? 'var(--good)' : 'var(--bad)') : (variance <= 0 ? 'var(--good)' : 'var(--bad)');
+    return `<tr>
+      <td>${escapeHtml(b.account)}</td>
+      <td class="num">${fmt(b.amount)}</td>
+      <td class="num">${fmt(actual)}</td>
+      <td class="num" style="color:${color};">${fmt(variance)}</td>
+      <td class="num" style="color:${color};">${variancePct.toFixed(1)}%</td>
+      <td><button class="btn-danger" onclick="deleteBudget(${b.id})">✕</button></td>
+    </tr>`;
+  }).join('');
+}
+
+async function addBudget() {
+  const period = document.getElementById('budget-period').value;
+  const account = document.getElementById('budget-new-account').value;
+  const amount = parseFloat(document.getElementById('budget-new-amount').value);
+  const statusEl = document.getElementById('budget-status');
+  if (!period || !account || !amount || amount < 0) {
+    statusEl.textContent = 'Pick a month, an account, and a non-negative amount.'; return;
+  }
+  try {
+    await api(`/api/companies/${currentCompany.id}/budgets`, { method: 'POST', body: JSON.stringify({ account, period, amount }) });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = '';
+  document.getElementById('budget-new-amount').value = '';
+  await loadBudgets();
+}
+
+async function deleteBudget(id) {
+  await api(`/api/companies/${currentCompany.id}/budgets/${id}`, { method: 'DELETE' });
+  await loadBudgets();
 }
 
 // ---------- Fixed asset register ----------

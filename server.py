@@ -431,6 +431,18 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- One budgeted amount per account per month ('YYYY-MM'). Variance against actual is
+        -- computed on read (sum of that month's transactions for the account), not stored.
+        CREATE TABLE IF NOT EXISTS budgets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            period TEXT NOT NULL,
+            amount_pence INTEGER NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (company_id, account_id, period)
+        );
+
         CREATE TABLE IF NOT EXISTS clarification_queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -2603,6 +2615,60 @@ def convert_purchase_order_to_bill(company_id, po_id):
 def delete_purchase_order(company_id, po_id):
     db = get_db()
     db.execute("DELETE FROM purchase_orders WHERE id = ? AND company_id = ?", (po_id, company_id))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------- budgets ----------
+
+@app.route("/api/companies/<int:company_id>/budgets", methods=["GET"])
+@login_required
+@company_required
+def list_budgets(company_id):
+    db = get_db()
+    period = request.args.get("period")
+    query = "SELECT b.id, b.account_id as accountId, a.name as account, a.type as accountType, b.period, b.amount_pence as amountPence FROM budgets b JOIN accounts a ON a.id = b.account_id WHERE b.company_id = ?"
+    params = [company_id]
+    if period:
+        query += " AND b.period = ?"
+        params.append(period)
+    rows = db.execute(query + " ORDER BY b.period, a.code", params).fetchall()
+    result = [dict(r) for r in rows]
+    for r in result:
+        r["amount"] = from_pence(r.pop("amountPence"))
+    return jsonify(result)
+
+
+@app.route("/api/companies/<int:company_id>/budgets", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def set_budget(company_id):
+    data = request.get_json(force=True) or {}
+    account_name, period, amount = data.get("account"), data.get("period"), data.get("amount")
+    if not all([account_name, period]) or amount is None or float(amount) < 0:
+        return jsonify({"error": "Account, period (YYYY-MM), and a non-negative amount are required."}), 400
+    if not re.match(r"^\d{4}-\d{2}$", period):
+        return jsonify({"error": "Period must be in YYYY-MM format."}), 400
+    db = get_db()
+    account_name = resolve_account(db, company_id, account_name)
+    account_row = get_account_by_name(db, company_id, account_name)
+    db.execute(
+        "INSERT INTO budgets (company_id, account_id, period, amount_pence) VALUES (?,?,?,?) "
+        "ON CONFLICT(company_id, account_id, period) DO UPDATE SET amount_pence = excluded.amount_pence",
+        (company_id, account_row["id"], period, to_pence(amount)),
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/budgets/<int:budget_id>", methods=["DELETE"])
+@login_required
+@company_required
+@write_required
+def delete_budget(company_id, budget_id):
+    db = get_db()
+    db.execute("DELETE FROM budgets WHERE id = ? AND company_id = ?", (budget_id, company_id))
     db.commit()
     return jsonify({"ok": True})
 
