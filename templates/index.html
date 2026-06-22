@@ -219,7 +219,7 @@
   <nav class="page-tabs">
     <a href="#page-dashboard" data-page="dashboard">Dashboard</a>
     <a href="#page-transactions" data-page="transactions">Transactions</a>
-    <a href="#page-bank" data-page="bank">Bank</a>
+    <a href="#page-bank" data-page="bank">Bank <span id="bank-nav-badge" class="badge badge-overdue" style="display:none; margin-left:4px;"></span></a>
     <a href="#page-accounts" data-page="accounts">Accounts</a>
     <a href="#page-invoices" data-page="invoices">Invoices</a>
     <a href="#page-reports" data-page="reports">Reports</a>
@@ -244,6 +244,16 @@
       <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--good);">
         <div class="sub" style="margin:0;">Net profit <span id="dash-profit-period" style="color:var(--muted);">(all time)</span></div>
         <div style="font-size:22px; font-weight:700;" id="dash-profit">—</div>
+      </div>
+    </div>
+
+    <div class="panel" id="clarification-alert-card" style="display:none; margin-bottom:16px; border-left:3px solid var(--color-danger);">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <strong id="clarification-alert-text"></strong>
+          <div class="sub" style="margin:2px 0 0;">They won't appear in your reports until you review them.</div>
+        </div>
+        <button class="btn-primary" onclick="showPage('bank')">Review now</button>
       </div>
     </div>
 
@@ -385,6 +395,12 @@
   </div>
 
   <div class="page" data-page="bank" style="display:none;">
+    <div class="panel" id="clarification-queue-wrap" style="margin-bottom:20px; display:none;">
+      <h2>Clarification Queue <span class="pill" id="clarification-queue-count"></span></h2>
+      <div class="sub" style="margin-bottom:12px;">Lines the system couldn't confidently categorise on its own — pick the right accounts (or fix the suggestion) and post, or skip for now.</div>
+      <div id="clarification-queue-body"></div>
+    </div>
+
     <div class="panel" style="margin-bottom:20px;">
       <h2>Import Bank Statement</h2>
       <div class="sub" style="margin-bottom:12px;">Upload a bank statement PDF, or type/paste movements (one per line). The app guesses the debit/credit accounts — review and post.</div>
@@ -691,6 +707,14 @@
       <div class="sub" id="ai-key-status" style="margin:0 0 8px;"></div>
       <input type="password" id="ai-api-key" placeholder="sk-ant-... (enter to set/replace)" oninput="saveSettings()">
       <button class="btn-secondary" style="width:100%; margin-top:8px;" onclick="clearAiApiKey()">Clear key</button>
+
+      <h2 style="margin-top:24px;">Clarification confidence threshold</h2>
+      <div class="sub" style="margin-bottom:8px;">AI suggestions scoring below this go to the Clarification Queue (Bank page) instead of being suggested automatically. Lower = the AI guesses more often; higher = more lines get held for your review.</div>
+      <select id="f-confidence-threshold" onchange="saveSettings()">
+        <option value="0.5">Lenient (0.5) — fewer interruptions, more risk of a wrong guess</option>
+        <option value="0.7">Balanced (0.7) — recommended</option>
+        <option value="0.9">Strict (0.9) — review almost everything uncertain</option>
+      </select>
     </div>
 
     <div class="panel" style="margin-top:20px;">
@@ -1046,6 +1070,7 @@ async function openCompany(id) {
   document.getElementById('plaid-env').value = currentCompany.plaid_env || 'sandbox';
   document.getElementById('plaid-secret').value = '';
   document.getElementById('plaid-secret-status').textContent = currentCompany.plaid_secret_set ? '(set)' : '(not set)';
+  document.getElementById('f-confidence-threshold').value = currentCompany.confidence_threshold || 0.7;
   document.getElementById('ob-rows').innerHTML = ''; obRowCount = 0;
   document.getElementById('cj-rows').innerHTML = ''; cjRowCount = 0;
   document.getElementById('cj-date').valueAsDate = new Date();
@@ -1065,6 +1090,7 @@ async function saveSettings() {
   currentCompany.locked_until = document.getElementById('f-locked-until').value;
   currentCompany.period_start_date = document.getElementById('f-period-start').value;
   currentCompany.fund_accounting_enabled = document.getElementById('f-fund-accounting').checked;
+  currentCompany.confidence_threshold = parseFloat(document.getElementById('f-confidence-threshold').value);
   const newKey = document.getElementById('ai-api-key').value.trim();
   await api(`/api/companies/${currentCompany.id}/settings`, {
     method: 'PUT',
@@ -1073,7 +1099,8 @@ async function saveSettings() {
       aiApiKey: newKey,
       lockedUntil: currentCompany.locked_until,
       periodStartDate: currentCompany.period_start_date,
-      fundAccountingEnabled: currentCompany.fund_accounting_enabled
+      fundAccountingEnabled: currentCompany.fund_accounting_enabled,
+      confidenceThreshold: currentCompany.confidence_threshold
     })
   });
   if (newKey) {
@@ -1254,6 +1281,7 @@ async function refreshAll() {
   render();
   renderTeam();
   loadAuditLog();
+  await loadClarificationQueue();
 }
 
 function suggestFromDescription() {
@@ -1576,6 +1604,52 @@ function renderAnomalies() {
     }
   }
 
+  // duplicate transaction detector: same date, amount, and description as another posting
+  // within 7 days — catches double-entry mistakes (re-importing the same statement line twice,
+  // posting a transaction twice by accident), not the accounting kind of "duplicate."
+  const sortedByDate = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
+  for (let i = 0; i < sortedByDate.length; i++) {
+    for (let j = i + 1; j < sortedByDate.length; j++) {
+      const a = sortedByDate[i], b = sortedByDate[j];
+      const daysApart = (new Date(b.date) - new Date(a.date)) / 86400000;
+      if (daysApart > 7) break;
+      if (a.id === b.id) continue;
+      if (Math.abs(a.amount - b.amount) < 0.005 && normalizeDesc(a.desc) === normalizeDesc(b.desc)) {
+        anomalies.push({ type: 'Possible duplicate', account: b.debit, date: b.date, desc: b.desc, amount: b.amount, why: `Same amount and description as a transaction on ${fmtDate(a.date)} — check this wasn't posted twice.` });
+      }
+    }
+  }
+
+  // account health: accounts with history that have gone quiet for 90+ days (might be a closed
+  // supplier/customer relationship, or might mean something stopped being tracked by mistake),
+  // and accounts carrying a balance on the "wrong" side for their type (an asset account in
+  // credit, or a liability account in debit) — often a sign of a miscoded entry.
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+  for (const [acc, txs] of Object.entries(byAccount)) {
+    if (getAccountType(acc) === 'cash') continue;
+    const lastDate = txs.reduce((max, t) => t.date > max ? t.date : max, txs[0].date);
+    if (txs.length >= 2 && lastDate < ninetyDaysAgo) {
+      anomalies.push({ type: 'No recent movement', account: acc, date: lastDate, desc: '(account health)', amount: 0, why: `"${acc}" has had no activity since ${fmtDate(lastDate)} — over 90 days. Likely fine, worth a glance.` });
+    }
+  }
+  const accountsForHealth = buildAccounts();
+  const wrongSignTypes = {
+    current_asset: 'debit', noncurrent_asset: 'debit',
+    current_liability: 'credit', noncurrent_liability: 'credit',
+  };
+  for (const accName of Object.keys(accountsForHealth)) {
+    const type = getAccountType(accName);
+    const expectedSide = wrongSignTypes[type];
+    if (!expectedSide) continue;
+    const balance = accountNetBalance(accountsForHealth[accName], type);
+    if (expectedSide === 'debit' && balance < -0.005) {
+      anomalies.push({ type: 'Unusual balance', account: accName, date: lastTxDate(accountsForHealth[accName]), desc: '(account health)', amount: balance, why: `"${accName}" is an asset account but currently has a credit balance — check for a miscoded entry.` });
+    }
+    if (expectedSide === 'credit' && balance > 0.005) {
+      anomalies.push({ type: 'Unusual balance', account: accName, date: lastTxDate(accountsForHealth[accName]), desc: '(account health)', amount: balance, why: `"${accName}" is a liability account but currently has a debit balance — check for a miscoded entry.` });
+    }
+  }
+
   anomalies.sort((a, b) => b.date.localeCompare(a.date));
   document.getElementById('anomaly-count').textContent = `${anomalies.length} flagged`;
   const body = document.getElementById('anomaly-body');
@@ -1860,11 +1934,97 @@ async function analyzeWithAI() {
       amount: Math.abs(parseFloat(it.amount)), debit: it.debit, credit: it.credit, confidence: 'high', selected: true
     }));
     candidates = candidates.concat(newCandidates);
-    statusEl.textContent = `Claude classified ${newCandidates.length} movement(s). Review and post below.`;
+    const queuedCount = result.queuedCount || 0;
+    statusEl.textContent = `Claude classified ${newCandidates.length} movement(s) ready to review below.` +
+      (queuedCount ? ` ${queuedCount} line(s) were too uncertain to suggest automatically — see the Clarification Queue.` : '');
     renderCandidates();
+    await loadClarificationQueue();
+    if (queuedCount) {
+      showToast(`${newCandidates.length + queuedCount} line(s) imported — ${queuedCount} need your review`, 'error');
+    }
   } catch (e) {
     statusEl.textContent = 'AI analysis failed: ' + e.message;
   }
+}
+
+// ---------- Clarification queue ----------
+
+let clarificationQueue = [];
+
+async function loadClarificationQueue() {
+  clarificationQueue = await api(`/api/companies/${currentCompany.id}/clarification-queue`);
+  renderClarificationQueue();
+  renderClarificationBadge();
+  renderClarificationAlertCard();
+}
+
+function renderClarificationBadge() {
+  const badge = document.getElementById('bank-nav-badge');
+  if (!badge) return;
+  const count = clarificationQueue.length;
+  badge.textContent = count || '';
+  badge.style.display = count ? 'inline-block' : 'none';
+}
+
+function renderClarificationAlertCard() {
+  const card = document.getElementById('clarification-alert-card');
+  if (!card) return;
+  const cutoff = Date.now() - 48 * 3600 * 1000;
+  const stale = clarificationQueue.filter(item => new Date(item.createdAt.replace(' ', 'T') + 'Z').getTime() < cutoff);
+  if (!stale.length) { card.style.display = 'none'; return; }
+  card.style.display = '';
+  document.getElementById('clarification-alert-text').textContent =
+    `You have ${stale.length} transaction${stale.length === 1 ? '' : 's'} that haven't been categorised`;
+}
+
+function clarificationReasonLabel(item) {
+  return item.reason || 'Low confidence';
+}
+
+function renderClarificationQueue() {
+  const wrap = document.getElementById('clarification-queue-wrap');
+  const body = document.getElementById('clarification-queue-body');
+  if (!wrap || !body) return;
+  if (!clarificationQueue.length) {
+    wrap.style.display = 'none';
+    return;
+  }
+  wrap.style.display = '';
+  document.getElementById('clarification-queue-count').textContent = `${clarificationQueue.length} pending`;
+  body.innerHTML = clarificationQueue.map(item => `
+    <div class="panel" style="margin-bottom:10px; border-left:3px solid var(--color-danger);">
+      <div style="display:flex; justify-content:space-between; align-items:baseline;">
+        <div><strong>${fmtDate(item.rawLine.date || '')}</strong> — ${escapeHtml(item.rawLine.desc || '')} <span class="money">${fmt(item.suggestedAmount)}</span></div>
+        <span class="badge badge-low">confidence ${(item.confidence * 100).toFixed(0)}%</span>
+      </div>
+      <div class="sub" style="margin:4px 0 8px;">Why we're unsure: ${escapeHtml(clarificationReasonLabel(item))}</div>
+      <div class="row2">
+        <div><label>Debit</label><input type="text" list="account-list" id="cq-debit-${item.id}" value="${escapeHtml(item.suggestedDebit)}"></div>
+        <div><label>Credit</label><input type="text" list="account-list" id="cq-credit-${item.id}" value="${escapeHtml(item.suggestedCredit)}"></div>
+      </div>
+      <div class="toolbar" style="margin-top:8px;">
+        <button class="btn-primary" onclick="resolveClarification(${item.id})">Post with these accounts</button>
+        <button class="btn-secondary" onclick="skipClarification(${item.id})">Skip for now</button>
+      </div>
+    </div>`).join('');
+}
+
+async function resolveClarification(itemId) {
+  const debit = document.getElementById(`cq-debit-${itemId}`).value.trim();
+  const credit = document.getElementById(`cq-credit-${itemId}`).value.trim();
+  try {
+    await api(`/api/companies/${currentCompany.id}/clarification-queue/${itemId}/resolve`, {
+      method: 'POST', body: JSON.stringify({ debit, credit })
+    });
+  } catch (e) { showToast(e.message, 'error'); return; }
+  showToast('Posted to the ledger.', 'success');
+  await refreshAll();
+  await loadClarificationQueue();
+}
+
+async function skipClarification(itemId) {
+  await api(`/api/companies/${currentCompany.id}/clarification-queue/${itemId}/skip`, { method: 'POST' });
+  await loadClarificationQueue();
 }
 
 // ---------- Ask Your Ledger ----------
@@ -2160,6 +2320,11 @@ function accountNetBalance(acc, type) {
   const debitTotal = acc.debits.reduce((s, t) => s + t.amount, 0);
   const creditTotal = acc.credits.reduce((s, t) => s + t.amount, 0);
   return DEBIT_NORMAL[type] ? (debitTotal - creditTotal) : (creditTotal - debitTotal);
+}
+
+function lastTxDate(acc) {
+  const dates = [...acc.debits, ...acc.credits].map(t => t.date);
+  return dates.length ? dates.reduce((max, d) => d > max ? d : max, dates[0]) : '';
 }
 
 function lineRow(label, value, opts) {

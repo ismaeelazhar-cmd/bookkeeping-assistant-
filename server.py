@@ -182,6 +182,7 @@ def init_db():
             locked_until TEXT DEFAULT '',
             period_start_date TEXT DEFAULT '',
             currency TEXT NOT NULL DEFAULT 'GBP',
+            confidence_threshold REAL NOT NULL DEFAULT 0.7,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -407,6 +408,27 @@ def init_db():
             end_date TEXT DEFAULT '',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+
+        -- Anything the system ingested but couldn't confidently categorise (AI suggestion below
+        -- the company's confidence_threshold today; bank feed / PDF / CSV ingestion are documented
+        -- trigger points for later, not yet wired) lands here instead of being silently posted or
+        -- guessed. raw_line_json preserves exactly what came in, so the clarification UI can show
+        -- the user the original line, not just the (possibly wrong) suggestion.
+        CREATE TABLE IF NOT EXISTS clarification_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            source TEXT NOT NULL,
+            raw_line_json TEXT NOT NULL,
+            suggested_debit TEXT DEFAULT '',
+            suggested_credit TEXT DEFAULT '',
+            suggested_amount_pence INTEGER DEFAULT 0,
+            confidence REAL DEFAULT 0,
+            reason TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            resolved_at TEXT DEFAULT NULL,
+            resolved_by TEXT DEFAULT NULL
+        );
         """
     )
     # additive column for compound journals — safe to ALTER in place, no need to wipe data for this one
@@ -440,6 +462,8 @@ def init_db():
         db.execute("ALTER TABLE transactions ADD COLUMN fund_id INTEGER DEFAULT NULL REFERENCES funds(id)")
     if "currency" not in company_cols:
         db.execute("ALTER TABLE companies ADD COLUMN currency TEXT NOT NULL DEFAULT 'GBP'")
+    if "confidence_threshold" not in company_cols:
+        db.execute("ALTER TABLE companies ADD COLUMN confidence_threshold REAL NOT NULL DEFAULT 0.7")
     contact_cols = {row[1] for row in db.execute("PRAGMA table_info(contacts)").fetchall()}
     if "address_line1" not in contact_cols:
         db.execute("ALTER TABLE contacts ADD COLUMN address_line1 TEXT DEFAULT ''")
@@ -854,12 +878,12 @@ def list_companies():
     db = get_db()
     rows = db.execute(
         "SELECT id, name, default_credit_account, ai_api_key, locked_until, period_start_date, "
-        "fund_accounting_enabled, plaid_client_id, plaid_secret, plaid_env, "
+        "fund_accounting_enabled, plaid_client_id, plaid_secret, plaid_env, confidence_threshold, "
         "'owner' as permission "
         "FROM companies WHERE user_id = ? "
         "UNION ALL "
         "SELECT c.id, c.name, c.default_credit_account, c.ai_api_key, c.locked_until, c.period_start_date, "
-        "c.fund_accounting_enabled, c.plaid_client_id, c.plaid_secret, c.plaid_env, "
+        "c.fund_accounting_enabled, c.plaid_client_id, c.plaid_secret, c.plaid_env, c.confidence_threshold, "
         "cm.permission "
         "FROM companies c JOIN company_members cm ON cm.company_id = c.id "
         "WHERE cm.user_id = ? "
@@ -892,6 +916,7 @@ def create_company():
         "id": cur.lastrowid, "name": name, "default_credit_account": "", "ai_api_key_set": False,
         "locked_until": "", "period_start_date": "", "fund_accounting_enabled": 0,
         "plaid_client_id": "", "plaid_secret_set": False, "plaid_env": "sandbox", "permission": "owner",
+        "confidence_threshold": 0.7,
     })
 
 
@@ -913,13 +938,15 @@ def delete_company(company_id):
 def update_settings(company_id):
     data = request.get_json(force=True) or {}
     db = get_db()
+    confidence_threshold = float(data.get("confidenceThreshold", 0.7) or 0.7)
+    confidence_threshold = min(1.0, max(0.0, confidence_threshold))
     db.execute(
         "UPDATE companies SET default_credit_account = ?, locked_until = ?, period_start_date = ?, "
-        "fund_accounting_enabled = ?, plaid_client_id = ?, plaid_env = ? WHERE id = ?",
+        "fund_accounting_enabled = ?, plaid_client_id = ?, plaid_env = ?, confidence_threshold = ? WHERE id = ?",
         (
             data.get("defaultCreditAccount", ""), data.get("lockedUntil", ""), data.get("periodStartDate", ""),
             1 if data.get("fundAccountingEnabled") else 0,
-            data.get("plaidClientId", ""), data.get("plaidEnv") or "sandbox", company_id,
+            data.get("plaidClientId", ""), data.get("plaidEnv") or "sandbox", confidence_threshold, company_id,
         ),
     )
     # The AI key and Plaid secret are write-only from the client's perspective: a blank field
@@ -1723,6 +1750,62 @@ def create_compound_journal(company_id):
 
 
 # ---------- AI categorization (Stage 5: server-side, key never reaches the browser) ----------
+# ---------- + clarification queue (Stage 8): anything ingested that we can't confidently
+# categorize gets parked here instead of silently posted or guessed, per the "unsure" rules below.
+
+def score_candidate_confidence(db, company_id, candidate, seen_amount_dates):
+    """Returns (score 0..1, reasons[]) for one AI-suggested line. Starts at 1.0 and subtracts for
+    each red flag from the agreed "what counts as unsure" rules — account doesn't exist, the
+    description is too thin to trust, the date is suspiciously old, the amount is a repeat within
+    this same batch (possible duplicate), or the amount is a statistical outlier for that account's
+    history (the same test the Anomaly detector uses, applied here before posting rather than
+    after)."""
+    score = 1.0
+    reasons = []
+
+    debit_acc = get_account_by_name(db, company_id, candidate.get("debit", ""))
+    credit_acc = get_account_by_name(db, company_id, candidate.get("credit", ""))
+    if debit_acc is None or credit_acc is None:
+        score -= 0.35
+        reasons.append("Suggested account doesn't exist in the chart of accounts yet")
+
+    word_count = len((candidate.get("desc") or "").split())
+    if word_count <= 3:
+        score -= 0.2
+        reasons.append("Description is too short to categorise confidently")
+
+    try:
+        candidate_date = datetime.date.fromisoformat(candidate.get("date", ""))
+        if (datetime.date.today() - candidate_date).days > 90:
+            score -= 0.15
+            reasons.append("Date is more than 90 days old")
+    except (ValueError, TypeError):
+        score -= 0.3
+        reasons.append("Date could not be parsed")
+
+    amount = candidate.get("amount")
+    key = (candidate.get("date"), round(float(amount), 2) if amount else None)
+    if key in seen_amount_dates:
+        score -= 0.2
+        reasons.append("Same amount and date appears more than once in this import — possible duplicate")
+    seen_amount_dates.add(key)
+
+    if debit_acc is not None and amount:
+        history = db.execute(
+            "SELECT amount_pence FROM transactions WHERE company_id = ? AND debit = ? AND voided_at IS NULL",
+            (company_id, debit_acc["name"]),
+        ).fetchall()
+        amounts = [from_pence(r["amount_pence"]) for r in history]
+        if len(amounts) >= 4:
+            mean = sum(amounts) / len(amounts)
+            variance = sum((a - mean) ** 2 for a in amounts) / len(amounts)
+            stddev = variance ** 0.5
+            if stddev > 0.01 and abs(float(amount) - mean) / stddev > 3:
+                score -= 0.25
+                reasons.append(f'Amount is a statistical outlier for "{debit_acc["name"]}" — typically around {mean:.2f}')
+
+    return max(0.0, min(1.0, score)), reasons
+
 
 @app.route("/api/companies/<int:company_id>/ai-categorize", methods=["POST"])
 @login_required
@@ -1783,7 +1866,100 @@ Lines:
         it for it in items
         if it.get("date") and it.get("desc") and it.get("amount") and it.get("debit") and it.get("credit")
     ]
-    return jsonify({"candidates": candidates})
+
+    threshold = g.company["confidence_threshold"]
+    ready, queued, seen_amount_dates = [], [], set()
+    for it in candidates:
+        confidence, reasons = score_candidate_confidence(db, company_id, it, seen_amount_dates)
+        if confidence < threshold:
+            db.execute(
+                "INSERT INTO clarification_queue (company_id, source, raw_line_json, suggested_debit, "
+                "suggested_credit, suggested_amount_pence, confidence, reason) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    company_id, "ai", json.dumps(it), it["debit"], it["credit"],
+                    to_pence(it["amount"]), confidence, "; ".join(reasons),
+                ),
+            )
+            queued.append(it)
+        else:
+            ready.append(it)
+    if queued:
+        db.commit()
+    return jsonify({"candidates": ready, "queuedCount": len(queued)})
+
+
+def _serialize_clarification(row):
+    d = dict(row)
+    d["rawLine"] = json.loads(d.pop("raw_line_json"))
+    d["suggestedDebit"] = d.pop("suggested_debit")
+    d["suggestedCredit"] = d.pop("suggested_credit")
+    d["suggestedAmount"] = from_pence(d.pop("suggested_amount_pence"))
+    d["createdAt"] = d.pop("created_at")
+    d["resolvedAt"] = d.pop("resolved_at")
+    d["resolvedBy"] = d.pop("resolved_by")
+    return d
+
+
+@app.route("/api/companies/<int:company_id>/clarification-queue", methods=["GET"])
+@login_required
+@company_required
+def list_clarification_queue(company_id):
+    db = get_db()
+    status = request.args.get("status", "pending")
+    rows = db.execute(
+        "SELECT * FROM clarification_queue WHERE company_id = ? AND status = ? ORDER BY created_at",
+        (company_id, status),
+    ).fetchall()
+    return jsonify([_serialize_clarification(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/clarification-queue/<int:item_id>/resolve", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def resolve_clarification(company_id, item_id):
+    db = get_db()
+    item = db.execute(
+        "SELECT * FROM clarification_queue WHERE id = ? AND company_id = ? AND status = 'pending'",
+        (item_id, company_id),
+    ).fetchone()
+    if item is None:
+        return jsonify({"error": "Not found, or already resolved."}), 404
+
+    data = request.get_json(force=True) or {}
+    raw_line = json.loads(item["raw_line_json"])
+    date = data.get("date") or raw_line.get("date")
+    desc = data.get("desc") or raw_line.get("desc")
+    amount = data.get("amount") or from_pence(item["suggested_amount_pence"])
+    debit = data.get("debit") or item["suggested_debit"]
+    credit = data.get("credit") or item["suggested_credit"]
+
+    try:
+        tx_id = post_ledger_transaction(db, company_id, date, desc, amount, debit, credit)
+    except LedgerError as e:
+        return jsonify({"error": e.message}), e.status
+
+    now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    db.execute(
+        "UPDATE clarification_queue SET status = 'resolved', resolved_at = ?, resolved_by = ? WHERE id = ?",
+        (now, session.get("email", "unknown"), item_id),
+    )
+    db.commit()
+    return jsonify({"ok": True, "transactionId": tx_id})
+
+
+@app.route("/api/companies/<int:company_id>/clarification-queue/<int:item_id>/skip", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def skip_clarification(company_id, item_id):
+    db = get_db()
+    db.execute(
+        "UPDATE clarification_queue SET status = 'skipped' WHERE id = ? AND company_id = ? AND status = 'pending'",
+        (item_id, company_id),
+    )
+    db.commit()
+    return jsonify({"ok": True})
 
 
 def call_claude(api_key, messages, max_tokens=1024):
