@@ -145,6 +145,18 @@
   </div>
 
   <div class="panel" style="margin-top:16px;">
+    <h2>Consolidation Groups</h2>
+    <div class="sub" style="margin-bottom:12px;">Combine companies you own into one summed view (e.g. a charity plus its trading subsidiary). A plain aggregation across entities — no intercompany eliminations, so it's not true consolidation accounting if the companies trade with each other.</div>
+    <div id="consol-groups-body"></div>
+    <label style="margin-top:12px;">New group name</label>
+    <input type="text" id="consol-new-name" placeholder="e.g. Whole Org">
+    <label>Companies to include (pick at least 2)</label>
+    <select id="consol-company-picker" multiple style="height:90px;"></select>
+    <button class="btn-primary" onclick="createConsolidationGroup()">Create group</button>
+    <div id="consol-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
     <h2>Account Security</h2>
     <div class="sub" id="twofa-status-text" style="margin-bottom:10px;">Checking…</div>
     <div id="twofa-setup-block" style="display:none;">
@@ -655,6 +667,27 @@
   </div>
 </div>
 
+<div id="consol-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:50; align-items:center; justify-content:center;">
+  <div class="panel" style="width:560px; max-height:80vh; overflow:auto;">
+    <h2 id="consol-report-title">Consolidated Report</h2>
+    <div class="sub" id="consol-report-meta" style="margin-bottom:12px;"></div>
+    <table class="trial">
+      <tbody>
+        <tr><td>Revenue</td><td class="num" id="consol-revenue"></td></tr>
+        <tr><td>Cost of sales</td><td class="num" id="consol-cogs"></td></tr>
+        <tr><td>Expenses</td><td class="num" id="consol-expenses"></td></tr>
+        <tr style="font-weight:700; border-top:1px solid var(--border);"><td>Net profit</td><td class="num" id="consol-netprofit"></td></tr>
+        <tr><td>Total assets</td><td class="num" id="consol-assets"></td></tr>
+        <tr><td>Total liabilities</td><td class="num" id="consol-liabilities"></td></tr>
+        <tr><td>Total equity</td><td class="num" id="consol-equity"></td></tr>
+      </tbody>
+    </table>
+    <h2 style="margin-top:16px;">Combined accounts</h2>
+    <table class="journal"><thead><tr><th>Account</th><th>Type</th><th class="num">Balance</th></tr></thead><tbody id="consol-accounts-body"></tbody></table>
+    <button class="btn-secondary" style="width:100%; margin-top:14px;" onclick="closeConsolReport()">Close</button>
+  </div>
+</div>
+
 <script>
 let currentUser = null;
 let companies = [];
@@ -749,6 +782,76 @@ async function loadCompanies() {
   document.getElementById('who-email-2').textContent = currentUser.email;
   renderCompanyList();
   await refresh2faStatus();
+  await loadConsolidationGroups();
+}
+
+// ---------- Multi-entity consolidation ----------
+
+let consolidationGroups = [];
+
+async function loadConsolidationGroups() {
+  consolidationGroups = await api('/api/consolidation-groups');
+  renderConsolidationGroups();
+  populateConsolCompanyPicker();
+}
+
+function populateConsolCompanyPicker() {
+  const ownedCompanies = companies.filter(c => c.permission === 'owner');
+  document.getElementById('consol-company-picker').innerHTML =
+    ownedCompanies.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+}
+
+function renderConsolidationGroups() {
+  const body = document.getElementById('consol-groups-body');
+  body.innerHTML = consolidationGroups.length ? consolidationGroups.map(g => `
+    <div class="company-card" onclick="viewConsolidationReport(${g.id})">
+      <span>${escapeHtml(g.name)} <span class="pill">${g.members.map(m => escapeHtml(m.name)).join(' + ')}</span></span>
+      <button class="btn-danger" onclick="event.stopPropagation(); deleteConsolidationGroup(${g.id})">✕</button>
+    </div>`).join('') : '<div class="empty">No consolidation groups yet.</div>';
+}
+
+async function createConsolidationGroup() {
+  const name = document.getElementById('consol-new-name').value.trim();
+  const picker = document.getElementById('consol-company-picker');
+  const companyIds = [...picker.selectedOptions].map(o => parseInt(o.value, 10));
+  const statusEl = document.getElementById('consol-status');
+  if (!name) { statusEl.textContent = 'Enter a group name.'; return; }
+  if (companyIds.length < 2) { statusEl.textContent = 'Pick at least 2 companies (Ctrl/Cmd-click to select multiple).'; return; }
+  try {
+    await api('/api/consolidation-groups', { method: 'POST', body: JSON.stringify({ name, companyIds }) });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = '';
+  document.getElementById('consol-new-name').value = '';
+  await loadConsolidationGroups();
+}
+
+async function deleteConsolidationGroup(id) {
+  if (!confirm('Delete this consolidation group? The underlying companies are untouched.')) return;
+  await api(`/api/consolidation-groups/${id}`, { method: 'DELETE' });
+  await loadConsolidationGroups();
+}
+
+async function viewConsolidationReport(groupId) {
+  const group = consolidationGroups.find(g => g.id === groupId);
+  const report = await api(`/api/consolidation-groups/${groupId}/report`);
+  document.getElementById('consol-report-title').textContent = group.name;
+  document.getElementById('consol-report-meta').textContent = `Combining ${report.memberCount} companies: ${group.members.map(m => m.name).join(', ')}.`;
+  const s = report.summary;
+  document.getElementById('consol-revenue').textContent = fmt(s.revenue);
+  document.getElementById('consol-cogs').textContent = fmt(s.cogs);
+  document.getElementById('consol-expenses').textContent = fmt(s.expenses);
+  document.getElementById('consol-netprofit').textContent = fmt(s.netProfit);
+  document.getElementById('consol-assets').textContent = fmt(s.totalAssets);
+  document.getElementById('consol-liabilities').textContent = fmt(s.totalLiabilities);
+  document.getElementById('consol-equity').textContent = fmt(s.totalEquity);
+  document.getElementById('consol-accounts-body').innerHTML = report.accounts.map(a => `
+    <tr><td>${escapeHtml(a.name)}</td><td>${escapeHtml(a.type)}</td><td class="num">${fmt(a.balance)}</td></tr>
+  `).join('');
+  document.getElementById('consol-overlay').style.display = 'flex';
+}
+
+function closeConsolReport() {
+  document.getElementById('consol-overlay').style.display = 'none';
 }
 
 // ---------- 2FA management ----------

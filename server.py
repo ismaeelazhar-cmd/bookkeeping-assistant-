@@ -876,6 +876,120 @@ def remove_member(company_id, member_id):
     return jsonify({"ok": True})
 
 
+# ---------- multi-entity consolidation (Stage 6) ----------
+#
+# A simple named grouping of companies the user owns. The report sums matching account lines
+# across members by (name, type) — a plain aggregation, explicitly NOT true consolidation
+# accounting: there's no intercompany elimination (a loan from Company A to Company B would
+# double-count as an asset in A and a liability in B rather than netting to zero), and no
+# minority-interest handling. Good enough for "what does this group look like combined";
+# not a substitute for a real consolidation engine if intercompany transactions exist.
+
+@app.route("/api/consolidation-groups", methods=["GET"])
+@login_required
+def list_consolidation_groups():
+    db = get_db()
+    groups = db.execute(
+        "SELECT id, name FROM consolidation_groups WHERE user_id = ? ORDER BY name", (session["user_id"],)
+    ).fetchall()
+    result = []
+    for g_row in groups:
+        members = db.execute(
+            "SELECT c.id, c.name FROM consolidation_group_members cgm "
+            "JOIN companies c ON c.id = cgm.company_id WHERE cgm.group_id = ?",
+            (g_row["id"],),
+        ).fetchall()
+        result.append({"id": g_row["id"], "name": g_row["name"], "members": [dict(m) for m in members]})
+    return jsonify(result)
+
+
+@app.route("/api/consolidation-groups", methods=["POST"])
+@login_required
+def create_consolidation_group():
+    data = request.get_json(force=True) or {}
+    name = (data.get("name") or "").strip()
+    company_ids = data.get("companyIds") or []
+    if not name or len(company_ids) < 2:
+        return jsonify({"error": "A name and at least 2 companies are required."}), 400
+
+    db = get_db()
+    owned = db.execute(
+        f"SELECT id FROM companies WHERE user_id = ? AND id IN ({','.join('?' * len(company_ids))})",
+        (session["user_id"], *company_ids),
+    ).fetchall()
+    if len(owned) != len(set(company_ids)):
+        return jsonify({"error": "You can only consolidate companies you own."}), 403
+
+    cur = db.execute("INSERT INTO consolidation_groups (user_id, name) VALUES (?, ?)", (session["user_id"], name))
+    group_id = cur.lastrowid
+    for cid in set(company_ids):
+        db.execute("INSERT INTO consolidation_group_members (group_id, company_id) VALUES (?, ?)", (group_id, cid))
+    db.commit()
+    return jsonify({"id": group_id})
+
+
+@app.route("/api/consolidation-groups/<int:group_id>", methods=["DELETE"])
+@login_required
+def delete_consolidation_group(group_id):
+    db = get_db()
+    db.execute("DELETE FROM consolidation_groups WHERE id = ? AND user_id = ?", (group_id, session["user_id"]))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/consolidation-groups/<int:group_id>/report", methods=["GET"])
+@login_required
+def consolidation_report(group_id):
+    db = get_db()
+    group = db.execute(
+        "SELECT id FROM consolidation_groups WHERE id = ? AND user_id = ?", (group_id, session["user_id"])
+    ).fetchone()
+    if group is None:
+        return jsonify({"error": "Not found."}), 404
+
+    member_ids = [r["company_id"] for r in db.execute(
+        "SELECT company_id FROM consolidation_group_members WHERE group_id = ?", (group_id,)
+    ).fetchall()]
+
+    combined = {}  # name -> {type, debit, credit}
+    for cid in member_ids:
+        types_by_name = {r["name"]: r["type"] for r in db.execute(
+            "SELECT name, type FROM accounts WHERE company_id = ?", (cid,)
+        ).fetchall()}
+        for tx in db.execute(
+            "SELECT amount_pence, debit, credit FROM transactions WHERE company_id = ? AND voided_at IS NULL", (cid,)
+        ).fetchall():
+            amount = from_pence(tx["amount_pence"])
+            for account, side in ((tx["debit"], "debit"), (tx["credit"], "credit")):
+                entry = combined.setdefault(account, {"type": types_by_name.get(account, "expense"), "debit": 0, "credit": 0})
+                entry[side] += amount
+
+    debit_normal_types = {"cash", "cogs", "expense", "current_asset", "noncurrent_asset", "drawings"}
+    totals = {"revenue": 0, "cogs": 0, "expense": 0, "current_asset": 0, "noncurrent_asset": 0,
+              "current_liability": 0, "noncurrent_liability": 0, "equity": 0, "drawings": 0, "cash": 0}
+    accounts_out = []
+    for name, entry in combined.items():
+        t = entry["type"]
+        balance = (entry["debit"] - entry["credit"]) if t in debit_normal_types else (entry["credit"] - entry["debit"])
+        totals[t] = totals.get(t, 0) + balance
+        accounts_out.append({"name": name, "type": t, "balance": balance})
+
+    net_profit = totals["revenue"] - totals["cogs"] - totals["expense"]
+    total_assets = totals["cash"] + totals["current_asset"] + totals["noncurrent_asset"]
+    total_liabilities = totals["current_liability"] + totals["noncurrent_liability"]
+    total_equity = totals["equity"] + net_profit - totals["drawings"]
+
+    return jsonify({
+        "memberCount": len(member_ids),
+        "accounts": sorted(accounts_out, key=lambda a: a["name"]),
+        "summary": {
+            "revenue": totals["revenue"], "cogs": totals["cogs"], "expenses": totals["expense"],
+            "netProfit": net_profit, "totalAssets": total_assets, "totalLiabilities": total_liabilities,
+            "totalEquity": total_equity,
+        },
+    })
+
+
 # ---------- chart of accounts ----------
 
 @app.route("/api/companies/<int:company_id>/accounts", methods=["GET"])
