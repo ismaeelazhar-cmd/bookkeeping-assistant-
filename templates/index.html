@@ -243,6 +243,7 @@
         <button class="btn-secondary" onclick="document.getElementById('import-file').click()">Import CSV</button>
         <input type="file" id="import-file" accept=".csv" style="display:none" onchange="importCSV(event)">
       </div>
+      <button class="btn-secondary" style="width:100%; margin-bottom:10px;" onclick="exportFullBackup()">Full backup (JSON — everything)</button>
       <button class="btn-secondary" style="width:100%; color:var(--bad);" onclick="if(confirm('Clear all transactions for this company?')) clearAll()">Clear all data</button>
 
       <h2 id="section-settings" style="margin-top:24px; scroll-margin-top:60px;">Period Lock</h2>
@@ -1165,6 +1166,17 @@ function exportCSV() {
   const blob = new Blob([[header, ...lines].join('\r\n')], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href = url; a.download = `${currentCompany.name.replace(/\s+/g,'_')}_ledger.csv`; a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function exportFullBackup() {
+  const data = await api(`/api/companies/${currentCompany.id}/export`);
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${currentCompany.name.replace(/\s+/g, '_')}_full_backup_${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
   URL.revokeObjectURL(url);
 }
 

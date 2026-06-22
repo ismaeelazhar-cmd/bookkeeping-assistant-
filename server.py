@@ -1484,6 +1484,75 @@ def delete_fixed_asset(company_id, asset_id):
     return jsonify({"ok": True})
 
 
+# ---------- full data export ----------
+
+@app.route("/api/companies/<int:company_id>/export", methods=["GET"])
+@login_required
+@company_required
+def export_company_data(company_id):
+    """Stage 7: a real backup, not just the transactions-only CSV — every table for this
+    company in one JSON document. The AI key is deliberately excluded (Stage 5 made it
+    write-only; an export is exactly the kind of file that ends up emailed or dropped in a
+    shared folder, so it should never carry a credential)."""
+    db = get_db()
+
+    def all_rows(query, params=(company_id,)):
+        return [dict(r) for r in db.execute(query, params).fetchall()]
+
+    company = dict(db.execute(
+        "SELECT name, default_credit_account, locked_until, period_start_date, created_at FROM companies WHERE id = ?",
+        (company_id,),
+    ).fetchone())
+
+    export = {
+        "exportedAt": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "company": company,
+        "accounts": all_rows("SELECT code, name, type FROM accounts WHERE company_id = ?"),
+        "transactions": [
+            {**_serialize_transaction(r)} for r in db.execute(
+                "SELECT id, date, desc, amount_pence as amountPence, debit, credit, tax_year as taxYear, "
+                "vat_rate as vatRate, vat_direction as vatDirection, confidence, journal_id as journalId, "
+                "voided_at as voidedAt, voided_by as voidedBy FROM transactions WHERE company_id = ? ORDER BY date",
+                (company_id,),
+            ).fetchall()
+        ],
+        "openingBalances": all_rows(
+            "SELECT a.name as account, ob.amount_pence, ob.side, ob.as_of_date as asOfDate "
+            "FROM opening_balances ob JOIN accounts a ON a.id = ob.account_id WHERE ob.company_id = ?"
+        ),
+        "contacts": all_rows("SELECT name, type, email, phone FROM contacts WHERE company_id = ?"),
+        "invoicesBills": all_rows(
+            "SELECT ib.kind, c.name as contact, ib.date, ib.due_date as dueDate, ib.desc, "
+            "ib.amount_pence, ib.account, ib.vat_rate as vatRate, ib.status "
+            "FROM invoices_bills ib JOIN contacts c ON c.id = ib.contact_id WHERE ib.company_id = ?"
+        ),
+        "fixedAssets": all_rows(
+            "SELECT name, asset_account as assetAccount, cost_pence, purchase_date as purchaseDate, "
+            "useful_life_years as usefulLifeYears, residual_value_pence, method, "
+            "depreciation_account as depreciationAccount, accum_account as accumAccount FROM fixed_assets WHERE company_id = ?"
+        ),
+        "bankLines": all_rows(
+            "SELECT cash_account as cashAccount, date, desc, amount_pence FROM bank_lines WHERE company_id = ?"
+        ),
+        "auditLog": all_rows(
+            "SELECT user_email as userEmail, action, entity_type as entityType, entity_id as entityId, "
+            "before_json as beforeJson, after_json as afterJson, created_at as createdAt FROM audit_log WHERE company_id = ?"
+        ),
+    }
+    # pence -> pounds for the handful of tables not already routed through a serializer
+    for row in export["openingBalances"]:
+        row["amount"] = from_pence(row.pop("amount_pence"))
+    for row in export["invoicesBills"]:
+        row["amount"] = from_pence(row.pop("amount_pence"))
+    for row in export["fixedAssets"]:
+        row["cost"] = from_pence(row.pop("cost_pence"))
+        row["residualValue"] = from_pence(row.pop("residual_value_pence"))
+    for row in export["bankLines"]:
+        row["amount"] = from_pence(row.pop("amount_pence"))
+
+    return jsonify(export)
+
+
 # ---------- audit log ----------
 
 @app.route("/api/companies/<int:company_id>/audit-log", methods=["GET"])
