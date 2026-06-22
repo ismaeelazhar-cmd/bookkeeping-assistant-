@@ -5,13 +5,21 @@ import datetime
 from pathlib import Path
 from functools import wraps
 
+import uuid
+import mimetypes
+
 from flask import Flask, request, jsonify, session, send_from_directory, g
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "data.sqlite"
+UPLOADS_DIR = BASE_DIR / "uploads"
+UPLOADS_DIR.mkdir(exist_ok=True)
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # 10MB
 
 app = Flask(__name__, static_folder=str(BASE_DIR / "static"))
+app.config["MAX_CONTENT_LENGTH"] = MAX_ATTACHMENT_BYTES
 app.secret_key = secrets.token_hex(32)  # regenerates on restart -> logs everyone out on deploy; fine for now
 
 
@@ -206,6 +214,17 @@ def init_db():
             transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
             payment_transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+            filename TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            stored_path TEXT NOT NULL,
+            uploaded_by TEXT NOT NULL,
+            uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         """
     )
@@ -653,9 +672,10 @@ def list_transactions(company_id):
     include_voided = request.args.get("includeVoided") == "1"
     voided_clause = "" if include_voided else "AND voided_at IS NULL"
     rows = db.execute(
-        f"SELECT id, date, desc, amount_pence as amountPence, debit, credit, tax_year as taxYear, "
-        f"vat_rate as vatRate, vat_direction as vatDirection, confidence, voided_at as voidedAt, voided_by as voidedBy "
-        f"FROM transactions WHERE company_id = ? {voided_clause} ORDER BY date",
+        f"SELECT t.id, t.date, t.desc, t.amount_pence as amountPence, t.debit, t.credit, t.tax_year as taxYear, "
+        f"t.vat_rate as vatRate, t.vat_direction as vatDirection, t.confidence, t.voided_at as voidedAt, t.voided_by as voidedBy, "
+        f"(SELECT COUNT(*) FROM attachments a WHERE a.transaction_id = t.id) as attachmentCount "
+        f"FROM transactions t WHERE t.company_id = ? {voided_clause} ORDER BY t.date",
         (company_id,),
     ).fetchall()
     return jsonify([_serialize_transaction(r) for r in rows])
@@ -789,6 +809,91 @@ def clear_transactions(company_id):
         voided += 1
     db.commit()
     return jsonify({"ok": True, "deleted": voided, "skippedLocked": len(rows) - voided})
+
+
+# ---------- attachments ----------
+
+ALLOWED_ATTACHMENT_TYPES = {"application/pdf", "image/png", "image/jpeg", "image/heic", "image/webp"}
+
+
+@app.route("/api/companies/<int:company_id>/transactions/<int:tx_id>/attachments", methods=["GET"])
+@login_required
+@company_required
+def list_attachments(company_id, tx_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, filename, mime_type as mimeType, uploaded_by as uploadedBy, uploaded_at as uploadedAt "
+        "FROM attachments WHERE company_id = ? AND transaction_id = ? ORDER BY uploaded_at",
+        (company_id, tx_id),
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/transactions/<int:tx_id>/attachments", methods=["POST"])
+@login_required
+@company_required
+def upload_attachment(company_id, tx_id):
+    db = get_db()
+    tx = db.execute("SELECT id FROM transactions WHERE id = ? AND company_id = ?", (tx_id, company_id)).fetchone()
+    if tx is None:
+        return jsonify({"error": "Transaction not found."}), 404
+
+    file = request.files.get("file")
+    if file is None or not file.filename:
+        return jsonify({"error": "No file uploaded."}), 400
+    mime_type = file.mimetype or mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
+    if mime_type not in ALLOWED_ATTACHMENT_TYPES:
+        return jsonify({"error": f"Unsupported file type: {mime_type}. Allowed: PDF, PNG, JPEG, HEIC, WEBP."}), 400
+
+    company_dir = UPLOADS_DIR / str(company_id)
+    company_dir.mkdir(exist_ok=True)
+    safe_name = secure_filename(file.filename) or "upload"
+    stored_name = f"{uuid.uuid4().hex}_{safe_name}"
+    file.save(str(company_dir / stored_name))
+
+    cur = db.execute(
+        "INSERT INTO attachments (company_id, transaction_id, filename, mime_type, stored_path, uploaded_by) "
+        "VALUES (?,?,?,?,?,?)",
+        (company_id, tx_id, safe_name, mime_type, f"{company_id}/{stored_name}", session.get("email", "unknown")),
+    )
+    db.commit()
+    return jsonify({"id": cur.lastrowid, "filename": safe_name, "mimeType": mime_type})
+
+
+@app.route("/api/companies/<int:company_id>/attachments/<int:attachment_id>/download", methods=["GET"])
+@login_required
+@company_required
+def download_attachment(company_id, attachment_id):
+    db = get_db()
+    row = db.execute(
+        "SELECT filename, mime_type, stored_path FROM attachments WHERE id = ? AND company_id = ?",
+        (attachment_id, company_id),
+    ).fetchone()
+    if row is None:
+        return jsonify({"error": "Not found."}), 404
+    directory, filename = row["stored_path"].rsplit("/", 1)
+    return send_from_directory(
+        str(UPLOADS_DIR / directory), filename, mimetype=row["mime_type"],
+        as_attachment=True, download_name=row["filename"],
+    )
+
+
+@app.route("/api/companies/<int:company_id>/attachments/<int:attachment_id>", methods=["DELETE"])
+@login_required
+@company_required
+def delete_attachment(company_id, attachment_id):
+    db = get_db()
+    row = db.execute(
+        "SELECT stored_path FROM attachments WHERE id = ? AND company_id = ?", (attachment_id, company_id)
+    ).fetchone()
+    if row is None:
+        return jsonify({"ok": True})
+    file_path = UPLOADS_DIR / row["stored_path"]
+    if file_path.exists():
+        file_path.unlink()
+    db.execute("DELETE FROM attachments WHERE id = ?", (attachment_id,))
+    db.commit()
+    return jsonify({"ok": True})
 
 
 # ---------- presets ----------

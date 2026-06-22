@@ -463,6 +463,17 @@
   </div>
 </div>
 
+<div id="attachments-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:50; align-items:center; justify-content:center;">
+  <div class="panel" style="width:420px; max-height:80vh; overflow:auto;">
+    <h2>Attachments <span class="pill" id="attachments-modal-txdesc"></span></h2>
+    <table class="inbox"><tbody id="attachments-modal-body"></tbody></table>
+    <label style="margin-top:10px;">Add a receipt / invoice (PDF, PNG, JPEG, HEIC, WEBP — max 10MB)</label>
+    <input type="file" id="attachments-modal-file" accept=".pdf,.png,.jpg,.jpeg,.heic,.webp" onchange="uploadAttachment()">
+    <div id="attachments-modal-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    <button class="btn-secondary" style="width:100%; margin-top:14px;" onclick="closeAttachmentsModal()">Close</button>
+  </div>
+</div>
+
 <script>
 let currentUser = null;
 let companies = [];
@@ -823,7 +834,10 @@ function renderJournal() {
       <td style="color:var(--credit)">${escapeHtml(t.credit)}</td>
       <td class="num">${fmt(t.amount)}</td>
       <td>${t.vatDirection ? `<span class="pill">${t.vatRate}% ${t.vatDirection}</span>` : ''}</td>
-      <td><button class="btn-danger" onclick="deleteTransaction(${t.id})">Delete</button></td>
+      <td>
+        <button class="btn-secondary" onclick="openAttachmentsModal(${t.id}, '${t.desc.replace(/'/g, "\\'")}')">📎${t.attachmentCount ? ' ' + t.attachmentCount : ''}</button>
+        <button class="btn-danger" onclick="deleteTransaction(${t.id})">Delete</button>
+      </td>
     </tr>`).join('');
   document.getElementById('tx-count').textContent = `${transactions.length} transaction${transactions.length === 1 ? '' : 's'}`;
 }
@@ -1868,6 +1882,61 @@ function renderAgingReport() {
   };
   renderSide('aging-invoice-body', agingReport.invoice || {});
   renderSide('aging-bill-body', agingReport.bill || {});
+}
+
+// ---------- Attachments ----------
+
+let attachmentsModalTxId = null;
+
+async function openAttachmentsModal(txId, desc) {
+  attachmentsModalTxId = txId;
+  document.getElementById('attachments-modal-txdesc').textContent = desc;
+  document.getElementById('attachments-overlay').style.display = 'flex';
+  document.getElementById('attachments-modal-status').textContent = '';
+  await renderAttachmentsModal();
+}
+
+function closeAttachmentsModal() {
+  document.getElementById('attachments-overlay').style.display = 'none';
+  attachmentsModalTxId = null;
+}
+
+async function renderAttachmentsModal() {
+  const list = await api(`/api/companies/${currentCompany.id}/transactions/${attachmentsModalTxId}/attachments`);
+  const body = document.getElementById('attachments-modal-body');
+  body.innerHTML = list.length ? list.map(a => `
+    <tr>
+      <td><a href="/api/companies/${currentCompany.id}/attachments/${a.id}/download" target="_blank" style="color:var(--accent);">${escapeHtml(a.filename)}</a></td>
+      <td style="color:var(--muted); font-size:11px;">${escapeHtml(a.uploadedBy)}</td>
+      <td><button class="btn-danger" onclick="deleteAttachmentItem(${a.id})">✕</button></td>
+    </tr>`).join('') : '<tr><td colspan="3" class="empty">No attachments yet.</td></tr>';
+}
+
+async function uploadAttachment() {
+  const fileInput = document.getElementById('attachments-modal-file');
+  const file = fileInput.files[0];
+  const statusEl = document.getElementById('attachments-modal-status');
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) { statusEl.textContent = 'File is over 10MB.'; return; }
+  const formData = new FormData();
+  formData.append('file', file);
+  statusEl.textContent = 'Uploading…';
+  try {
+    const res = await fetch(`/api/companies/${currentCompany.id}/transactions/${attachmentsModalTxId}/attachments`, {
+      method: 'POST', body: formData, credentials: 'same-origin'
+    });
+    if (!res.ok) { const body = await res.json().catch(() => ({})); throw new Error(body.error || 'Upload failed.'); }
+    statusEl.textContent = 'Uploaded.';
+  } catch (e) { statusEl.textContent = e.message; return; }
+  fileInput.value = '';
+  await renderAttachmentsModal();
+  await refreshAll();
+}
+
+async function deleteAttachmentItem(id) {
+  await api(`/api/companies/${currentCompany.id}/attachments/${id}`, { method: 'DELETE' });
+  await renderAttachmentsModal();
+  await refreshAll();
 }
 
 // ---------- Audit log ----------
