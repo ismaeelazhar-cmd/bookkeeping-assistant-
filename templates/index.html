@@ -537,6 +537,12 @@
     <div id="cj-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
   </div>
 
+  <div class="panel" style="margin-top:20px;">
+    <h2>Anomalies <span class="pill" id="anomaly-count"></span></h2>
+    <div class="sub" style="margin-bottom:12px;">Computed live from your ledger: accounts used for the first time recently, and transactions whose amount is far outside that account's usual range. Not AI — plain statistics, so it works without an API key.</div>
+    <table class="journal"><thead><tr><th>Type</th><th>Account</th><th>Date</th><th>Description</th><th class="num">Amount</th><th>Why</th></tr></thead><tbody id="anomaly-body"></tbody></table>
+  </div>
+
   <div class="panel" id="section-audit" style="margin-top:20px; scroll-margin-top:60px;">
     <h2>Audit Log <span class="pill" id="audit-count"></span></h2>
     <div class="sub" style="margin-bottom:12px;">Every transaction created or deleted, who did it, and when. This list cannot be edited from the app — it's the record of what actually happened.</div>
@@ -556,6 +562,14 @@
     <input type="file" id="attachments-modal-file" accept=".pdf,.png,.jpg,.jpeg,.heic,.webp" onchange="uploadAttachment()">
     <div id="attachments-modal-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     <button class="btn-secondary" style="width:100%; margin-top:14px;" onclick="closeAttachmentsModal()">Close</button>
+  </div>
+</div>
+
+<div id="drilldown-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:50; align-items:center; justify-content:center;">
+  <div class="panel" style="width:520px; max-height:80vh; overflow:auto;">
+    <h2 id="drilldown-title">Account</h2>
+    <table class="journal"><thead><tr><th>Date</th><th>Description</th><th>Side</th><th class="num">Amount</th></tr></thead><tbody id="drilldown-body"></tbody></table>
+    <button class="btn-secondary" style="width:100%; margin-top:14px;" onclick="closeDrillDown()">Close</button>
   </div>
 </div>
 
@@ -1027,7 +1041,7 @@ function renderTrialBalance() {
     debitSum += debitTotal; creditSum += creditTotal;
     const bal = debitTotal - creditTotal;
     const balLabel = bal === 0 ? '—' : (bal > 0 ? `Dr ${fmt(bal)}` : `Cr ${fmt(-bal)}`);
-    return `<tr><td>${escapeHtml(name)}</td><td class="num" style="color:var(--debit)">${fmt(debitTotal)}</td><td class="num" style="color:var(--credit)">${fmt(creditTotal)}</td><td class="num">${balLabel}</td></tr>`;
+    return `<tr><td><a href="#" onclick="drillDownAccount('${name.replace(/'/g, "\\'")}'); return false;" style="color:var(--text); text-decoration:underline dotted;">${escapeHtml(name)}</a></td><td class="num" style="color:var(--debit)">${fmt(debitTotal)}</td><td class="num" style="color:var(--credit)">${fmt(creditTotal)}</td><td class="num">${balLabel}</td></tr>`;
   }).join('') || `<tr><td colspan="4" class="empty">No transactions yet.</td></tr>`;
   const statusEl = document.getElementById('trial-status');
   if (!names.length) { statusEl.textContent = ''; return; }
@@ -1063,7 +1077,56 @@ function render() {
   renderAccounts(); renderJournal(); renderTrialBalance();
   renderChartOfAccounts(); renderFinancialStatements(); renderBrecTable(); renderFixedAssets();
   renderOpeningBalances(); renderContacts(); renderInvoicesBills(); renderAgingReport();
-  renderDashboard();
+  renderDashboard(); renderAnomalies();
+}
+
+function renderAnomalies() {
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const anomalies = [];
+
+  // first-time account use: every transaction touching this account falls within the last 30 days
+  const byAccount = {};
+  for (const t of transactions) {
+    [t.debit, t.credit].forEach(acc => {
+      if (!byAccount[acc]) byAccount[acc] = [];
+      byAccount[acc].push(t);
+    });
+  }
+  for (const [acc, txs] of Object.entries(byAccount)) {
+    if (txs.length <= 2 && txs.every(t => t.date >= thirtyDaysAgo) && getAccountType(acc) !== 'cash') {
+      const first = txs.sort((a, b) => a.date.localeCompare(b.date))[0];
+      anomalies.push({ type: 'First-time account', account: acc, date: first.date, desc: first.desc, amount: first.amount, why: `"${acc}" has never been used before this — first seen ${fmtDate(first.date)}.` });
+    }
+  }
+
+  // statistically unusual amounts: > 2.5 std deviations from that account's mean, needs >=4 data points
+  for (const [acc, txs] of Object.entries(byAccount)) {
+    if (txs.length < 4 || getAccountType(acc) === 'cash') continue;
+    const amounts = txs.map(t => t.amount);
+    const mean = amounts.reduce((s, a) => s + a, 0) / amounts.length;
+    const variance = amounts.reduce((s, a) => s + (a - mean) ** 2, 0) / amounts.length;
+    const stddev = Math.sqrt(variance);
+    if (stddev < 0.01) continue;
+    for (const t of txs) {
+      const z = Math.abs(t.amount - mean) / stddev;
+      if (z > 2.5) {
+        anomalies.push({ type: 'Unusual amount', account: acc, date: t.date, desc: t.desc, amount: t.amount, why: `Typical "${acc}" entry is around ${fmt(mean)}; this is ${z.toFixed(1)}× the usual spread away.` });
+      }
+    }
+  }
+
+  anomalies.sort((a, b) => b.date.localeCompare(a.date));
+  document.getElementById('anomaly-count').textContent = `${anomalies.length} flagged`;
+  const body = document.getElementById('anomaly-body');
+  body.innerHTML = anomalies.length ? anomalies.map(a => `
+    <tr>
+      <td>${escapeHtml(a.type)}</td>
+      <td><a href="#" onclick="drillDownAccount('${a.account.replace(/'/g, "\\'")}'); return false;" style="color:var(--text); text-decoration:underline dotted;">${escapeHtml(a.account)}</a></td>
+      <td>${fmtDate(a.date)}</td>
+      <td>${escapeHtml(a.desc)}</td>
+      <td class="num">${fmt(a.amount)}</td>
+      <td style="color:var(--muted); font-size:12px;">${escapeHtml(a.why)}</td>
+    </tr>`).join('') : '<tr><td colspan="6" class="empty">Nothing flagged.</td></tr>';
 }
 
 function renderDashboard() {
@@ -1624,7 +1687,36 @@ function lineRow(label, value, opts) {
   const cls = opts.total ? ' style="font-weight:700; border-top:1px solid var(--border);"' : '';
   const v = value === null ? '' : fmt(value);
   const flag = opts.flag ? ' <span class="confidence low" title="Built in part from an unreviewed entry (Movements Inbox / AI / bank rec auto-post) — check before relying on this figure.">unreviewed</span>' : '';
-  return `<tr${cls}><td>${escapeHtml(label)}${flag}</td><td class="num">${v}</td></tr>`;
+  const labelHtml = opts.account
+    ? `<a href="#" onclick="drillDownAccount('${opts.account.replace(/'/g, "\\'")}'); return false;" style="color:var(--text); text-decoration:underline dotted;" title="Click to see the transactions behind this figure">${escapeHtml(label)}</a>`
+    : escapeHtml(label);
+  return `<tr${cls}><td>${labelHtml}${flag}</td><td class="num">${v}</td></tr>`;
+}
+
+function drillDownAccount(name) {
+  const accounts = buildAccounts();
+  const acc = accounts[name];
+  document.getElementById('drilldown-title').textContent = name;
+  const body = document.getElementById('drilldown-body');
+  if (!acc) { body.innerHTML = '<tr><td colspan="4" class="empty">No transactions.</td></tr>'; }
+  else {
+    const lines = [
+      ...acc.debits.map(t => ({ ...t, side: 'debit' })),
+      ...acc.credits.map(t => ({ ...t, side: 'credit' })),
+    ].sort((a, b) => a.date.localeCompare(b.date));
+    body.innerHTML = lines.length ? lines.map(t => `
+      <tr>
+        <td>${fmtDate(t.date)}</td>
+        <td>${escapeHtml(t.desc)}${t._isOpeningBalance ? ' <span class="pill">opening balance</span>' : ''}${t._isVatLine ? ' <span class="pill">VAT</span>' : ''}</td>
+        <td style="color:${t.side === 'debit' ? 'var(--debit)' : 'var(--credit)'}">${t.side}</td>
+        <td class="num">${fmt(t.amount)}</td>
+      </tr>`).join('') : '<tr><td colspan="4" class="empty">No transactions.</td></tr>';
+  }
+  document.getElementById('drilldown-overlay').style.display = 'flex';
+}
+
+function closeDrillDown() {
+  document.getElementById('drilldown-overlay').style.display = 'none';
 }
 
 function accountHasUnreviewedEntries(acc) {
@@ -1668,7 +1760,7 @@ function renderFinancialStatements() {
   pnl += lineRow('Revenue', revenue);
   if (cogs) pnl += lineRow('Cost of sales', -cogs);
   pnl += lineRow('Gross profit', grossProfit, { total: true });
-  for (const a of expenseLines) pnl += lineRow(a.name, -a.balance, { flag: a.unreviewed });
+  for (const a of expenseLines) pnl += lineRow(a.name, -a.balance, { flag: a.unreviewed, account: a.name });
   pnl += lineRow(netProfit >= 0 ? 'Net profit' : 'Net loss', netProfit, { total: true });
   document.getElementById('pnl-body').innerHTML = pnl;
 
@@ -1690,23 +1782,23 @@ function renderFinancialStatements() {
   const totalEquityAndLiab = totalEquity + totalCurrentLiab + totalNonCurrentLiab;
 
   let sofp = '<tr><td style="font-weight:700;">Non-current assets</td><td></td></tr>';
-  for (const a of nonCurrentAssets) sofp += lineRow(a.name, a.balance, { flag: a.unreviewed });
+  for (const a of nonCurrentAssets) sofp += lineRow(a.name, a.balance, { flag: a.unreviewed, account: a.name });
   sofp += lineRow('Total non-current assets', totalNonCurrentAssets, { total: true });
   sofp += '<tr><td style="font-weight:700;">Current assets</td><td></td></tr>';
-  for (const a of currentAssetLines) sofp += lineRow(a.name, a.balance, { flag: a.unreviewed });
+  for (const a of currentAssetLines) sofp += lineRow(a.name, a.balance, { flag: a.unreviewed, account: a.name });
   sofp += lineRow('Total current assets', totalCurrentAssets, { total: true });
   sofp += lineRow('Total assets', totalAssets, { total: true });
   sofp += '<tr><td style="font-weight:700;">Equity</td><td></td></tr>';
-  for (const a of equityLines) sofp += lineRow(a.name, a.balance, { flag: a.unreviewed });
+  for (const a of equityLines) sofp += lineRow(a.name, a.balance, { flag: a.unreviewed, account: a.name });
   sofp += lineRow(netProfit >= 0 ? 'Retained profit' : 'Retained loss', netProfit);
   if (drawingsTotal) sofp += lineRow('Drawings', -drawingsTotal);
   sofp += lineRow('Total equity', totalEquity, { total: true });
   if (nonCurrentLiabLines.length) {
     sofp += '<tr><td style="font-weight:700;">Non-current liabilities</td><td></td></tr>';
-    for (const a of nonCurrentLiabLines) sofp += lineRow(a.name, a.balance, { flag: a.unreviewed });
+    for (const a of nonCurrentLiabLines) sofp += lineRow(a.name, a.balance, { flag: a.unreviewed, account: a.name });
   }
   sofp += '<tr><td style="font-weight:700;">Current liabilities</td><td></td></tr>';
-  for (const a of currentLiabLines) sofp += lineRow(a.name, a.balance, { flag: a.unreviewed });
+  for (const a of currentLiabLines) sofp += lineRow(a.name, a.balance, { flag: a.unreviewed, account: a.name });
   sofp += lineRow('Total equity and liabilities', totalEquityAndLiab, { total: true });
   document.getElementById('sofp-body').innerHTML = sofp;
 
