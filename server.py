@@ -1040,6 +1040,15 @@ def consolidation_report(group_id):
             for account, side in ((tx["debit"], "debit"), (tx["credit"], "credit")):
                 entry = combined.setdefault(account, {"type": types_by_name.get(account, "expense"), "debit": 0, "credit": 0})
                 entry[side] += amount
+        # opening balances feed account totals too — without this, a consolidated balance sheet
+        # would silently exclude every balance brought forward from before the ledger started
+        for ob in db.execute(
+            "SELECT ob.amount_pence, ob.side, a.name as account FROM opening_balances ob "
+            "JOIN accounts a ON a.id = ob.account_id WHERE ob.company_id = ?", (cid,)
+        ).fetchall():
+            amount = from_pence(ob["amount_pence"])
+            entry = combined.setdefault(ob["account"], {"type": types_by_name.get(ob["account"], "expense"), "debit": 0, "credit": 0})
+            entry[ob["side"]] += amount
 
     debit_normal_types = {"cash", "cogs", "expense", "current_asset", "noncurrent_asset", "drawings"}
     totals = {"revenue": 0, "cogs": 0, "expense": 0, "current_asset": 0, "noncurrent_asset": 0,
@@ -1402,20 +1411,47 @@ def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit,
             raise LedgerError('VAT on a purchase (debit to an expense/COGS account) must use vatDirection "input".')
 
     tax_year = compute_tax_year(date, g.company["period_start_date"])
+
+    # VAT is posted as a real second ledger row, not client-side display math: a "gross" amount
+    # carrying VAT is split here into a net leg (the original debit/credit pair) and a VAT leg
+    # against the VAT Control Account, sharing one journal_id. This is what makes consolidation
+    # and the Statement of Financial Activities — which sum transactions.debit/credit directly —
+    # see the VAT control balance at all; previously it only existed as client-side JS math that
+    # those server-side reports never ran.
+    gross_pence = to_pence(amount)
+    vat_rate = float(vat_rate or 0)
+    vat_pence = round(gross_pence * vat_rate / (100 + vat_rate)) if vat_rate > 0 and vat_direction else 0
+    net_pence = gross_pence - vat_pence
+    leg_journal_id = journal_id or (uuid.uuid4().hex if vat_pence else None)
+
     cur = db.execute(
         "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (company_id, date, desc, to_pence(amount), debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id),
+        (company_id, date, desc, net_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, leg_journal_id, fund_id),
     )
+    main_id = cur.lastrowid
+
+    if vat_pence:
+        vat_account = resolve_account(db, company_id, "VAT Control Account", "current_liability")
+        if vat_direction == "input":  # purchase: VAT is reclaimable, sits as a debit
+            vat_debit, vat_credit = vat_account, credit
+        else:  # output: sale, VAT is owed to HMRC, sits as a credit
+            vat_debit, vat_credit = debit, vat_account
+        db.execute(
+            "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (company_id, date, f"{desc} (VAT)", vat_pence, vat_debit, vat_credit, tax_year, vat_rate, vat_direction, confidence, leg_journal_id, fund_id),
+        )
+
     db.execute(
         "INSERT INTO presets (company_id, desc_key, debit, credit) VALUES (?,?,?,?) "
         "ON CONFLICT(company_id, desc_key) DO UPDATE SET debit = excluded.debit, credit = excluded.credit",
         (company_id, desc.strip().lower(), debit, credit),
     )
-    log_audit(db, company_id, "create", "transaction", cur.lastrowid, after={
+    log_audit(db, company_id, "create", "transaction", main_id, after={
         "date": date, "desc": desc, "amount": amount, "debit": debit, "credit": credit
     })
-    return cur.lastrowid
+    return main_id
 
 
 @app.route("/api/companies/<int:company_id>/transactions", methods=["POST"])
@@ -1473,7 +1509,7 @@ def bulk_create_transactions(company_id):
 def void_transaction(company_id, tx_id):
     db = get_db()
     row = db.execute(
-        "SELECT date, desc, amount_pence as amountPence, debit, credit FROM transactions "
+        "SELECT date, desc, amount_pence as amountPence, debit, credit, journal_id as journalId FROM transactions "
         "WHERE id = ? AND company_id = ? AND voided_at IS NULL",
         (tx_id, company_id),
     ).fetchone()
@@ -1482,9 +1518,18 @@ def void_transaction(company_id, tx_id):
     if is_locked(g.company, row["date"]):
         return jsonify({"error": f"This period is locked until {g.company['locked_until']} — unlock it in settings first."}), 423
     now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
-    db.execute(
+    # A transaction sharing a journal_id (a VAT leg, or a compound-journal leg) was never meant
+    # to stand alone — voiding just one row would leave the books unbalanced. Void the whole
+    # journal together.
+    ids_to_void = [tx_id]
+    if row["journalId"]:
+        ids_to_void = [r["id"] for r in db.execute(
+            "SELECT id FROM transactions WHERE company_id = ? AND journal_id = ? AND voided_at IS NULL",
+            (company_id, row["journalId"]),
+        ).fetchall()]
+    db.executemany(
         "UPDATE transactions SET voided_at = ?, voided_by = ? WHERE id = ? AND company_id = ?",
-        (now, session.get("email", "unknown"), tx_id, company_id),
+        [(now, session.get("email", "unknown"), i, company_id) for i in ids_to_void],
     )
     log_audit(db, company_id, "void", "transaction", tx_id, before=_serialize_transaction(row))
     db.commit()
@@ -2134,12 +2179,21 @@ def delete_invoice_bill(company_id, doc_id):
     for tx_id in (doc["transaction_id"], doc["payment_transaction_id"]):
         if tx_id is None:
             continue
-        tx = db.execute("SELECT date FROM transactions WHERE id = ? AND voided_at IS NULL", (tx_id,)).fetchone()
+        tx = db.execute(
+            "SELECT date, journal_id as journalId FROM transactions WHERE id = ? AND voided_at IS NULL", (tx_id,)
+        ).fetchone()
         if tx and not is_locked(g.company, tx["date"]):
             now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
-            db.execute(
+            # a VAT-bearing send/pay posting is two rows sharing a journal_id — void both
+            ids_to_void = [tx_id]
+            if tx["journalId"]:
+                ids_to_void = [r["id"] for r in db.execute(
+                    "SELECT id FROM transactions WHERE company_id = ? AND journal_id = ? AND voided_at IS NULL",
+                    (company_id, tx["journalId"]),
+                ).fetchall()]
+            db.executemany(
                 "UPDATE transactions SET voided_at = ?, voided_by = ? WHERE id = ?",
-                (now, session.get("email", "unknown"), tx_id),
+                [(now, session.get("email", "unknown"), i) for i in ids_to_void],
             )
             log_audit(db, company_id, "void", "transaction", tx_id, before={"reason": f"invoice/bill #{doc_id} deleted"})
     db.execute("DELETE FROM invoices_bills WHERE id = ?", (doc_id,))

@@ -27,11 +27,20 @@ def test_send_invoice_posts_vat_aware_transaction(client):
     res = client.post(f"/api/companies/{cid}/invoices-bills/{doc_id}/send")
     assert res.status_code == 200
 
-    tx = client.get(f"/api/companies/{cid}/transactions").get_json()[0]
-    assert tx["debit"] == "Trade Receivables"
-    assert tx["credit"] == "Sales"
-    assert tx["amount"] == 1200.0
-    assert tx["vatDirection"] == "output"
+    # VAT is posted as a real second ledger row sharing a journal_id, not folded into one
+    # gross-amount row: a net leg (Receivables/Sales) plus a VAT leg (Receivables/VAT Control).
+    txs = client.get(f"/api/companies/{cid}/transactions").get_json()
+    assert len(txs) == 2
+    assert len({t["journalId"] for t in txs}) == 1
+
+    main = next(t for t in txs if t["credit"] == "Sales")
+    vat_leg = next(t for t in txs if t["credit"] == "VAT Control Account")
+    assert main["debit"] == "Trade Receivables"
+    assert main["amount"] == 1000.0
+    assert main["vatDirection"] == "output"
+    assert vat_leg["debit"] == "Trade Receivables"
+    assert vat_leg["amount"] == 200.0
+    assert vat_leg["vatDirection"] == "output"
 
 
 def test_pay_invoice_settles_receivable(client):

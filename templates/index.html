@@ -1206,25 +1206,12 @@ function updateVatPreview() {
 
 const VAT_ACCOUNT = 'VAT Control Account';
 
+// VAT is posted server-side as a real second ledger row sharing a journal_id with the net leg
+// (see post_ledger_transaction in server.py) — each transaction the API returns is already a
+// plain, fully-resolved debit/credit pair. This used to re-derive a net/VAT split client-side
+// from a gross amount; that's no longer needed (and would double-count VAT if it still ran).
 function expandTransactionLines(t) {
-  const rate = (t.vatRate || 0) / 100;
-  const vat = rate > 0 ? t.amount - t.amount / (1 + rate) : 0;
-  if (!t.vatDirection || vat < 0.005) {
-    return [{ account: t.debit, side: 'debit', amount: t.amount }, { account: t.credit, side: 'credit', amount: t.amount }];
-  }
-  const net = t.amount - vat;
-  if (t.vatDirection === 'input') {
-    return [
-      { account: t.debit, side: 'debit', amount: net },
-      { account: VAT_ACCOUNT, side: 'debit', amount: vat },
-      { account: t.credit, side: 'credit', amount: t.amount }
-    ];
-  }
-  return [
-    { account: t.debit, side: 'debit', amount: t.amount },
-    { account: t.credit, side: 'credit', amount: net },
-    { account: VAT_ACCOUNT, side: 'credit', amount: vat }
-  ];
+  return [{ account: t.debit, side: 'debit', amount: t.amount }, { account: t.credit, side: 'credit', amount: t.amount }];
 }
 
 async function deleteTransaction(id) {
@@ -2196,13 +2183,13 @@ function renderVatReturn() {
   const inRange = t => (!from || t.date >= from) && (!to || t.date <= to);
   const vatTxns = transactions.filter(t => t.vatDirection && inRange(t));
 
+  // Each VAT-tagged transaction is now a real ledger row, not a gross amount to re-split: the
+  // leg that touches the VAT Control Account IS the VAT amount, the other leg IS the net amount.
   let outputVat = 0, inputVat = 0, netSales = 0, netPurchases = 0;
   for (const t of vatTxns) {
-    const rate = (t.vatRate || 0) / 100;
-    const vat = rate > 0 ? t.amount - t.amount / (1 + rate) : 0;
-    const net = t.amount - vat;
-    if (t.vatDirection === 'output') { outputVat += vat; netSales += net; }
-    else { inputVat += vat; netPurchases += net; }
+    const isVatLeg = t.debit === VAT_ACCOUNT || t.credit === VAT_ACCOUNT;
+    if (t.vatDirection === 'output') { if (isVatLeg) outputVat += t.amount; else netSales += t.amount; }
+    else { if (isVatLeg) inputVat += t.amount; else netPurchases += t.amount; }
   }
   const netVatDue = outputVat - inputVat;
 
