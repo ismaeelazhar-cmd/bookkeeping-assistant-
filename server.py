@@ -313,6 +313,36 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE (company_id, user_id)
         );
+
+        -- Stage 6, opt-in: only matters when companies.fund_accounting_enabled is set. A fund
+        -- is a tag a transaction can optionally carry — restricted/designated/unrestricted —
+        -- so a Statement of Financial Activities can be built from the same ledger without
+        -- touching anything else.
+        CREATE TABLE IF NOT EXISTS funds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL DEFAULT 'unrestricted',
+            description TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (company_id, name COLLATE NOCASE)
+        );
+
+        -- Multi-entity consolidation: a simple named grouping of companies the same user owns.
+        -- The consolidated report sums matching account lines across members — it's a plain
+        -- aggregation, not true consolidation accounting (no intercompany eliminations).
+        CREATE TABLE IF NOT EXISTS consolidation_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS consolidation_group_members (
+            group_id INTEGER NOT NULL REFERENCES consolidation_groups(id) ON DELETE CASCADE,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            PRIMARY KEY (group_id, company_id)
+        );
         """
     )
     # additive column for compound journals — safe to ALTER in place, no need to wipe data for this one
@@ -326,6 +356,11 @@ def init_db():
     if "totp_secret" not in user_cols:
         db.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT NULL")
         db.execute("ALTER TABLE users ADD COLUMN totp_pending_secret TEXT DEFAULT NULL")
+    company_cols = {row[1] for row in db.execute("PRAGMA table_info(companies)").fetchall()}
+    if "fund_accounting_enabled" not in company_cols:
+        db.execute("ALTER TABLE companies ADD COLUMN fund_accounting_enabled INTEGER DEFAULT 0")
+    if "fund_id" not in tx_cols:
+        db.execute("ALTER TABLE transactions ADD COLUMN fund_id INTEGER DEFAULT NULL REFERENCES funds(id)")
     db.execute("DELETE FROM schema_meta")
     db.execute("INSERT INTO schema_meta (version) VALUES (?)", (SCHEMA_VERSION,))
     db.commit()
@@ -420,6 +455,20 @@ def resolve_account(db, company_id, raw_name, guessed_type=None):
         (company_id, code, raw_name, account_type),
     )
     return raw_name
+
+
+def resolve_fund_id(db, company_id, fund_name):
+    """Unlike accounts, funds don't auto-create — they need a type (restricted/designated/
+    unrestricted) decided deliberately, so a transaction referencing an unknown fund is an error
+    rather than a silent guess."""
+    if not fund_name:
+        return None
+    row = db.execute(
+        "SELECT id FROM funds WHERE company_id = ? AND name = ? COLLATE NOCASE", (company_id, fund_name)
+    ).fetchone()
+    if row is None:
+        raise LedgerError(f'No fund named "{fund_name}" — create it first under Funds.')
+    return row["id"]
 
 
 def seed_default_chart(db, company_id):
@@ -757,8 +806,12 @@ def update_settings(company_id):
     data = request.get_json(force=True) or {}
     db = get_db()
     db.execute(
-        "UPDATE companies SET default_credit_account = ?, locked_until = ?, period_start_date = ? WHERE id = ?",
-        (data.get("defaultCreditAccount", ""), data.get("lockedUntil", ""), data.get("periodStartDate", ""), company_id),
+        "UPDATE companies SET default_credit_account = ?, locked_until = ?, period_start_date = ?, "
+        "fund_accounting_enabled = ? WHERE id = ?",
+        (
+            data.get("defaultCreditAccount", ""), data.get("lockedUntil", ""), data.get("periodStartDate", ""),
+            1 if data.get("fundAccountingEnabled") else 0, company_id,
+        ),
     )
     # The AI key is write-only from the client's perspective: a blank field never overwrites
     # whatever's already stored (the browser can't see the real value to "leave it unchanged"
@@ -927,6 +980,111 @@ def delete_account(company_id, account_id):
     return jsonify({"ok": True})
 
 
+# ---------- funds (Stage 6, opt-in) ----------
+
+VALID_FUND_TYPES = ("unrestricted", "restricted", "designated")
+
+
+@app.route("/api/companies/<int:company_id>/funds", methods=["GET"])
+@login_required
+@company_required
+def list_funds(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, name, type, description FROM funds WHERE company_id = ? ORDER BY name", (company_id,)
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/funds", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def create_fund(company_id):
+    data = request.get_json(force=True) or {}
+    name = (data.get("name") or "").strip()
+    fund_type = data.get("type") or "unrestricted"
+    if not name:
+        return jsonify({"error": "Fund name is required."}), 400
+    if fund_type not in VALID_FUND_TYPES:
+        return jsonify({"error": "Invalid fund type."}), 400
+    db = get_db()
+    existing = db.execute(
+        "SELECT id FROM funds WHERE company_id = ? AND name = ? COLLATE NOCASE", (company_id, name)
+    ).fetchone()
+    if existing:
+        return jsonify({"error": f'A fund named "{name}" already exists.'}), 409
+    cur = db.execute(
+        "INSERT INTO funds (company_id, name, type, description) VALUES (?,?,?,?)",
+        (company_id, name, fund_type, data.get("description", "")),
+    )
+    db.commit()
+    return jsonify({"id": cur.lastrowid})
+
+
+@app.route("/api/companies/<int:company_id>/funds/<int:fund_id>", methods=["DELETE"])
+@login_required
+@company_required
+@write_required
+def delete_fund(company_id, fund_id):
+    db = get_db()
+    in_use = db.execute(
+        "SELECT COUNT(*) as n FROM transactions WHERE company_id = ? AND fund_id = ? AND voided_at IS NULL",
+        (company_id, fund_id),
+    ).fetchone()["n"]
+    if in_use:
+        return jsonify({"error": f"This fund is used by {in_use} transaction(s) and can't be deleted."}), 409
+    db.execute("DELETE FROM funds WHERE id = ? AND company_id = ?", (fund_id, company_id))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/sofa", methods=["GET"])
+@login_required
+@company_required
+def statement_of_financial_activities(company_id):
+    """Charity SORP-style Statement of Financial Activities: incoming resources and resources
+    expended, segmented by fund type. Built from the same ledger as the standard P&L — a
+    transaction's fund tag plus its account's revenue/expense classification is all this needs.
+    Scoped to net movement in funds for the period; cumulative funds-carried-forward across
+    periods isn't tracked yet (that would need fund-level opening balances, a further extension)."""
+    db = get_db()
+    rows = db.execute(
+        "SELECT t.amount_pence, t.debit, t.credit, a_debit.type as debitType, a_credit.type as creditType, "
+        "f.type as fundType, f.name as fundName "
+        "FROM transactions t "
+        "LEFT JOIN funds f ON f.id = t.fund_id "
+        "LEFT JOIN accounts a_debit ON a_debit.company_id = t.company_id AND a_debit.name = t.debit COLLATE NOCASE "
+        "LEFT JOIN accounts a_credit ON a_credit.company_id = t.company_id AND a_credit.name = t.credit COLLATE NOCASE "
+        "WHERE t.company_id = ? AND t.voided_at IS NULL",
+        (company_id,),
+    ).fetchall()
+
+    by_fund_type = {t: {"incoming": 0, "expended": 0} for t in VALID_FUND_TYPES}
+    by_fund_type["unfunded"] = {"incoming": 0, "expended": 0}  # transactions with no fund tag at all
+
+    for r in rows:
+        amount = from_pence(r["amount_pence"])
+        fund_type = r["fundType"] or "unfunded"
+        if r["creditType"] in ("revenue", "cogs"):
+            by_fund_type[fund_type]["incoming"] += amount
+        if r["debitType"] == "expense":
+            by_fund_type[fund_type]["expended"] += amount
+
+    for bucket in by_fund_type.values():
+        bucket["net"] = bucket["incoming"] - bucket["expended"]
+
+    total_incoming = sum(b["incoming"] for b in by_fund_type.values())
+    total_expended = sum(b["expended"] for b in by_fund_type.values())
+
+    return jsonify({
+        "byFundType": by_fund_type,
+        "totalIncoming": total_incoming,
+        "totalExpended": total_expended,
+        "netMovement": total_incoming - total_expended,
+    })
+
+
 # ---------- opening balances ----------
 
 @app.route("/api/companies/<int:company_id>/opening-balances", methods=["GET"])
@@ -1010,8 +1168,10 @@ def list_transactions(company_id):
         f"SELECT t.id, t.date, t.desc, t.amount_pence as amountPence, t.debit, t.credit, t.tax_year as taxYear, "
         f"t.vat_rate as vatRate, t.vat_direction as vatDirection, t.confidence, t.journal_id as journalId, "
         f"t.voided_at as voidedAt, t.voided_by as voidedBy, t.reviewed_by as reviewedBy, t.reviewed_at as reviewedAt, "
+        f"f.name as fund, "
         f"(SELECT COUNT(*) FROM attachments a WHERE a.transaction_id = t.id) as attachmentCount "
-        f"FROM transactions t WHERE t.company_id = ? {voided_clause} ORDER BY t.date",
+        f"FROM transactions t LEFT JOIN funds f ON f.id = t.fund_id "
+        f"WHERE t.company_id = ? {voided_clause} ORDER BY t.date",
         (company_id,),
     ).fetchall()
     return jsonify([_serialize_transaction(r) for r in rows])
@@ -1024,7 +1184,7 @@ class LedgerError(Exception):
 
 
 def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit, tax_year="",
-                             vat_rate=0, vat_direction="", confidence="high", journal_id=None):
+                             vat_rate=0, vat_direction="", confidence="high", journal_id=None, fund_id=None):
     """Shared insert path for anything that writes to the ledger — manual entries, bulk
     imports, invoice/bill send-and-pay postings, and (Stage 2) compound journal legs — so
     they all get the same account resolution, locking check, preset learning, and audit trail."""
@@ -1038,9 +1198,9 @@ def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit, t
     debit = resolve_account(db, company_id, debit)
     credit = resolve_account(db, company_id, credit)
     cur = db.execute(
-        "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (company_id, date, desc, to_pence(amount), debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id),
+        "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (company_id, date, desc, to_pence(amount), debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id),
     )
     db.execute(
         "INSERT INTO presets (company_id, desc_key, debit, credit) VALUES (?,?,?,?) "
@@ -1061,11 +1221,12 @@ def create_transaction(company_id):
     data = request.get_json(force=True) or {}
     db = get_db()
     try:
+        fund_id = resolve_fund_id(db, company_id, data.get("fund"))
         tx_id = post_ledger_transaction(
             db, company_id, data.get("date"), data.get("desc"), data.get("amount"),
             data.get("debit"), data.get("credit"), data.get("taxYear", ""),
             float(data.get("vatRate") or 0), data.get("vatDirection") or "",
-            data.get("confidence") or "high",
+            data.get("confidence") or "high", fund_id=fund_id,
         )
     except LedgerError as e:
         return jsonify({"error": e.message}), e.status
@@ -1084,11 +1245,12 @@ def bulk_create_transactions(company_id):
     skipped_locked = 0
     for it in items:
         try:
+            fund_id = resolve_fund_id(db, company_id, it.get("fund"))
             post_ledger_transaction(
                 db, company_id, it.get("date"), it.get("desc"), it.get("amount"),
                 it.get("debit"), it.get("credit"), it.get("taxYear", ""),
                 float(it.get("vatRate") or 0), it.get("vatDirection") or "",
-                it.get("confidence") or "high",
+                it.get("confidence") or "high", fund_id=fund_id,
             )
         except LedgerError as e:
             if e.status == 423:
