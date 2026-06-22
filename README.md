@@ -15,6 +15,7 @@ A multi-tenant double-entry bookkeeping web app: log in, create one or more comp
 
 ## Movements & reconciliation
 
+- **Live bank feed (Plaid)**: link a real bank account or card. This is the "buy don't build" Open Banking piece — actual connections go through Plaid's regulated infrastructure (the same approach Xero/FreeAgent use), not custom bank scraping. Transactions sync via cursor-based incremental sync straight into the same `bank_lines` the Bank Reconciliation screen already uses. A webhook gives real-time push updates once deployed somewhere reachable; a manual "Sync now" button covers local/sandbox use where Plaid's servers can't reach `localhost`. The access token is encrypted at rest with the same key used for the AI API key, and is never returned to the browser.
 - **Movements Inbox**: drop a bank statement PDF or freeform text; keyword rules (or an AI pass) propose the debit/credit pair for review before posting. Every entry carries a `confidence` flag, surfaced as an "unreviewed" warning on any financial statement line built from it.
 - **Bank Reconciliation**: import or paste a statement, match each line to a posted transaction or post a new one directly, with a running ledger-vs-statement balance check.
 - **Receipt OCR**: attach a receipt/invoice (PDF/PNG/JPEG/HEIC/WEBP) to any transaction; Claude reads the date/description/amount off it.
@@ -62,7 +63,7 @@ pip3 install --user -r requirements-dev.txt
 python3 -m pytest
 ```
 
-66 tests covering auth, the account-dedup fix, pence precision, period locking, soft-delete, the invoice/bill lifecycle, compound journals, permission enforcement, the full 2FA cycle, bank reconciliation, fixed assets, attachments, preset learning, fund accounting/SOFA math, and multi-entity consolidation. Each test run gets an isolated SQLite file — nothing touches your real `data.sqlite`.
+73 tests covering auth, the account-dedup fix, pence precision, period locking, soft-delete, the invoice/bill lifecycle, compound journals, permission enforcement, the full 2FA cycle, bank reconciliation, fixed assets, attachments, preset learning, fund accounting/SOFA math, multi-entity consolidation, and the Plaid integration (including one test that makes a real network call to Plaid's sandbox with fake credentials, to prove the request is shaped correctly rather than just unit-testing in isolation). Each test run gets an isolated SQLite file — nothing touches your real `data.sqlite`.
 
 ## Deploying for real
 
