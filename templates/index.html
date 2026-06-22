@@ -397,6 +397,62 @@
   </div>
 
   <div class="panel" style="margin-top:20px;">
+    <h2>Contacts</h2>
+    <div class="sub" style="margin-bottom:12px;">Customers and suppliers, so invoices and bills are tied to who they're actually for/from.</div>
+    <table class="inbox"><thead><tr><th>Name</th><th>Type</th><th>Email</th><th>Phone</th><th></th></tr></thead><tbody id="contacts-body"></tbody></table>
+    <div class="row2" style="margin-top:12px;">
+      <div><label>Name</label><input type="text" id="contact-name" placeholder="e.g. Acme Ltd"></div>
+      <div><label>Type</label><select id="contact-type"><option value="customer">Customer</option><option value="supplier">Supplier</option><option value="both">Both</option></select></div>
+    </div>
+    <div class="row2">
+      <div><label>Email (optional)</label><input type="email" id="contact-email"></div>
+      <div><label>Phone (optional)</label><input type="text" id="contact-phone"></div>
+    </div>
+    <button class="btn-primary" onclick="addContact()">Add contact</button>
+    <div id="contact-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+  </div>
+
+  <div class="panel" style="margin-top:20px;">
+    <h2>Invoices &amp; Bills</h2>
+    <div class="sub" style="margin-bottom:12px;">An invoice/bill starts as a draft (no ledger effect). "Send" posts it to Trade Receivables/Payables (with VAT if set). "Mark Paid" settles it against the account you choose.</div>
+
+    <div class="row2">
+      <div><label>Kind</label><select id="ib-kind"><option value="invoice">Invoice (to a customer)</option><option value="bill">Bill (from a supplier)</option></select></div>
+      <div><label>Contact</label><select id="ib-contact"></select></div>
+    </div>
+    <div class="row2">
+      <div><label>Date</label><input type="date" id="ib-date"></div>
+      <div><label>Due date</label><input type="date" id="ib-due-date"></div>
+    </div>
+    <label>Description</label>
+    <input type="text" id="ib-desc" placeholder="e.g. June consulting">
+    <div class="row2">
+      <div><label>Amount (gross)</label><input type="number" id="ib-amount" step="0.01" min="0" placeholder="0.00"></div>
+      <div><label>VAT rate</label>
+        <select id="ib-vat-rate"><option value="0">No VAT</option><option value="20">20%</option><option value="5">5%</option><option value="0.001">0% (Zero-rated)</option></select>
+      </div>
+    </div>
+    <label>Account <span style="color:var(--muted); font-weight:400;">(Sales for invoices; the expense/asset account for bills)</span></label>
+    <select id="ib-account"></select>
+    <button class="btn-primary" onclick="addInvoiceBill()">Save as draft</button>
+    <div id="ib-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+
+    <table class="inbox" style="margin-top:14px;">
+      <thead><tr><th>Kind</th><th>Contact</th><th>Date</th><th>Due</th><th>Description</th><th class="num">Amount</th><th>Status</th><th></th></tr></thead>
+      <tbody id="ib-body"></tbody>
+    </table>
+  </div>
+
+  <div class="panel" style="margin-top:20px;">
+    <h2>Aging Report</h2>
+    <div class="sub" style="margin-bottom:12px;">Outstanding (sent but not paid) invoices and bills, bucketed by how overdue they are.</div>
+    <h2 style="margin-top:0; color:var(--debit);">Receivables (money owed to you)</h2>
+    <table class="trial"><thead><tr><td><b>Customer</b></td><td class="num"><b>Current</b></td><td class="num"><b>1-30</b></td><td class="num"><b>31-60</b></td><td class="num"><b>61-90</b></td><td class="num"><b>90+</b></td></tr></thead><tbody id="aging-invoice-body"></tbody></table>
+    <h2 style="margin-top:18px; color:var(--credit);">Payables (money you owe)</h2>
+    <table class="trial"><thead><tr><td><b>Supplier</b></td><td class="num"><b>Current</b></td><td class="num"><b>1-30</b></td><td class="num"><b>31-60</b></td><td class="num"><b>61-90</b></td><td class="num"><b>90+</b></td></tr></thead><tbody id="aging-bill-body"></tbody></table>
+  </div>
+
+  <div class="panel" style="margin-top:20px;">
     <h2>Audit Log <span class="pill" id="audit-count"></span></h2>
     <div class="sub" style="margin-bottom:12px;">Every transaction created or deleted, who did it, and when. This list cannot be edited from the app — it's the record of what actually happened.</div>
     <button class="btn-secondary" onclick="loadAuditLog()">Refresh</button>
@@ -573,7 +629,7 @@ function getAccountType(name) {
 function populateAccountSelects() {
   const sorted = [...chartAccounts].sort((a, b) => a.name.localeCompare(b.name));
   const optionsHtml = sorted.map(a => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)} (${a.code})</option>`).join('');
-  ['f-debit', 'f-credit', 'f-default-credit', 'brec-account', 'fa-account'].forEach(id => {
+  ['f-debit', 'f-credit', 'f-default-credit', 'brec-account', 'fa-account', 'ib-account'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     const prev = el.value;
@@ -588,17 +644,25 @@ function populateAccountSelects() {
   document.getElementById('account-list').innerHTML = sorted.map(a => `<option value="${escapeHtml(a.name)}">`).join('');
 }
 
+let contacts = [];
+let invoicesBills = [];
+let agingReport = { invoice: {}, bill: {} };
+
 async function refreshAll() {
   const cid = currentCompany.id;
-  [transactions, presets, chartAccounts, bankLines, fixedAssets, openingBalances] = await Promise.all([
+  [transactions, presets, chartAccounts, bankLines, fixedAssets, openingBalances, contacts, invoicesBills, agingReport] = await Promise.all([
     api(`/api/companies/${cid}/transactions`),
     api(`/api/companies/${cid}/presets`),
     api(`/api/companies/${cid}/accounts`),
     api(`/api/companies/${cid}/bank-lines`),
     api(`/api/companies/${cid}/fixed-assets`),
-    api(`/api/companies/${cid}/opening-balances`)
+    api(`/api/companies/${cid}/opening-balances`),
+    api(`/api/companies/${cid}/contacts`),
+    api(`/api/companies/${cid}/invoices-bills`),
+    api(`/api/companies/${cid}/aging-report`)
   ]);
   populateAccountSelects();
+  populateContactSelect();
   render();
   loadAuditLog();
 }
@@ -811,7 +875,7 @@ function printCompilation() {
 function render() {
   renderAccounts(); renderJournal(); renderTrialBalance();
   renderChartOfAccounts(); renderFinancialStatements(); renderBrecTable(); renderFixedAssets();
-  renderOpeningBalances();
+  renderOpeningBalances(); renderContacts(); renderInvoicesBills(); renderAgingReport();
 }
 
 function exportCSV() {
@@ -1660,6 +1724,145 @@ async function postOpeningBalances() {
   obRowCount = 0;
   await refreshAll();
   addOpeningBalanceRow();
+}
+
+// ---------- Contacts ----------
+
+function renderContacts() {
+  const body = document.getElementById('contacts-body');
+  body.innerHTML = contacts.length ? contacts.map(c => `
+    <tr>
+      <td>${escapeHtml(c.name)}</td>
+      <td>${escapeHtml(c.type)}</td>
+      <td>${escapeHtml(c.email || '')}</td>
+      <td>${escapeHtml(c.phone || '')}</td>
+      <td><button class="btn-danger" onclick="deleteContact(${c.id}, '${c.name.replace(/'/g, "\\'")}')">✕</button></td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">No contacts yet.</td></tr>';
+}
+
+function populateContactSelect() {
+  const el = document.getElementById('ib-contact');
+  const prev = el.value;
+  el.innerHTML = contacts.map(c => `<option value="${c.id}">${escapeHtml(c.name)} (${c.type})</option>`).join('');
+  if (contacts.some(c => String(c.id) === prev)) el.value = prev;
+}
+
+async function addContact() {
+  const name = document.getElementById('contact-name').value.trim();
+  const type = document.getElementById('contact-type').value;
+  const email = document.getElementById('contact-email').value.trim();
+  const phone = document.getElementById('contact-phone').value.trim();
+  const statusEl = document.getElementById('contact-status');
+  if (!name) { statusEl.textContent = 'Enter a contact name.'; return; }
+  try {
+    await api(`/api/companies/${currentCompany.id}/contacts`, { method: 'POST', body: JSON.stringify({ name, type, email, phone }) });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = '';
+  document.getElementById('contact-name').value = '';
+  document.getElementById('contact-email').value = '';
+  document.getElementById('contact-phone').value = '';
+  contacts = await api(`/api/companies/${currentCompany.id}/contacts`);
+  populateContactSelect();
+  renderContacts();
+}
+
+async function deleteContact(id, name) {
+  if (!confirm(`Delete contact "${name}"? Only possible if they have no invoices/bills.`)) return;
+  try {
+    await api(`/api/companies/${currentCompany.id}/contacts/${id}`, { method: 'DELETE' });
+  } catch (e) { alert(e.message); return; }
+  contacts = await api(`/api/companies/${currentCompany.id}/contacts`);
+  populateContactSelect();
+  renderContacts();
+}
+
+// ---------- Invoices & Bills ----------
+
+function renderInvoicesBills() {
+  const body = document.getElementById('ib-body');
+  if (!invoicesBills.length) { body.innerHTML = '<tr><td colspan="8" class="empty">No invoices or bills yet.</td></tr>'; return; }
+  const statusColor = { draft: 'var(--muted)', sent: 'var(--debit)', overdue: 'var(--bad)', paid: 'var(--good)' };
+  body.innerHTML = invoicesBills.map(d => {
+    const actions = [];
+    if (d.status === 'draft') actions.push(`<button class="btn-secondary" onclick="sendInvoiceBill(${d.id})">Send</button>`);
+    if (d.status === 'sent') actions.push(`<button class="btn-secondary" onclick="payInvoiceBill(${d.id})">Mark paid</button>`);
+    actions.push(`<button class="btn-danger" onclick="deleteInvoiceBill(${d.id})">✕</button>`);
+    return `<tr>
+      <td>${d.kind}</td>
+      <td>${escapeHtml(d.contactName)}</td>
+      <td>${fmtDate(d.date)}</td>
+      <td>${fmtDate(d.dueDate)}</td>
+      <td>${escapeHtml(d.desc)}</td>
+      <td class="num">${fmt(d.amount)}</td>
+      <td><span class="confidence" style="background:transparent; color:${statusColor[d.displayStatus] || 'var(--muted)'}; font-weight:700;">${d.displayStatus}</span></td>
+      <td>${actions.join(' ')}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function addInvoiceBill() {
+  const kind = document.getElementById('ib-kind').value;
+  const contactId = parseInt(document.getElementById('ib-contact').value, 10);
+  const date = document.getElementById('ib-date').value;
+  const dueDate = document.getElementById('ib-due-date').value;
+  const desc = document.getElementById('ib-desc').value.trim();
+  const amount = parseFloat(document.getElementById('ib-amount').value);
+  let vatRate = parseFloat(document.getElementById('ib-vat-rate').value);
+  vatRate = vatRate === 0.001 ? 0 : vatRate;
+  const account = document.getElementById('ib-account').value;
+  const statusEl = document.getElementById('ib-status');
+
+  if (!contactId || !date || !dueDate || !desc || !amount || amount <= 0 || !account) {
+    statusEl.textContent = 'Fill in contact, both dates, description, a positive amount, and an account.'; return;
+  }
+  try {
+    await api(`/api/companies/${currentCompany.id}/invoices-bills`, {
+      method: 'POST', body: JSON.stringify({ kind, contactId, date, dueDate, desc, amount, account, vatRate })
+    });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = '';
+  document.getElementById('ib-desc').value = '';
+  document.getElementById('ib-amount').value = '';
+  invoicesBills = await api(`/api/companies/${currentCompany.id}/invoices-bills`);
+  renderInvoicesBills();
+}
+
+async function sendInvoiceBill(id) {
+  try {
+    await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/send`, { method: 'POST' });
+  } catch (e) { alert(e.message); return; }
+  await refreshAll();
+}
+
+async function payInvoiceBill(id) {
+  const account = prompt('Settle against which account?', 'Cash');
+  if (!account) return;
+  const date = prompt('Payment date (YYYY-MM-DD)?', new Date().toISOString().slice(0, 10));
+  if (!date) return;
+  try {
+    await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/pay`, { method: 'POST', body: JSON.stringify({ account, date }) });
+  } catch (e) { alert(e.message); return; }
+  await refreshAll();
+}
+
+async function deleteInvoiceBill(id) {
+  if (!confirm('Delete this invoice/bill? Any linked ledger transactions will be voided, not left orphaned.')) return;
+  await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}`, { method: 'DELETE' });
+  await refreshAll();
+}
+
+function renderAgingReport() {
+  const buckets = ['current', '1-30', '31-60', '61-90', '90+'];
+  const renderSide = (elId, data) => {
+    const names = Object.keys(data).sort();
+    const body = document.getElementById(elId);
+    body.innerHTML = names.length ? names.map(name => {
+      const row = data[name];
+      return `<tr><td>${escapeHtml(name)}</td>${buckets.map(b => `<td class="num">${row[b] ? fmt(row[b]) : '—'}</td>`).join('')}</tr>`;
+    }).join('') : `<tr><td colspan="6" class="empty">Nothing outstanding.</td></tr>`;
+  };
+  renderSide('aging-invoice-body', agingReport.invoice || {});
+  renderSide('aging-bill-body', agingReport.bill || {});
 }
 
 // ---------- Audit log ----------

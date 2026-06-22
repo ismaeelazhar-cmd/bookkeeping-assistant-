@@ -30,7 +30,7 @@ def close_db(exception=None):
         db.close()
 
 
-SCHEMA_VERSION = 2  # bumped for the Stage 1 data-foundation rewrite (pence, chart of accounts, opening balances, soft-delete)
+SCHEMA_VERSION = 3  # bumped for Stage 2: contacts + invoices/bills
 
 
 def init_db():
@@ -51,6 +51,8 @@ def init_db():
         db.executescript(
             """
             DROP TABLE IF EXISTS schema_meta;
+            DROP TABLE IF EXISTS invoices_bills;
+            DROP TABLE IF EXISTS contacts;
             DROP TABLE IF EXISTS opening_balances;
             DROP TABLE IF EXISTS accounts;
             DROP TABLE IF EXISTS bank_lines;
@@ -123,6 +125,7 @@ def init_db():
             tax_year TEXT DEFAULT '',
             vat_rate REAL DEFAULT 0,
             vat_direction TEXT DEFAULT '',
+            confidence TEXT NOT NULL DEFAULT 'high',
             voided_at TEXT DEFAULT NULL,
             voided_by TEXT DEFAULT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -171,6 +174,37 @@ def init_db():
             method TEXT DEFAULT 'straight_line',
             depreciation_account TEXT DEFAULT 'Depreciation Expense',
             accum_account TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS contacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL DEFAULT 'customer',
+            email TEXT DEFAULT '',
+            phone TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Invoices (kind='invoice', sales to a customer) and Bills (kind='bill', purchases from a
+        -- supplier) share a shape, so they share a table. "account" is the P&L/asset side of the
+        -- entry (Sales for an invoice; whatever expense/asset account for a bill). transaction_id
+        -- is set once it's sent (posted to the ledger); payment_transaction_id once it's paid.
+        CREATE TABLE IF NOT EXISTS invoices_bills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+            date TEXT NOT NULL,
+            due_date TEXT NOT NULL,
+            desc TEXT NOT NULL,
+            amount_pence INTEGER NOT NULL,
+            account TEXT NOT NULL,
+            vat_rate REAL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'draft',
+            transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
+            payment_transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         """
@@ -620,37 +654,37 @@ def list_transactions(company_id):
     voided_clause = "" if include_voided else "AND voided_at IS NULL"
     rows = db.execute(
         f"SELECT id, date, desc, amount_pence as amountPence, debit, credit, tax_year as taxYear, "
-        f"vat_rate as vatRate, vat_direction as vatDirection, voided_at as voidedAt, voided_by as voidedBy "
+        f"vat_rate as vatRate, vat_direction as vatDirection, confidence, voided_at as voidedAt, voided_by as voidedBy "
         f"FROM transactions WHERE company_id = ? {voided_clause} ORDER BY date",
         (company_id,),
     ).fetchall()
     return jsonify([_serialize_transaction(r) for r in rows])
 
 
-@app.route("/api/companies/<int:company_id>/transactions", methods=["POST"])
-@login_required
-@company_required
-def create_transaction(company_id):
-    data = request.get_json(force=True) or {}
-    date, desc, amount, debit, credit = (
-        data.get("date"), data.get("desc"), data.get("amount"), data.get("debit"), data.get("credit")
-    )
-    vat_rate = float(data.get("vatRate") or 0)
-    vat_direction = data.get("vatDirection") or ""
-    if not all([date, desc, debit, credit]) or not amount or float(amount) <= 0 or debit == credit:
-        return jsonify({"error": "Invalid transaction."}), 400
-    if not _valid_vat_direction(vat_direction):
-        return jsonify({"error": "Invalid VAT direction."}), 400
-    if is_locked(g.company, date):
-        return jsonify({"error": f"This period is locked until {g.company['locked_until']} — unlock it in settings first."}), 423
+class LedgerError(Exception):
+    def __init__(self, message, status=400):
+        self.message = message
+        self.status = status
 
-    db = get_db()
+
+def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit, tax_year="",
+                             vat_rate=0, vat_direction="", confidence="high"):
+    """Shared insert path for anything that writes to the ledger — manual entries, bulk
+    imports, and (Stage 2) invoice/bill send-and-pay postings — so they all get the same
+    account resolution, locking check, preset learning, and audit trail."""
+    if not all([date, desc, debit, credit]) or not amount or float(amount) <= 0 or debit == credit:
+        raise LedgerError("Invalid transaction.")
+    if not _valid_vat_direction(vat_direction):
+        raise LedgerError("Invalid VAT direction.")
+    if is_locked(g.company, date):
+        raise LedgerError(f"This period is locked until {g.company['locked_until']} — unlock it in settings first.", 423)
+
     debit = resolve_account(db, company_id, debit)
     credit = resolve_account(db, company_id, credit)
     cur = db.execute(
-        "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
-        (company_id, date, desc, to_pence(amount), debit, credit, data.get("taxYear", ""), vat_rate, vat_direction),
+        "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (company_id, date, desc, to_pence(amount), debit, credit, tax_year, vat_rate, vat_direction, confidence),
     )
     db.execute(
         "INSERT INTO presets (company_id, desc_key, debit, credit) VALUES (?,?,?,?) "
@@ -660,8 +694,26 @@ def create_transaction(company_id):
     log_audit(db, company_id, "create", "transaction", cur.lastrowid, after={
         "date": date, "desc": desc, "amount": amount, "debit": debit, "credit": credit
     })
+    return cur.lastrowid
+
+
+@app.route("/api/companies/<int:company_id>/transactions", methods=["POST"])
+@login_required
+@company_required
+def create_transaction(company_id):
+    data = request.get_json(force=True) or {}
+    db = get_db()
+    try:
+        tx_id = post_ledger_transaction(
+            db, company_id, data.get("date"), data.get("desc"), data.get("amount"),
+            data.get("debit"), data.get("credit"), data.get("taxYear", ""),
+            float(data.get("vatRate") or 0), data.get("vatDirection") or "",
+            data.get("confidence") or "high",
+        )
+    except LedgerError as e:
+        return jsonify({"error": e.message}), e.status
     db.commit()
-    return jsonify({"id": cur.lastrowid})
+    return jsonify({"id": tx_id})
 
 
 @app.route("/api/companies/<int:company_id>/transactions/bulk", methods=["POST"])
@@ -673,33 +725,17 @@ def bulk_create_transactions(company_id):
     inserted = 0
     skipped_locked = 0
     for it in items:
-        date, desc, amount, debit, credit = (
-            it.get("date"), it.get("desc"), it.get("amount"), it.get("debit"), it.get("credit")
-        )
-        vat_rate = float(it.get("vatRate") or 0)
-        vat_direction = it.get("vatDirection") or ""
-        if not all([date, desc, debit, credit]) or not amount or float(amount) <= 0 or debit == credit:
+        try:
+            post_ledger_transaction(
+                db, company_id, it.get("date"), it.get("desc"), it.get("amount"),
+                it.get("debit"), it.get("credit"), it.get("taxYear", ""),
+                float(it.get("vatRate") or 0), it.get("vatDirection") or "",
+                it.get("confidence") or "high",
+            )
+        except LedgerError as e:
+            if e.status == 423:
+                skipped_locked += 1
             continue
-        if not _valid_vat_direction(vat_direction):
-            continue
-        if is_locked(g.company, date):
-            skipped_locked += 1
-            continue
-        debit = resolve_account(db, company_id, debit)
-        credit = resolve_account(db, company_id, credit)
-        cur = db.execute(
-            "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (company_id, date, desc, to_pence(amount), debit, credit, it.get("taxYear", ""), vat_rate, vat_direction),
-        )
-        db.execute(
-            "INSERT INTO presets (company_id, desc_key, debit, credit) VALUES (?,?,?,?) "
-            "ON CONFLICT(company_id, desc_key) DO UPDATE SET debit = excluded.debit, credit = excluded.credit",
-            (company_id, desc.strip().lower(), debit, credit),
-        )
-        log_audit(db, company_id, "create", "transaction", cur.lastrowid, after={
-            "date": date, "desc": desc, "amount": amount, "debit": debit, "credit": credit
-        })
         inserted += 1
     db.commit()
     return jsonify({"inserted": inserted, "skippedLocked": skipped_locked})
@@ -766,6 +802,246 @@ def list_presets(company_id):
         "SELECT desc_key, debit, credit FROM presets WHERE company_id = ?", (company_id,)
     ).fetchall()
     return jsonify({r["desc_key"]: {"debit": r["debit"], "credit": r["credit"]} for r in rows})
+
+
+# ---------- contacts ----------
+
+@app.route("/api/companies/<int:company_id>/contacts", methods=["GET"])
+@login_required
+@company_required
+def list_contacts(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, name, type, email, phone FROM contacts WHERE company_id = ? ORDER BY name",
+        (company_id,),
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/contacts", methods=["POST"])
+@login_required
+@company_required
+def create_contact(company_id):
+    data = request.get_json(force=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Contact name is required."}), 400
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO contacts (company_id, name, type, email, phone) VALUES (?,?,?,?,?)",
+        (company_id, name, data.get("type", "customer"), data.get("email", ""), data.get("phone", "")),
+    )
+    db.commit()
+    return jsonify({"id": cur.lastrowid})
+
+
+@app.route("/api/companies/<int:company_id>/contacts/<int:contact_id>", methods=["DELETE"])
+@login_required
+@company_required
+def delete_contact(company_id, contact_id):
+    db = get_db()
+    in_use = db.execute(
+        "SELECT COUNT(*) as n FROM invoices_bills WHERE company_id = ? AND contact_id = ?",
+        (company_id, contact_id),
+    ).fetchone()["n"]
+    if in_use:
+        return jsonify({"error": f"This contact has {in_use} invoice/bill record(s) and can't be deleted."}), 409
+    db.execute("DELETE FROM contacts WHERE id = ? AND company_id = ?", (contact_id, company_id))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------- invoices & bills ----------
+
+def _serialize_invoice_bill(row, today):
+    d = dict(row)
+    d["amount"] = from_pence(d.pop("amountPence"))
+    display_status = d["status"]
+    if d["status"] == "sent" and d["dueDate"] < today:
+        display_status = "overdue"
+    d["displayStatus"] = display_status
+    return d
+
+
+@app.route("/api/companies/<int:company_id>/invoices-bills", methods=["GET"])
+@login_required
+@company_required
+def list_invoices_bills(company_id):
+    db = get_db()
+    today = datetime.date.today().isoformat()
+    rows = db.execute(
+        "SELECT ib.id, ib.kind, ib.contact_id as contactId, c.name as contactName, ib.date, "
+        "ib.due_date as dueDate, ib.desc, ib.amount_pence as amountPence, ib.account, ib.vat_rate as vatRate, "
+        "ib.status, ib.transaction_id as transactionId, ib.payment_transaction_id as paymentTransactionId "
+        "FROM invoices_bills ib JOIN contacts c ON c.id = ib.contact_id "
+        "WHERE ib.company_id = ? ORDER BY ib.due_date",
+        (company_id,),
+    ).fetchall()
+    return jsonify([_serialize_invoice_bill(r, today) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/invoices-bills", methods=["POST"])
+@login_required
+@company_required
+def create_invoice_bill(company_id):
+    data = request.get_json(force=True) or {}
+    kind, contact_id, date, due_date, desc, amount, account = (
+        data.get("kind"), data.get("contactId"), data.get("date"), data.get("dueDate"),
+        data.get("desc"), data.get("amount"), data.get("account"),
+    )
+    if kind not in ("invoice", "bill"):
+        return jsonify({"error": "kind must be 'invoice' or 'bill'."}), 400
+    if not all([contact_id, date, due_date, desc, account]) or not amount or float(amount) <= 0:
+        return jsonify({"error": "Contact, dates, description, account, and a positive amount are all required."}), 400
+
+    db = get_db()
+    account = resolve_account(db, company_id, account, "revenue" if kind == "invoice" else "expense")
+    cur = db.execute(
+        "INSERT INTO invoices_bills (company_id, kind, contact_id, date, due_date, desc, amount_pence, account, vat_rate) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (company_id, kind, contact_id, date, due_date, desc, to_pence(amount), account, float(data.get("vatRate") or 0)),
+    )
+    db.commit()
+    return jsonify({"id": cur.lastrowid})
+
+
+@app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>/send", methods=["POST"])
+@login_required
+@company_required
+def send_invoice_bill(company_id, doc_id):
+    db = get_db()
+    doc = db.execute(
+        "SELECT * FROM invoices_bills WHERE id = ? AND company_id = ?", (doc_id, company_id)
+    ).fetchone()
+    if doc is None:
+        return jsonify({"error": "Not found."}), 404
+    if doc["status"] != "draft":
+        return jsonify({"error": "Only a draft can be sent."}), 400
+
+    amount = from_pence(doc["amount_pence"])
+    if doc["kind"] == "invoice":
+        debtors_account = resolve_account(db, company_id, "Trade Receivables", "current_asset")
+        debit, credit, vat_direction = debtors_account, doc["account"], "output"
+    else:
+        creditors_account = resolve_account(db, company_id, "Trade Payables", "current_liability")
+        debit, credit, vat_direction = doc["account"], creditors_account, "input"
+
+    try:
+        tx_id = post_ledger_transaction(
+            db, company_id, doc["date"], f'{"Invoice" if doc["kind"] == "invoice" else "Bill"}: {doc["desc"]}',
+            amount, debit, credit, "", doc["vat_rate"], vat_direction if doc["vat_rate"] else "",
+        )
+    except LedgerError as e:
+        return jsonify({"error": e.message}), e.status
+
+    db.execute(
+        "UPDATE invoices_bills SET status = 'sent', transaction_id = ? WHERE id = ?", (tx_id, doc_id)
+    )
+    db.commit()
+    return jsonify({"ok": True, "transactionId": tx_id})
+
+
+@app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>/pay", methods=["POST"])
+@login_required
+@company_required
+def pay_invoice_bill(company_id, doc_id):
+    data = request.get_json(force=True) or {}
+    payment_date = data.get("date") or datetime.date.today().isoformat()
+    payment_account = data.get("account") or "Cash"
+
+    db = get_db()
+    doc = db.execute(
+        "SELECT * FROM invoices_bills WHERE id = ? AND company_id = ?", (doc_id, company_id)
+    ).fetchone()
+    if doc is None:
+        return jsonify({"error": "Not found."}), 404
+    if doc["status"] != "sent":
+        return jsonify({"error": "Only a sent invoice/bill can be marked paid."}), 400
+
+    amount = from_pence(doc["amount_pence"])
+    if doc["kind"] == "invoice":
+        debtors_account = resolve_account(db, company_id, "Trade Receivables", "current_asset")
+        debit, credit = payment_account, debtors_account
+    else:
+        creditors_account = resolve_account(db, company_id, "Trade Payables", "current_liability")
+        debit, credit = creditors_account, payment_account
+
+    try:
+        tx_id = post_ledger_transaction(
+            db, company_id, payment_date, f'Payment: {doc["desc"]}', amount, debit, credit
+        )
+    except LedgerError as e:
+        return jsonify({"error": e.message}), e.status
+
+    db.execute(
+        "UPDATE invoices_bills SET status = 'paid', payment_transaction_id = ? WHERE id = ?", (tx_id, doc_id)
+    )
+    db.commit()
+    return jsonify({"ok": True, "transactionId": tx_id})
+
+
+@app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>", methods=["DELETE"])
+@login_required
+@company_required
+def delete_invoice_bill(company_id, doc_id):
+    db = get_db()
+    doc = db.execute(
+        "SELECT * FROM invoices_bills WHERE id = ? AND company_id = ?", (doc_id, company_id)
+    ).fetchone()
+    if doc is None:
+        return jsonify({"ok": True})
+    # voiding the linked ledger postings keeps the books correct instead of leaving orphaned entries
+    for tx_id in (doc["transaction_id"], doc["payment_transaction_id"]):
+        if tx_id is None:
+            continue
+        tx = db.execute("SELECT date FROM transactions WHERE id = ? AND voided_at IS NULL", (tx_id,)).fetchone()
+        if tx and not is_locked(g.company, tx["date"]):
+            now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            db.execute(
+                "UPDATE transactions SET voided_at = ?, voided_by = ? WHERE id = ?",
+                (now, session.get("email", "unknown"), tx_id),
+            )
+            log_audit(db, company_id, "void", "transaction", tx_id, before={"reason": f"invoice/bill #{doc_id} deleted"})
+    db.execute("DELETE FROM invoices_bills WHERE id = ?", (doc_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/aging-report", methods=["GET"])
+@login_required
+@company_required
+def aging_report(company_id):
+    db = get_db()
+    today = datetime.date.today()
+    rows = db.execute(
+        "SELECT ib.kind, ib.contact_id as contactId, c.name as contactName, ib.due_date as dueDate, "
+        "ib.amount_pence as amountPence "
+        "FROM invoices_bills ib JOIN contacts c ON c.id = ib.contact_id "
+        "WHERE ib.company_id = ? AND ib.status = 'sent'",
+        (company_id,),
+    ).fetchall()
+
+    def bucket_for(days_overdue):
+        if days_overdue <= 0:
+            return "current"
+        if days_overdue <= 30:
+            return "1-30"
+        if days_overdue <= 60:
+            return "31-60"
+        if days_overdue <= 90:
+            return "61-90"
+        return "90+"
+
+    result = {"invoice": {}, "bill": {}}
+    for r in rows:
+        due = datetime.date.fromisoformat(r["dueDate"])
+        days_overdue = (today - due).days
+        bucket = bucket_for(days_overdue)
+        contact_bucket = result[r["kind"]].setdefault(r["contactName"], {
+            "current": 0, "1-30": 0, "31-60": 0, "61-90": 0, "90+": 0
+        })
+        contact_bucket[bucket] += from_pence(r["amountPence"])
+    return jsonify(result)
 
 
 # ---------- fixed assets ----------
