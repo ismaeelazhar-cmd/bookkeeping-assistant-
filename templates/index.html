@@ -967,6 +967,7 @@
   <div class="panel" style="width:560px; max-height:80vh; overflow:auto;">
     <h2 id="consol-report-title">Consolidated Report</h2>
     <div class="sub" id="consol-report-meta" style="margin-bottom:12px;"></div>
+    <div id="consol-intercompany-warning" style="display:none; margin-bottom:12px; padding:10px; border-radius:7px; background:color-mix(in srgb, var(--color-danger) 10%, transparent); border-left:3px solid var(--color-danger);"></div>
     <table class="trial">
       <tbody>
         <tr><td>Revenue</td><td class="num" id="consol-revenue"></td></tr>
@@ -1143,6 +1144,14 @@ async function viewConsolidationReport(groupId) {
   document.getElementById('consol-accounts-body').innerHTML = report.accounts.map(a => `
     <tr><td>${escapeHtml(a.name)}</td><td>${escapeHtml(a.type)}</td><td class="num">${fmt(a.balance)}</td></tr>
   `).join('');
+  const warningEl = document.getElementById('consol-intercompany-warning');
+  if (report.intercompanyWarning) {
+    warningEl.style.display = '';
+    warningEl.innerHTML = `<strong>⚠ Possible intercompany balances not eliminated</strong><div class="sub" style="margin:4px 0;">${escapeHtml(report.intercompanyWarning.note)}</div>` +
+      report.intercompanyWarning.accounts.map(a => `<div class="sub" style="margin:0;">${escapeHtml(a.name)}: <span class="money">${fmt(a.balance)}</span></div>`).join('');
+  } else {
+    warningEl.style.display = 'none';
+  }
   document.getElementById('consol-overlay').style.display = 'flex';
 }
 

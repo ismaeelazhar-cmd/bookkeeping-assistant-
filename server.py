@@ -1195,6 +1195,15 @@ def consolidation_report(group_id):
     total_liabilities = totals["current_liability"] + totals["noncurrent_liability"]
     total_equity = totals["equity"] + net_profit - totals["drawings"]
 
+    # This consolidation is a plain aggregation (documented elsewhere in this app) — it does not
+    # eliminate intercompany balances. At minimum, flag accounts that look like they record a
+    # balance between related entities (the things that genuinely need eliminating before this
+    # report can be called real consolidated accounts) so the user knows to look at them.
+    intercompany_accounts = [
+        a for a in accounts_out
+        if re.search(r"intercompany|inter-company|due (from|to)", a["name"], re.IGNORECASE)
+    ]
+
     return jsonify({
         "memberCount": len(member_ids),
         "accounts": sorted(accounts_out, key=lambda a: a["name"]),
@@ -1203,6 +1212,13 @@ def consolidation_report(group_id):
             "netProfit": net_profit, "totalAssets": total_assets, "totalLiabilities": total_liabilities,
             "totalEquity": total_equity,
         },
+        "intercompanyWarning": {
+            "accounts": [{"name": a["name"], "balance": a["balance"]} for a in intercompany_accounts],
+            "note": "These look like balances between related entities. This report is a plain "
+                    "aggregation, not true consolidation accounting — these have NOT been eliminated "
+                    "and may overstate combined assets/liabilities if the member companies trade with "
+                    "each other.",
+        } if intercompany_accounts else None,
     })
 
 
