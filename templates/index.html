@@ -740,6 +740,7 @@
       <table class="trial"><tbody id="cashflow-body"></tbody></table>
       <div class="toolbar" style="margin-top:14px; margin-bottom:0;">
         <button class="btn-secondary" onclick="printFinancialStatements()">Print / Export Financial Statements</button>
+        <button class="btn-primary" style="margin-top:0;" onclick="printManagementAccountsPack()">Management Accounts Pack (PDF)</button>
       </div>
     </div>
 
@@ -799,6 +800,10 @@
         <tbody id="sofa-body"></tbody>
         <tfoot><tr id="sofa-total-row" style="font-weight:700; border-top:2px solid var(--border);"></tr></tfoot>
       </table>
+
+      <h2 style="margin-top:24px;">Statement of Financial Activities — Charity SORP columnar format</h2>
+      <div class="sub" style="margin-bottom:12px;">Same data, presented the way SORP actually lays it out: fund types as columns, income/expenditure categories as rows.</div>
+      <table class="trial" id="sofa-columnar-table" style="margin-top:10px;"></table>
     </div>
 
     <div class="panel" id="cost-centres-panels" style="margin-top:20px; display:none;">
@@ -3083,6 +3088,34 @@ function printFinancialStatements() {
   win.document.close(); win.focus(); setTimeout(() => win.print(), 300);
 }
 
+function printManagementAccountsPack() {
+  if (!transactions.length) { alert('No transactions to report yet.'); return; }
+  const pnl = document.getElementById('pnl-body').innerHTML;
+  const sofp = document.getElementById('sofp-body').innerHTML;
+  const cf = document.getElementById('cashflow-body').innerHTML;
+  const period = document.getElementById('period-label').textContent;
+  const debtors = document.getElementById('aging-invoice-body').innerHTML;
+  const creditors = document.getElementById('aging-bill-body').innerHTML;
+  const win = window.open('', '_blank');
+  win.document.write(`<html><head><title>Management Accounts — ${escapeHtml(currentCompany.name)}</title><style>
+    body{font-family:-apple-system,sans-serif;padding:24px;color:#111;} h1{font-size:20px;margin-bottom:2px;} h2{font-size:14px;margin-top:26px;}
+    table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px;} td,th{padding:5px 8px;text-align:left;} td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;}
+    .sub{color:#666;font-size:12px;} .cover{margin-bottom:24px; border-bottom:2px solid #333; padding-bottom:16px;}
+    </style></head><body>
+    <div class="cover">
+      <h1>${escapeHtml(currentCompany.name)}</h1>
+      <div class="sub">Management Accounts — Period: ${period}</div>
+      <div class="sub">Prepared ${new Date().toLocaleDateString('en-GB')}</div>
+    </div>
+    <h2>Statement of Profit or Loss</h2><table>${pnl}</table>
+    <h2>Statement of Financial Position</h2><table>${sofp}</table>
+    <h2>Statement of Cash Flows</h2><table>${cf}</table>
+    <h2>Aged Debtors</h2><table><thead><tr><th>Customer</th><th class="num">Current</th><th class="num">1-30</th><th class="num">31-60</th><th class="num">61-90</th><th class="num">90+</th></tr></thead><tbody>${debtors}</tbody></table>
+    <h2>Aged Creditors</h2><table><thead><tr><th>Supplier</th><th class="num">Current</th><th class="num">1-30</th><th class="num">31-60</th><th class="num">61-90</th><th class="num">90+</th></tr></thead><tbody>${creditors}</tbody></table>
+    </body></html>`);
+  win.document.close(); win.focus(); setTimeout(() => win.print(), 300);
+}
+
 function renderVatReturn() {
   const from = document.getElementById('vat-from').value;
   const to = document.getElementById('vat-to').value;
@@ -4000,6 +4033,30 @@ async function loadSofa() {
     </tr>`).join('');
   document.getElementById('sofa-total-row').innerHTML =
     `<td>Total</td><td class="num">${fmt(data.totalIncoming)}</td><td class="num">${fmt(data.totalExpended)}</td><td class="num">${fmt(data.netMovement)}</td>`;
+  renderSofaColumnar(data, labels);
+}
+
+function renderSofaColumnar(data, labels) {
+  const table = document.getElementById('sofa-columnar-table');
+  if (!table) return;
+  const columns = data.fundColumns || [];
+  const colTotal = (byAccount, col) => Object.values(byAccount).reduce((s, row) => s + (row[col] || 0), 0);
+  const rowTotal = row => columns.reduce((s, col) => s + (row[col] || 0), 0);
+
+  const section = (title, byAccount) => {
+    const names = Object.keys(byAccount).sort();
+    if (!names.length) return '';
+    let html = `<tr style="font-weight:700;"><td>${title}</td>${columns.map(() => '<td></td>').join('')}<td></td></tr>`;
+    for (const name of names) {
+      html += `<tr><td>${escapeHtml(name)}</td>${columns.map(c => `<td class="num">${fmt(byAccount[name][c] || 0)}</td>`).join('')}<td class="num">${fmt(rowTotal(byAccount[name]))}</td></tr>`;
+    }
+    html += `<tr style="font-weight:700; border-top:1px solid var(--border);"><td>Total ${title.toLowerCase()}</td>${columns.map(c => `<td class="num">${fmt(colTotal(byAccount, c))}</td>`).join('')}<td class="num">${fmt(columns.reduce((s, c) => s + colTotal(byAccount, c), 0))}</td></tr>`;
+    return html;
+  };
+
+  const head = `<thead><tr><td><b>Category</b></td>${columns.map(c => `<td class="num"><b>${escapeHtml(labels[c] || c)}</b></td>`).join('')}<td class="num"><b>Total</b></td></tr></thead>`;
+  const body = section('Incoming resources', data.incomeByAccount) + section('Resources expended', data.expenditureByAccount);
+  table.innerHTML = body ? head + `<tbody>${body}</tbody>` : '<tr><td class="empty">No fund-tagged activity yet.</td></tr>';
 }
 
 // ---------- Departments / cost centres (opt-in) ----------

@@ -1458,14 +1458,25 @@ def statement_of_financial_activities(company_id):
 
     by_fund_type = {t: {"incoming": 0, "expended": 0} for t in VALID_FUND_TYPES}
     by_fund_type["unfunded"] = {"incoming": 0, "expended": 0}  # transactions with no fund tag at all
+    fund_columns = VALID_FUND_TYPES + ("unfunded",)
+
+    # Charity SORP presents the SOFA columnar — fund types across the top, income/expenditure
+    # categories (accounts) down the side — rather than fund types as rows. income_by_account /
+    # expenditure_by_account build that: {account_name: {fund_type: amount, ...}}.
+    income_by_account = {}
+    expenditure_by_account = {}
 
     for r in rows:
         amount = from_pence(r["amount_pence"])
         fund_type = r["fundType"] or "unfunded"
         if r["creditType"] in ("revenue", "cogs"):
             by_fund_type[fund_type]["incoming"] += amount
+            bucket = income_by_account.setdefault(r["credit"], {ft: 0 for ft in fund_columns})
+            bucket[fund_type] += amount
         if r["debitType"] == "expense":
             by_fund_type[fund_type]["expended"] += amount
+            bucket = expenditure_by_account.setdefault(r["debit"], {ft: 0 for ft in fund_columns})
+            bucket[fund_type] += amount
 
     for bucket in by_fund_type.values():
         bucket["net"] = bucket["incoming"] - bucket["expended"]
@@ -1478,6 +1489,9 @@ def statement_of_financial_activities(company_id):
         "totalIncoming": total_incoming,
         "totalExpended": total_expended,
         "netMovement": total_incoming - total_expended,
+        "fundColumns": list(fund_columns),
+        "incomeByAccount": income_by_account,
+        "expenditureByAccount": expenditure_by_account,
     })
 
 
