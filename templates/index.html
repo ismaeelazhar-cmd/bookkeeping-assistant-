@@ -416,6 +416,24 @@
       <button class="btn-primary" onclick="postPayrollJournal()">Post payroll journal</button>
       <div id="pr-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Dividend</h2>
+      <div class="sub" style="margin-bottom:12px;">Posts DR Retained Earnings against CR Dividends Payable (declared, not yet paid) or CR a bank account (paid immediately). Blocked if the amount exceeds distributable reserves (cumulative net profit, less dividends already posted) — posting an unlawful dividend has real consequences for directors.</div>
+      <div class="row2">
+        <div><label>Date</label><input type="date" id="div-date"></div>
+        <div><label>Amount</label><input type="number" id="div-amount" step="0.01" min="0" placeholder="0.00"></div>
+      </div>
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text);">
+        <input type="checkbox" id="div-paid-immediately" style="width:auto;" onchange="toggleDividendBankField()"> Paid immediately (otherwise posts to Dividends Payable)
+      </label>
+      <div id="div-bank-row" style="display:none;">
+        <label>Bank account</label>
+        <input type="text" id="div-bank-account" list="account-list" value="Cash">
+      </div>
+      <button class="btn-primary" onclick="postDividend()">Post dividend</button>
+      <div id="div-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
   </div>
 
   <div class="page" data-page="bank" style="display:none;">
@@ -1671,6 +1689,12 @@ function renderAnomalies() {
     }
     if (expectedSide === 'credit' && balance > 0.005) {
       anomalies.push({ type: 'Unusual balance', account: accName, date: lastTxDate(accountsForHealth[accName]), desc: '(account health)', amount: balance, why: `"${accName}" is a liability account but currently has a debit balance — check for a miscoded entry.` });
+    }
+    // Director's Loan Account, overdrawn: the director owes the company money (a debit balance
+    // on what's modelled as a current_asset DLA). HMRC can charge the company S455 tax (currently
+    // 33.75%, the dividend upper rate) if it isn't repaid within 9 months of the company's year end.
+    if (/director.*loan/i.test(accName) && type === 'current_asset' && balance > 0.005) {
+      anomalies.push({ type: "Director's Loan overdrawn", account: accName, date: lastTxDate(accountsForHealth[accName]), desc: '(S455 risk)', amount: balance, why: `The director owes the company ${fmt(balance)} on this account — if it's not repaid within 9 months of the company's year end, HMRC can charge the company S455 tax on the outstanding amount.` });
     }
   }
 
@@ -3033,6 +3057,40 @@ async function postPayrollJournal() {
     document.getElementById(id).value = '';
   });
   document.getElementById('pr-preview').textContent = '';
+  await refreshAll();
+}
+
+// ---------- Dividend wizard ----------
+
+function toggleDividendBankField() {
+  document.getElementById('div-bank-row').style.display = document.getElementById('div-paid-immediately').checked ? '' : 'none';
+}
+
+async function postDividend(force) {
+  const date = document.getElementById('div-date').value;
+  const amount = parseFloat(document.getElementById('div-amount').value);
+  const paidImmediately = document.getElementById('div-paid-immediately').checked;
+  const bankAccount = document.getElementById('div-bank-account').value.trim() || 'Cash';
+  const statusEl = document.getElementById('div-status');
+  if (!date || !amount || amount <= 0) { statusEl.textContent = 'Date and a positive amount are required.'; return; }
+
+  let result;
+  try {
+    result = await api(`/api/companies/${currentCompany.id}/dividends`, {
+      method: 'POST', body: JSON.stringify({ date, amount, paidImmediately, bankAccount, force: !!force })
+    });
+  } catch (e) {
+    if (!force && /exceeds distributable reserves/.test(e.message)) {
+      const ok = await confirmAction(e.message, 'Post anyway');
+      if (ok) return postDividend(true);
+    }
+    statusEl.textContent = e.message;
+    showToast(e.message, 'error');
+    return;
+  }
+  showToast(`Dividend posted — ${fmt(amount)}. Distributable reserves remaining: ${fmt(result.availableReserves - amount)}.`, 'success');
+  statusEl.textContent = '';
+  document.getElementById('div-amount').value = '';
   await refreshAll();
 }
 

@@ -515,6 +515,12 @@ def guess_account_type(name):
         return "drawings"
     if n == "capital" or "capital introduced" in n or "share capital" in n or "share premium" in n or "opening balance equity" in n:
         return "equity"
+    if "director" in n and "loan" in n:
+        # Director's Loan Account: can sit on either side (the company owes the director, or the
+        # director owes the company) — current_asset is the default since an overdrawn DLA (the
+        # director owes money) is the case with tax consequences (S455) worth surfacing; the user
+        # can reclassify it in Chart of Accounts if their DLA is consistently the other way.
+        return "current_asset"
     if "loan" in n:
         return "noncurrent_liability"
     if "vat" in n or "payable" in n:
@@ -3186,6 +3192,93 @@ def post_payroll_journal(company_id):
     db.commit()
     total_cost = sum(amt for _, amt in credit_legs)
     return jsonify({"journalId": journal_id, "transactionIds": posted, "netPay": net_pay, "totalCost": total_cost})
+
+
+# ---------- dividend posting wizard ----------
+
+def compute_cumulative_net_profit(db, company_id):
+    """Revenue - COGS - expenses, all-time, ignoring opening balances on those account types
+    (a real edge case but rare enough in practice that every other report in this app makes the
+    same simplification)."""
+    accounts = {r["name"]: r["type"] for r in db.execute(
+        "SELECT name, type FROM accounts WHERE company_id = ?", (company_id,)
+    ).fetchall()}
+    rows = db.execute(
+        "SELECT debit, credit, amount_pence FROM transactions WHERE company_id = ? AND voided_at IS NULL",
+        (company_id,),
+    ).fetchall()
+    revenue = cogs = expense = 0
+    for r in rows:
+        amount = from_pence(r["amount_pence"])
+        debit_type, credit_type = accounts.get(r["debit"]), accounts.get(r["credit"])
+        if credit_type == "revenue":
+            revenue += amount
+        elif debit_type == "revenue":
+            revenue -= amount
+        if debit_type == "cogs":
+            cogs += amount
+        elif credit_type == "cogs":
+            cogs -= amount
+        if debit_type == "expense":
+            expense += amount
+        elif credit_type == "expense":
+            expense -= amount
+    return revenue - cogs - expense
+
+
+@app.route("/api/companies/<int:company_id>/dividends", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def post_dividend(company_id):
+    """DR Retained Earnings / CR Dividends Payable (if declared but not yet paid) or CR a bank
+    account (if paid immediately). Blocks the post if the amount exceeds distributable reserves
+    (cumulative net profit, less any dividends already debited to Retained Earnings) unless the
+    caller explicitly overrides — posting an unlawful dividend has real legal consequences for
+    directors, so this should require a deliberate second step, not happen silently."""
+    data = request.get_json(force=True) or {}
+    date = data.get("date")
+    amount = float(data.get("amount") or 0)
+    paid_immediately = bool(data.get("paidImmediately"))
+    bank_account = data.get("bankAccount") or "Cash"
+    if not date or amount <= 0:
+        return jsonify({"error": "Date and a positive amount are required."}), 400
+
+    db = get_db()
+    cumulative_net_profit = compute_cumulative_net_profit(db, company_id)
+    re_account_row = get_account_by_name(db, company_id, "Retained Earnings")
+    re_balance = 0.0
+    if re_account_row:
+        row = db.execute(
+            "SELECT COALESCE(SUM(CASE WHEN credit = ? THEN amount_pence ELSE 0 END), 0) - "
+            "COALESCE(SUM(CASE WHEN debit = ? THEN amount_pence ELSE 0 END), 0) as net "
+            "FROM transactions WHERE company_id = ? AND voided_at IS NULL",
+            (re_account_row["name"], re_account_row["name"], company_id),
+        ).fetchone()
+        re_balance = from_pence(row["net"])
+    available_reserves = round(cumulative_net_profit + re_balance, 2)
+
+    if amount > available_reserves and not data.get("force"):
+        return jsonify({
+            "error": f"This dividend ({amount:.2f}) exceeds distributable reserves ({available_reserves:.2f}). "
+                     "Posting an unlawful dividend has its own legal consequences for directors — "
+                     "resubmit with force=true to override if you're certain.",
+            "availableReserves": available_reserves,
+        }), 400
+
+    retained_earnings_account = resolve_account(db, company_id, "Retained Earnings", "equity")
+    credit_account = (
+        resolve_account(db, company_id, bank_account, "cash") if paid_immediately
+        else resolve_account(db, company_id, "Dividends Payable", "current_liability")
+    )
+    try:
+        tx_id = post_ledger_transaction(
+            db, company_id, date, "Dividend", amount, retained_earnings_account, credit_account
+        )
+    except LedgerError as e:
+        return jsonify({"error": e.message}), e.status
+    db.commit()
+    return jsonify({"transactionId": tx_id, "availableReserves": available_reserves})
 
 
 init_db()  # runs on import too, not just `python3 server.py` directly — gunicorn imports this module without executing __main__
