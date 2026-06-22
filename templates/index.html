@@ -283,7 +283,16 @@
       </div>
 
       <div class="panel">
-        <h2>Journal (all transactions)</h2>
+        <h2>Journal (all transactions) <span class="pill" id="journal-count">0 transactions</span></h2>
+        <div class="row2">
+          <input type="text" id="jf-text" placeholder="Search description or account…" oninput="renderJournal()">
+          <input type="number" id="jf-min-amount" step="0.01" placeholder="Min amount" oninput="renderJournal()">
+        </div>
+        <div class="row2">
+          <input type="date" id="jf-from" oninput="renderJournal()">
+          <input type="date" id="jf-to" oninput="renderJournal()">
+        </div>
+        <button class="btn-secondary" style="margin:10px 0;" onclick="clearJournalFilters()">Clear filters</button>
         <table class="journal">
           <thead><tr><th>Date</th><th>Description</th><th>Debit</th><th>Credit</th><th class="num">Amount</th><th>VAT</th><th></th></tr></thead>
           <tbody id="journal-body"></tbody>
@@ -862,6 +871,7 @@ function buildAccounts() {
 }
 
 function renderAccounts() {
+  document.getElementById('tx-count').textContent = `${transactions.length} transaction${transactions.length === 1 ? '' : 's'}`;
   const container = document.getElementById('accounts');
   const accounts = buildAccounts();
   const names = Object.keys(accounts).sort();
@@ -887,10 +897,26 @@ function renderAccounts() {
   }).join('');
 }
 
+function clearJournalFilters() {
+  ['jf-text', 'jf-min-amount', 'jf-from', 'jf-to'].forEach(id => document.getElementById(id).value = '');
+  renderJournal();
+}
+
 function renderJournal() {
   const tbody = document.getElementById('journal-body');
-  const sorted = [...transactions].sort((a, b) => b.date.localeCompare(a.date));
-  tbody.innerHTML = sorted.map(t => `
+  const text = (document.getElementById('jf-text').value || '').toLowerCase();
+  const minAmount = parseFloat(document.getElementById('jf-min-amount').value);
+  const from = document.getElementById('jf-from').value;
+  const to = document.getElementById('jf-to').value;
+
+  let filtered = transactions;
+  if (text) filtered = filtered.filter(t => t.desc.toLowerCase().includes(text) || t.debit.toLowerCase().includes(text) || t.credit.toLowerCase().includes(text));
+  if (!isNaN(minAmount)) filtered = filtered.filter(t => t.amount >= minAmount);
+  if (from) filtered = filtered.filter(t => t.date >= from);
+  if (to) filtered = filtered.filter(t => t.date <= to);
+
+  const sorted = [...filtered].sort((a, b) => b.date.localeCompare(a.date));
+  tbody.innerHTML = sorted.length ? sorted.map(t => `
     <tr>
       <td>${fmtDate(t.date)}</td><td>${escapeHtml(t.desc)}${t.journalId ? ` <span class="pill" title="Part of a compound journal — other legs share this ID">journal ${t.journalId.slice(0,6)}</span>` : ''}</td>
       <td style="color:var(--debit)">${escapeHtml(t.debit)}</td>
@@ -901,8 +927,12 @@ function renderJournal() {
         <button class="btn-secondary" onclick="openAttachmentsModal(${t.id}, '${t.desc.replace(/'/g, "\\'")}')">📎${t.attachmentCount ? ' ' + t.attachmentCount : ''}</button>
         <button class="btn-danger" onclick="deleteTransaction(${t.id})">Delete</button>
       </td>
-    </tr>`).join('');
-  document.getElementById('tx-count').textContent = `${transactions.length} transaction${transactions.length === 1 ? '' : 's'}`;
+    </tr>`).join('') : '<tr><td colspan="7" class="empty">No transactions match these filters.</td></tr>';
+
+  const countText = filtered.length === transactions.length
+    ? `${transactions.length} transaction${transactions.length === 1 ? '' : 's'}`
+    : `${filtered.length} of ${transactions.length} transactions`;
+  document.getElementById('journal-count').textContent = countText;
 }
 
 function renderTrialBalance() {
