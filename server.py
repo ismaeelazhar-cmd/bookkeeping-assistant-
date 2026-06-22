@@ -927,26 +927,13 @@ Return ONLY a JSON array, no prose, no markdown fences:
 Lines:
 {text}"""
 
-    payload = json.dumps({
-        "model": "claude-sonnet-4-6", "max_tokens": 4096,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages", data=payload, method="POST",
-        headers={
-            "Content-Type": "application/json", "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
-    )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
+        raw_text = call_claude(api_key, [{"role": "user", "content": prompt}], max_tokens=4096)
     except urllib.error.HTTPError as e:
         return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
     except urllib.error.URLError as e:
         return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
 
-    raw_text = "".join(block.get("text", "") for block in body.get("content", []))
     match = re.search(r"\[[\s\S]*\]", raw_text)
     if not match:
         return jsonify({"error": "Claude did not return a parseable list."}), 502
@@ -960,6 +947,71 @@ Lines:
         if it.get("date") and it.get("desc") and it.get("amount") and it.get("debit") and it.get("credit")
     ]
     return jsonify({"candidates": candidates})
+
+
+def call_claude(api_key, messages, max_tokens=1024):
+    payload = json.dumps({"model": "claude-sonnet-4-6", "max_tokens": max_tokens, "messages": messages}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=payload, method="POST",
+        headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+    )
+    with urllib.request.urlopen(req, timeout=45) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    return "".join(block.get("text", "") for block in body.get("content", []))
+
+
+@app.route("/api/companies/<int:company_id>/ask", methods=["POST"])
+@login_required
+@company_required
+def ask_ledger(company_id):
+    """Stage 5 flagship feature: natural-language Q&A over this company's actual ledger.
+    The model only sees a compact CSV export built fresh per request — no separate index to
+    keep in sync, and the same server-side-key pattern as the rest of Stage 5."""
+    data = request.get_json(force=True) or {}
+    question = (data.get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "Ask a question first."}), 400
+    api_key = g.company["ai_api_key"]
+    if not api_key:
+        return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
+
+    db = get_db()
+    rows = db.execute(
+        "SELECT date, desc, amount_pence, debit, credit, vat_rate, vat_direction FROM transactions "
+        "WHERE company_id = ? AND voided_at IS NULL ORDER BY date",
+        (company_id,),
+    ).fetchall()
+
+    MAX_ROWS = 3000
+    truncated = len(rows) > MAX_ROWS
+    csv_lines = ["date,description,amount,debit_account,credit_account,vat_rate,vat_direction"]
+    for r in rows[-MAX_ROWS:]:
+        amt = from_pence(r["amount_pence"])
+        desc = r["desc"].replace(",", ";")
+        csv_lines.append(f"{r['date']},{desc},{amt},{r['debit']},{r['credit']},{r['vat_rate']},{r['vat_direction']}")
+    ledger_csv = "\n".join(csv_lines)
+
+    today = datetime.date.today().isoformat()
+    prompt = f"""You are a financial assistant answering a question about a small UK business's bookkeeping ledger.
+Today's date is {today}. Below is the full transaction ledger as CSV (each row is one debit/credit posting).
+{"Note: this is only the most recent " + str(MAX_ROWS) + " transactions, the ledger has more history than shown." if truncated else ""}
+
+Answer the question concisely and specifically, citing actual figures computed from this data — don't guess or
+estimate. If the data doesn't contain what's needed to answer, say so plainly rather than making something up.
+
+Ledger CSV:
+{ledger_csv}
+
+Question: {question}"""
+
+    try:
+        answer = call_claude(api_key, [{"role": "user", "content": prompt}], max_tokens=1024)
+    except urllib.error.HTTPError as e:
+        return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
+    except urllib.error.URLError as e:
+        return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
+
+    return jsonify({"answer": answer.strip(), "transactionsConsidered": min(len(rows), MAX_ROWS), "truncated": truncated})
 
 
 # ---------- attachments ----------
@@ -1061,29 +1113,20 @@ def extract_attachment(company_id, attachment_id):
         'Return ONLY JSON, no prose: {"date":"YYYY-MM-DD","desc":"...","amount":0.00}. '
         'If you genuinely cannot read a field, use null for it.'
     )
-    payload = json.dumps({
-        "model": "claude-sonnet-4-6", "max_tokens": 1024,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": block_type, "source": {"type": "base64", "media_type": row["mime_type"], "data": file_b64}},
-                {"type": "text", "text": prompt_text},
-            ],
-        }],
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages", data=payload, method="POST",
-        headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
-    )
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": block_type, "source": {"type": "base64", "media_type": row["mime_type"], "data": file_b64}},
+            {"type": "text", "text": prompt_text},
+        ],
+    }]
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
+        raw_text = call_claude(api_key, messages, max_tokens=1024)
     except urllib.error.HTTPError as e:
         return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
     except urllib.error.URLError as e:
         return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
 
-    raw_text = "".join(block.get("text", "") for block in body.get("content", []))
     match = re.search(r"\{[\s\S]*\}", raw_text)
     if not match:
         return jsonify({"error": "Claude did not return a parseable result."}), 502

@@ -169,7 +169,19 @@
     </div>
   </div>
 
+  <div class="panel" id="section-ask" style="margin-bottom:16px; scroll-margin-top:60px;">
+    <h2>Ask Your Ledger</h2>
+    <div class="sub" style="margin-bottom:10px;">Ask a plain-English question — e.g. "how much did I spend on travel last quarter" or "what's my biggest expense this year". Claude reads your actual transactions to answer; needs a Claude API key set under Movements Inbox → AI settings.</div>
+    <div id="ask-history" style="max-height:260px; overflow-y:auto; margin-bottom:10px;"></div>
+    <div class="row2">
+      <input type="text" id="ask-question" placeholder="Ask a question about this company's ledger…" onkeydown="if(event.key==='Enter'){askLedger();}">
+      <button class="btn-primary" style="margin-top:0;" onclick="askLedger()">Ask</button>
+    </div>
+    <div id="ask-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+  </div>
+
   <nav style="position:sticky; top:0; z-index:10; background:var(--bg); padding:10px 0; margin-bottom:16px; border-bottom:1px solid var(--border); display:flex; gap:16px; flex-wrap:wrap; font-size:13px;">
+    <a href="#section-ask" style="color:var(--text); text-decoration:none;">Ask</a>
     <a href="#section-bank" style="color:var(--text); text-decoration:none;">Bank</a>
     <a href="#section-sales" style="color:var(--text); text-decoration:none;">Sales &amp; Purchases</a>
     <a href="#section-ledger" style="color:var(--text); text-decoration:none;">Ledger</a>
@@ -668,6 +680,7 @@ async function openCompany(id) {
   document.getElementById('cj-rows').innerHTML = ''; cjRowCount = 0;
   document.getElementById('cj-date').valueAsDate = new Date();
   recentlyPosted = []; renderUndoBar();
+  askHistory = []; renderAskHistory();
   show('app-screen');
   await refreshAll();
   addOpeningBalanceRow();
@@ -1313,6 +1326,43 @@ async function analyzeWithAI() {
   } catch (e) {
     statusEl.textContent = 'AI analysis failed: ' + e.message;
   }
+}
+
+// ---------- Ask Your Ledger ----------
+
+let askHistory = [];
+
+function renderAskHistory() {
+  const el = document.getElementById('ask-history');
+  el.innerHTML = askHistory.map(turn => `
+    <div style="margin-bottom:10px;">
+      <div style="font-weight:600;">${escapeHtml(turn.question)}</div>
+      <div style="color:var(--text); white-space:pre-wrap;">${escapeHtml(turn.answer)}</div>
+      ${turn.meta ? `<div class="sub" style="margin:2px 0 0;">${escapeHtml(turn.meta)}</div>` : ''}
+    </div>`).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+async function askLedger() {
+  const input = document.getElementById('ask-question');
+  const question = input.value.trim();
+  const statusEl = document.getElementById('ask-status');
+  if (!question) return;
+  if (!currentCompany.ai_api_key_set) { statusEl.textContent = 'Add a Claude API key under Movements Inbox → AI settings first.'; return; }
+  statusEl.textContent = 'Reading the ledger…';
+  input.value = '';
+
+  let result;
+  try {
+    result = await api(`/api/companies/${currentCompany.id}/ask`, { method: 'POST', body: JSON.stringify({ question }) });
+  } catch (e) { statusEl.textContent = e.message; return; }
+
+  statusEl.textContent = '';
+  askHistory.push({
+    question, answer: result.answer,
+    meta: `Based on ${result.transactionsConsidered} transaction(s)${result.truncated ? ' (older history was truncated)' : ''}.`
+  });
+  renderAskHistory();
 }
 
 // ---------- Bank Reconciliation ----------
