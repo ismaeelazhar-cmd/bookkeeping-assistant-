@@ -134,6 +134,7 @@ def init_db():
             vat_rate REAL DEFAULT 0,
             vat_direction TEXT DEFAULT '',
             confidence TEXT NOT NULL DEFAULT 'high',
+            journal_id TEXT DEFAULT NULL,
             voided_at TEXT DEFAULT NULL,
             voided_by TEXT DEFAULT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -228,6 +229,10 @@ def init_db():
         );
         """
     )
+    # additive column for compound journals — safe to ALTER in place, no need to wipe data for this one
+    tx_cols = {row[1] for row in db.execute("PRAGMA table_info(transactions)").fetchall()}
+    if "journal_id" not in tx_cols:
+        db.execute("ALTER TABLE transactions ADD COLUMN journal_id TEXT DEFAULT NULL")
     db.execute("DELETE FROM schema_meta")
     db.execute("INSERT INTO schema_meta (version) VALUES (?)", (SCHEMA_VERSION,))
     db.commit()
@@ -673,7 +678,8 @@ def list_transactions(company_id):
     voided_clause = "" if include_voided else "AND voided_at IS NULL"
     rows = db.execute(
         f"SELECT t.id, t.date, t.desc, t.amount_pence as amountPence, t.debit, t.credit, t.tax_year as taxYear, "
-        f"t.vat_rate as vatRate, t.vat_direction as vatDirection, t.confidence, t.voided_at as voidedAt, t.voided_by as voidedBy, "
+        f"t.vat_rate as vatRate, t.vat_direction as vatDirection, t.confidence, t.journal_id as journalId, "
+        f"t.voided_at as voidedAt, t.voided_by as voidedBy, "
         f"(SELECT COUNT(*) FROM attachments a WHERE a.transaction_id = t.id) as attachmentCount "
         f"FROM transactions t WHERE t.company_id = ? {voided_clause} ORDER BY t.date",
         (company_id,),
@@ -688,10 +694,10 @@ class LedgerError(Exception):
 
 
 def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit, tax_year="",
-                             vat_rate=0, vat_direction="", confidence="high"):
+                             vat_rate=0, vat_direction="", confidence="high", journal_id=None):
     """Shared insert path for anything that writes to the ledger — manual entries, bulk
-    imports, and (Stage 2) invoice/bill send-and-pay postings — so they all get the same
-    account resolution, locking check, preset learning, and audit trail."""
+    imports, invoice/bill send-and-pay postings, and (Stage 2) compound journal legs — so
+    they all get the same account resolution, locking check, preset learning, and audit trail."""
     if not all([date, desc, debit, credit]) or not amount or float(amount) <= 0 or debit == credit:
         raise LedgerError("Invalid transaction.")
     if not _valid_vat_direction(vat_direction):
@@ -702,9 +708,9 @@ def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit, t
     debit = resolve_account(db, company_id, debit)
     credit = resolve_account(db, company_id, credit)
     cur = db.execute(
-        "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (company_id, date, desc, to_pence(amount), debit, credit, tax_year, vat_rate, vat_direction, confidence),
+        "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (company_id, date, desc, to_pence(amount), debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id),
     )
     db.execute(
         "INSERT INTO presets (company_id, desc_key, debit, credit) VALUES (?,?,?,?) "
@@ -809,6 +815,63 @@ def clear_transactions(company_id):
         voided += 1
     db.commit()
     return jsonify({"ok": True, "deleted": voided, "skippedLocked": len(rows) - voided})
+
+
+# ---------- compound journals ----------
+#
+# The ledger's core model is deliberately a single debit/credit pair per row — everything
+# built on top of it (VAT splitting, the Cash Flow Statement, bank reconciliation, fixed
+# asset depreciation) was built and tested against that shape. Rather than rip that out for
+# a full N-line journal_lines table — the single highest-risk change available — a compound
+# entry here is decomposed into one two-line transaction per non-pivot account, all sharing
+# a journal_id. This is mathematically identical to one true multi-line posting whenever
+# every line shares one common pivot account (the overwhelmingly common real case: one
+# payment split across several expense categories, or one receipt split across several
+# income categories) — double-entry is linear, so summing N two-line postings against the
+# same pivot has the exact same net ledger effect as one N-line posting would.
+
+@app.route("/api/companies/<int:company_id>/journals", methods=["POST"])
+@login_required
+@company_required
+def create_compound_journal(company_id):
+    data = request.get_json(force=True) or {}
+    date, desc, pivot_account, pivot_side, lines = (
+        data.get("date"), data.get("desc"), data.get("pivotAccount"), data.get("pivotSide"), data.get("lines") or []
+    )
+    if not all([date, desc, pivot_account]) or pivot_side not in ("debit", "credit"):
+        return jsonify({"error": "Date, description, a pivot account, and its side are required."}), 400
+    valid_lines = [
+        ln for ln in lines
+        if ln.get("account") and ln.get("amount") and float(ln["amount"]) > 0 and ln["account"] != pivot_account
+    ]
+    if len(valid_lines) < 2:
+        return jsonify({"error": "A compound journal needs at least 2 lines (besides the pivot account)."}), 400
+
+    db = get_db()
+    journal_id = uuid.uuid4().hex
+    posted = []
+    try:
+        for ln in valid_lines:
+            account = ln["account"]
+            amount = float(ln["amount"])
+            if pivot_side == "credit":
+                # money is going OUT of the pivot (e.g. one bank payment split across several expenses)
+                debit, credit = account, pivot_account
+            else:
+                # money is coming IN to the pivot (e.g. one receipt split across several income lines)
+                debit, credit = pivot_account, account
+            tx_id = post_ledger_transaction(
+                db, company_id, date, f"{desc} ({account})", amount, debit, credit,
+                data.get("taxYear", ""), journal_id=journal_id,
+            )
+            posted.append(tx_id)
+    except LedgerError as e:
+        db.rollback()
+        return jsonify({"error": e.message}), e.status
+
+    db.commit()
+    total = sum(float(ln["amount"]) for ln in valid_lines)
+    return jsonify({"journalId": journal_id, "transactionIds": posted, "total": total})
 
 
 # ---------- attachments ----------

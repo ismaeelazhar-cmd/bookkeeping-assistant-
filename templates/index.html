@@ -453,6 +453,36 @@
   </div>
 
   <div class="panel" style="margin-top:20px;">
+    <h2>Compound Journal Entry</h2>
+    <div class="sub" style="margin-bottom:12px;">For one payment or receipt that splits across several accounts (e.g. a BACS run covering Rent + Utilities + Insurance from one bank line). Pick the one account every line shares — the "pivot" — and add a line per other account. This posts as linked entries sharing one journal ID, with the exact same net ledger effect as a single multi-line posting.</div>
+
+    <div class="row2">
+      <div><label>Date</label><input type="date" id="cj-date"></div>
+      <div><label>Description</label><input type="text" id="cj-desc" placeholder="e.g. June outgoings BACS"></div>
+    </div>
+    <div class="row2">
+      <div><label>Pivot account</label><select id="cj-pivot-account"></select></div>
+      <div><label>Pivot side</label>
+        <select id="cj-pivot-side">
+          <option value="credit">Credit (money going OUT of the pivot, e.g. a bank payment)</option>
+          <option value="debit">Debit (money coming IN to the pivot, e.g. a bank receipt)</option>
+        </select>
+      </div>
+    </div>
+
+    <table class="inbox" style="margin-top:10px;">
+      <thead><tr><th>Account</th><th class="num">Amount</th><th></th></tr></thead>
+      <tbody id="cj-rows"></tbody>
+    </table>
+    <div class="toolbar" style="margin-top:10px;">
+      <button class="btn-secondary" onclick="addCompoundJournalRow()">+ Add line</button>
+      <span class="pill" id="cj-total"></span>
+    </div>
+    <button class="btn-primary" onclick="postCompoundJournal()">Post compound journal</button>
+    <div id="cj-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+  </div>
+
+  <div class="panel" style="margin-top:20px;">
     <h2>Audit Log <span class="pill" id="audit-count"></span></h2>
     <div class="sub" style="margin-bottom:12px;">Every transaction created or deleted, who did it, and when. This list cannot be edited from the app — it's the record of what actually happened.</div>
     <button class="btn-secondary" onclick="loadAuditLog()">Refresh</button>
@@ -591,9 +621,13 @@ async function openCompany(id) {
   document.getElementById('f-locked-until').value = currentCompany.locked_until || '';
   document.getElementById('f-period-start').value = currentCompany.period_start_date || '';
   document.getElementById('ob-rows').innerHTML = ''; obRowCount = 0;
+  document.getElementById('cj-rows').innerHTML = ''; cjRowCount = 0;
+  document.getElementById('cj-date').valueAsDate = new Date();
   show('app-screen');
   await refreshAll();
   addOpeningBalanceRow();
+  addCompoundJournalRow();
+  addCompoundJournalRow();
 }
 
 async function saveSettings() {
@@ -640,7 +674,7 @@ function getAccountType(name) {
 function populateAccountSelects() {
   const sorted = [...chartAccounts].sort((a, b) => a.name.localeCompare(b.name));
   const optionsHtml = sorted.map(a => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)} (${a.code})</option>`).join('');
-  ['f-debit', 'f-credit', 'f-default-credit', 'brec-account', 'fa-account', 'ib-account'].forEach(id => {
+  ['f-debit', 'f-credit', 'f-default-credit', 'brec-account', 'fa-account', 'ib-account', 'cj-pivot-account'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     const prev = el.value;
@@ -829,7 +863,7 @@ function renderJournal() {
   const sorted = [...transactions].sort((a, b) => b.date.localeCompare(a.date));
   tbody.innerHTML = sorted.map(t => `
     <tr>
-      <td>${fmtDate(t.date)}</td><td>${escapeHtml(t.desc)}</td>
+      <td>${fmtDate(t.date)}</td><td>${escapeHtml(t.desc)}${t.journalId ? ` <span class="pill" title="Part of a compound journal — other legs share this ID">journal ${t.journalId.slice(0,6)}</span>` : ''}</td>
       <td style="color:var(--debit)">${escapeHtml(t.debit)}</td>
       <td style="color:var(--credit)">${escapeHtml(t.credit)}</td>
       <td class="num">${fmt(t.amount)}</td>
@@ -1882,6 +1916,67 @@ function renderAgingReport() {
   };
   renderSide('aging-invoice-body', agingReport.invoice || {});
   renderSide('aging-bill-body', agingReport.bill || {});
+}
+
+// ---------- Compound journals ----------
+
+let cjRowCount = 0;
+
+function addCompoundJournalRow() {
+  cjRowCount++;
+  const tbody = document.getElementById('cj-rows');
+  const tr = document.createElement('tr');
+  tr.id = `cj-row-${cjRowCount}`;
+  tr.innerHTML = `
+    <td><select onchange="updateCompoundJournalTotal()">${accountOptionsHtml()}</select></td>
+    <td class="num"><input type="number" step="0.01" min="0" placeholder="0.00" style="text-align:right;" oninput="updateCompoundJournalTotal()"></td>
+    <td><button class="btn-danger" onclick="document.getElementById('cj-row-${cjRowCount}').remove(); updateCompoundJournalTotal();">✕</button></td>`;
+  tbody.appendChild(tr);
+}
+
+function updateCompoundJournalTotal() {
+  const rows = [...document.getElementById('cj-rows').querySelectorAll('tr')];
+  let total = 0;
+  for (const row of rows) {
+    const amountInput = row.querySelector('input');
+    total += parseFloat(amountInput.value) || 0;
+  }
+  document.getElementById('cj-total').textContent = total ? `Total: ${fmt(total)}` : '';
+}
+
+async function postCompoundJournal() {
+  const date = document.getElementById('cj-date').value;
+  const desc = document.getElementById('cj-desc').value.trim();
+  const pivotAccount = document.getElementById('cj-pivot-account').value;
+  const pivotSide = document.getElementById('cj-pivot-side').value;
+  const statusEl = document.getElementById('cj-status');
+
+  if (!date || !desc || !pivotAccount) { statusEl.textContent = 'Fill in date, description, and the pivot account.'; return; }
+
+  const rows = [...document.getElementById('cj-rows').querySelectorAll('tr')];
+  const lines = [];
+  for (const row of rows) {
+    const [accountSelect, amountInput] = row.querySelectorAll('select, input');
+    const account = accountSelect.value;
+    const amount = parseFloat(amountInput.value);
+    if (account && amount > 0) lines.push({ account, amount });
+  }
+  if (lines.length < 2) { statusEl.textContent = 'Add at least 2 lines (besides the pivot account).'; return; }
+
+  try {
+    const result = await api(`/api/companies/${currentCompany.id}/journals`, {
+      method: 'POST', body: JSON.stringify({ date, desc, pivotAccount, pivotSide, lines })
+    });
+    statusEl.textContent = `Posted journal ${result.journalId.slice(0, 8)} — ${lines.length} lines totaling ${fmt(result.total)}.`;
+  } catch (e) { statusEl.textContent = e.message; return; }
+
+  document.getElementById('cj-desc').value = '';
+  document.getElementById('cj-rows').innerHTML = '';
+  cjRowCount = 0;
+  updateCompoundJournalTotal();
+  addCompoundJournalRow();
+  addCompoundJournalRow();
+  await refreshAll();
 }
 
 // ---------- Attachments ----------
