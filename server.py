@@ -415,6 +415,22 @@ def init_db():
         -- trigger points for later, not yet wired) lands here instead of being silently posted or
         -- guessed. raw_line_json preserves exactly what came in, so the clarification UI can show
         -- the user the original line, not just the (possibly wrong) suggestion.
+        -- A pre-invoice document: approved before goods/services are received, becomes a bill
+        -- once they are. No ledger effect of its own — converting to a bill creates a normal
+        -- draft invoices_bills row, which only posts when that bill is sent, same as any other.
+        CREATE TABLE IF NOT EXISTS purchase_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+            date TEXT NOT NULL,
+            desc TEXT NOT NULL,
+            amount_pence INTEGER NOT NULL,
+            account TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            bill_id INTEGER REFERENCES invoices_bills(id) ON DELETE SET NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS clarification_queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -2481,6 +2497,112 @@ def delete_invoice_bill(company_id, doc_id):
             )
             log_audit(db, company_id, "void", "transaction", tx_id, before={"reason": f"invoice/bill #{doc_id} deleted"})
     db.execute("DELETE FROM invoices_bills WHERE id = ?", (doc_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------- purchase orders ----------
+
+PO_STATUS_FLOW = {"draft": "approved", "approved": "received", "received": "billed"}
+
+
+def _serialize_purchase_order(row):
+    d = dict(row)
+    d["amount"] = from_pence(d.pop("amountPence"))
+    return d
+
+
+@app.route("/api/companies/<int:company_id>/purchase-orders", methods=["GET"])
+@login_required
+@company_required
+def list_purchase_orders(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT po.id, po.contact_id as contactId, c.name as contactName, po.date, po.desc, "
+        "po.amount_pence as amountPence, po.account, po.status, po.bill_id as billId "
+        "FROM purchase_orders po JOIN contacts c ON c.id = po.contact_id "
+        "WHERE po.company_id = ? ORDER BY po.date DESC",
+        (company_id,),
+    ).fetchall()
+    return jsonify([_serialize_purchase_order(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/purchase-orders", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def create_purchase_order(company_id):
+    data = request.get_json(force=True) or {}
+    contact_id, date, desc, amount, account = (
+        data.get("contactId"), data.get("date"), data.get("desc"), data.get("amount"), data.get("account"),
+    )
+    if not all([contact_id, date, desc, account]) or not amount or float(amount) <= 0:
+        return jsonify({"error": "Contact, date, description, account, and a positive amount are all required."}), 400
+    db = get_db()
+    account = resolve_account(db, company_id, account, "expense")
+    cur = db.execute(
+        "INSERT INTO purchase_orders (company_id, contact_id, date, desc, amount_pence, account) VALUES (?,?,?,?,?,?)",
+        (company_id, contact_id, date, desc, to_pence(amount), account),
+    )
+    db.commit()
+    return jsonify({"id": cur.lastrowid})
+
+
+@app.route("/api/companies/<int:company_id>/purchase-orders/<int:po_id>/advance", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def advance_purchase_order(company_id, po_id):
+    """Moves a PO forward one step: draft -> approved -> received. The final step, received ->
+    billed, happens via /convert-to-bill instead, since that one also creates the bill."""
+    db = get_db()
+    po = db.execute(
+        "SELECT * FROM purchase_orders WHERE id = ? AND company_id = ?", (po_id, company_id)
+    ).fetchone()
+    if po is None:
+        return jsonify({"error": "Not found."}), 404
+    next_status = PO_STATUS_FLOW.get(po["status"])
+    if next_status is None or next_status == "billed":
+        return jsonify({"error": f"Can't advance from '{po['status']}' — use /convert-to-bill once received."}), 400
+    db.execute("UPDATE purchase_orders SET status = ? WHERE id = ?", (next_status, po_id))
+    db.commit()
+    return jsonify({"ok": True, "status": next_status})
+
+
+@app.route("/api/companies/<int:company_id>/purchase-orders/<int:po_id>/convert-to-bill", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def convert_purchase_order_to_bill(company_id, po_id):
+    db = get_db()
+    po = db.execute(
+        "SELECT * FROM purchase_orders WHERE id = ? AND company_id = ?", (po_id, company_id)
+    ).fetchone()
+    if po is None:
+        return jsonify({"error": "Not found."}), 404
+    if po["status"] != "received":
+        return jsonify({"error": "A purchase order can only become a bill once it's marked received."}), 400
+
+    data = request.get_json(force=True) or {}
+    due_date = data.get("dueDate") or po["date"]
+    cur = db.execute(
+        "INSERT INTO invoices_bills (company_id, kind, contact_id, date, due_date, desc, amount_pence, account, vat_rate) "
+        "VALUES (?,'bill',?,?,?,?,?,?,?)",
+        (company_id, po["contact_id"], po["date"], due_date, po["desc"], po["amount_pence"], po["account"], float(data.get("vatRate") or 0)),
+    )
+    bill_id = cur.lastrowid
+    db.execute("UPDATE purchase_orders SET status = 'billed', bill_id = ? WHERE id = ?", (bill_id, po_id))
+    db.commit()
+    return jsonify({"billId": bill_id})
+
+
+@app.route("/api/companies/<int:company_id>/purchase-orders/<int:po_id>", methods=["DELETE"])
+@login_required
+@company_required
+@write_required
+def delete_purchase_order(company_id, po_id):
+    db = get_db()
+    db.execute("DELETE FROM purchase_orders WHERE id = ? AND company_id = ?", (po_id, company_id))
     db.commit()
     return jsonify({"ok": True})
 

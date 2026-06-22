@@ -651,6 +651,30 @@
       <h2 style="margin-top:18px; color:var(--credit);">Payables (money you owe)</h2>
       <table class="trial"><thead><tr><td><b>Supplier</b></td><td class="num"><b>Current</b></td><td class="num"><b>1-30</b></td><td class="num"><b>31-60</b></td><td class="num"><b>61-90</b></td><td class="num"><b>90+</b></td></tr></thead><tbody id="aging-bill-body"></tbody></table>
     </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Purchase Orders</h2>
+      <div class="sub" style="margin-bottom:12px;">A pre-invoice document: draft → approved → received → billed. No ledger effect until it becomes a bill — and that bill only posts once it's sent, same as any other bill.</div>
+      <table class="inbox">
+        <thead><tr><th>Supplier</th><th>Date</th><th>Description</th><th class="num">Amount</th><th>Status</th><th></th></tr></thead>
+        <tbody id="po-body"></tbody>
+      </table>
+      <div class="panel" style="background:var(--panel-soft); margin-top:14px; box-shadow:none;">
+        <h2 style="margin-top:0; font-size:13px;">Create a purchase order</h2>
+        <div class="row2">
+          <div><label>Supplier</label><select id="po-contact"></select></div>
+          <div><label>Date</label><input type="date" id="po-date"></div>
+        </div>
+        <label>Description</label>
+        <input type="text" id="po-desc" placeholder="e.g. Office chairs">
+        <div class="row2">
+          <div><label>Amount</label><input type="number" id="po-amount" step="0.01" min="0" placeholder="0.00"></div>
+          <div><label>Account</label><select id="po-account"></select></div>
+        </div>
+        <button class="btn-primary" onclick="addPurchaseOrder()">Create purchase order</button>
+        <div id="po-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+      </div>
+    </div>
   </div>
 
   <div class="page" data-page="reports" style="display:none;">
@@ -1280,7 +1304,7 @@ function getAccountType(name) {
 function populateAccountSelects() {
   const sorted = [...chartAccounts].sort((a, b) => a.name.localeCompare(b.name));
   const optionsHtml = sorted.map(a => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)} (${a.code})</option>`).join('');
-  ['f-default-credit', 'brec-account', 'fa-account', 'ib-account', 'cj-pivot-account'].forEach(id => {
+  ['f-default-credit', 'brec-account', 'fa-account', 'ib-account', 'cj-pivot-account', 'po-account'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     const prev = el.value;
@@ -1298,6 +1322,7 @@ function populateAccountSelects() {
 let contacts = [];
 let invoicesBills = [];
 let agingReport = { invoice: {}, bill: {} };
+let purchaseOrders = [];
 
 let teamMembers = [];
 let funds = [];
@@ -1305,7 +1330,7 @@ let bankConnections = [];
 
 async function refreshAll() {
   const cid = currentCompany.id;
-  [transactions, presets, chartAccounts, bankLines, fixedAssets, openingBalances, contacts, invoicesBills, agingReport, teamMembers, funds, bankConnections] = await Promise.all([
+  [transactions, presets, chartAccounts, bankLines, fixedAssets, openingBalances, contacts, invoicesBills, agingReport, teamMembers, funds, bankConnections, purchaseOrders] = await Promise.all([
     api(`/api/companies/${cid}/transactions`),
     api(`/api/companies/${cid}/presets`),
     api(`/api/companies/${cid}/accounts`),
@@ -1317,7 +1342,8 @@ async function refreshAll() {
     api(`/api/companies/${cid}/aging-report`),
     api(`/api/companies/${cid}/members`),
     api(`/api/companies/${cid}/funds`),
-    api(`/api/companies/${cid}/bank-connections`)
+    api(`/api/companies/${cid}/bank-connections`),
+    api(`/api/companies/${cid}/purchase-orders`)
   ]);
   renderBankConnections();
   populateAccountSelects();
@@ -1612,7 +1638,7 @@ function render() {
   renderAccounts(); renderJournal(); renderTrialBalance();
   renderChartOfAccounts(); renderFinancialStatements(); renderBrecTable(); renderFixedAssets();
   renderOpeningBalances(); renderContacts(); renderInvoicesBills(); renderAgingReport();
-  renderDashboard(); renderAnomalies();
+  renderDashboard(); renderAnomalies(); renderPurchaseOrders();
 }
 
 function renderAnomalies() {
@@ -2830,10 +2856,13 @@ function renderContacts() {
 }
 
 function populateContactSelect() {
-  const el = document.getElementById('ib-contact');
-  const prev = el.value;
-  el.innerHTML = contacts.map(c => `<option value="${c.id}">${escapeHtml(c.name)} (${c.type})</option>`).join('');
-  if (contacts.some(c => String(c.id) === prev)) el.value = prev;
+  ['ib-contact', 'po-contact'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const prev = el.value;
+    el.innerHTML = contacts.map(c => `<option value="${c.id}">${escapeHtml(c.name)} (${c.type})</option>`).join('');
+    if (contacts.some(c => String(c.id) === prev)) el.value = prev;
+  });
 }
 
 async function addContact() {
@@ -2953,6 +2982,76 @@ async function payInvoiceBill(id) {
 async function deleteInvoiceBill(id) {
   if (!(await confirmAction('Delete this invoice/bill? Any linked ledger transactions will be voided, not left orphaned.'))) return;
   await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}`, { method: 'DELETE' });
+  await refreshAll();
+}
+
+// ---------- Purchase orders ----------
+
+const PO_STATUS_LABEL = { draft: 'Draft', approved: 'Approved', received: 'Received', billed: 'Billed' };
+const PO_ADVANCE_LABEL = { draft: 'Approve', approved: 'Mark received' };
+
+function renderPurchaseOrders() {
+  const body = document.getElementById('po-body');
+  if (!body) return;
+  if (!purchaseOrders.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">No purchase orders yet.</td></tr>';
+    return;
+  }
+  body.innerHTML = purchaseOrders.map(po => {
+    const actions = [];
+    if (PO_ADVANCE_LABEL[po.status]) actions.push(`<button class="btn-secondary" onclick="advancePurchaseOrder(${po.id})">${PO_ADVANCE_LABEL[po.status]}</button>`);
+    if (po.status === 'received') actions.push(`<button class="btn-primary" onclick="convertPurchaseOrderToBill(${po.id})">Convert to bill</button>`);
+    if (po.status !== 'billed') actions.push(`<button class="btn-danger" onclick="deletePurchaseOrder(${po.id})">✕</button>`);
+    return `<tr>
+      <td>${escapeHtml(po.contactName)}</td>
+      <td>${fmtDate(po.date)}</td>
+      <td>${escapeHtml(po.desc)}</td>
+      <td class="num">${fmt(po.amount)}</td>
+      <td><span class="badge badge-${po.status === 'billed' ? 'paid' : po.status === 'draft' ? 'draft' : 'sent'}">${PO_STATUS_LABEL[po.status]}</span></td>
+      <td>${actions.join(' ')}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function addPurchaseOrder() {
+  const contactId = parseInt(document.getElementById('po-contact').value, 10);
+  const date = document.getElementById('po-date').value;
+  const desc = document.getElementById('po-desc').value.trim();
+  const amount = parseFloat(document.getElementById('po-amount').value);
+  const account = document.getElementById('po-account').value;
+  const statusEl = document.getElementById('po-status');
+  if (!contactId || !date || !desc || !amount || amount <= 0 || !account) {
+    statusEl.textContent = 'Fill in supplier, date, description, a positive amount, and an account.'; return;
+  }
+  try {
+    await api(`/api/companies/${currentCompany.id}/purchase-orders`, {
+      method: 'POST', body: JSON.stringify({ contactId, date, desc, amount, account })
+    });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = '';
+  document.getElementById('po-desc').value = '';
+  document.getElementById('po-amount').value = '';
+  await refreshAll();
+}
+
+async function advancePurchaseOrder(id) {
+  try {
+    await api(`/api/companies/${currentCompany.id}/purchase-orders/${id}/advance`, { method: 'POST' });
+  } catch (e) { showToast(e.message, 'error'); return; }
+  await refreshAll();
+}
+
+async function convertPurchaseOrderToBill(id) {
+  try {
+    await api(`/api/companies/${currentCompany.id}/purchase-orders/${id}/convert-to-bill`, { method: 'POST', body: JSON.stringify({}) });
+  } catch (e) { showToast(e.message, 'error'); return; }
+  showToast('Converted to a draft bill — find it in Invoices & Bills to send it.', 'success');
+  await refreshAll();
+}
+
+async function deletePurchaseOrder(id) {
+  if (!(await confirmAction('Delete this purchase order?', 'Delete'))) return;
+  await api(`/api/companies/${currentCompany.id}/purchase-orders/${id}`, { method: 'DELETE' });
   await refreshAll();
 }
 
