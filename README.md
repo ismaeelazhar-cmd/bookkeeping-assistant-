@@ -37,6 +37,11 @@ A multi-tenant double-entry bookkeeping web app: log in, create one or more comp
 - **Click-to-explain drill-down**: every account in the trial balance and every line in the P&L/SOFP is clickable, showing the exact transactions behind the figure.
 - Dashboard summary (cash position, outstanding receivables/payables, net profit) and a contextual help layer that explains *why* each Movements Inbox suggestion or bank-rec match happened, wired to real state rather than generic tooltips.
 
+## Fund accounting & consolidation (opt-in)
+
+- **Fund accounting**: off by default per company — turning it on changes nothing else about how that company works. When on: tag transactions with a fund (restricted/designated/unrestricted) and get a **Statement of Financial Activities** segmenting incoming resources and resources expended by fund type. Funds don't auto-create like accounts do; they need a deliberate type, so referencing an unknown fund is a hard error, not a guess.
+- **Multi-entity consolidation**: group companies you own (e.g. a charity plus its trading subsidiary) and view a combined P&L/SOFP summary. This is a plain aggregation across entities by matching account name — there's no intercompany elimination, so it's not true consolidation accounting if the grouped companies trade with each other.
+
 ## AI integration
 
 The Claude API key is **write-only** — once set, it's never serialized back to the browser in any API response, and the actual Anthropic API call happens server-side (`server.py`'s `call_claude`), not from client-side JavaScript. Used for: Movements Inbox categorization, receipt OCR, and Ask Your Ledger.
@@ -57,7 +62,7 @@ pip3 install --user -r requirements-dev.txt
 python3 -m pytest
 ```
 
-52 tests covering auth, the account-dedup fix, pence precision, period locking, soft-delete, the invoice/bill lifecycle, compound journals, permission enforcement, the full 2FA cycle, bank reconciliation, fixed assets, attachments, and preset learning. Each test run gets an isolated SQLite file — nothing touches your real `data.sqlite`.
+66 tests covering auth, the account-dedup fix, pence precision, period locking, soft-delete, the invoice/bill lifecycle, compound journals, permission enforcement, the full 2FA cycle, bank reconciliation, fixed assets, attachments, preset learning, fund accounting/SOFA math, and multi-entity consolidation. Each test run gets an isolated SQLite file — nothing touches your real `data.sqlite`.
 
 ## Deploying for real
 
@@ -80,4 +85,4 @@ gunicorn -c gunicorn.conf.py server:app
 
 Hardened so far: persistent session secret, basic rate limiting on auth endpoints, CSRF protection (Origin/Referer validation on state-changing requests), AI API key encrypted at rest (separate key file from the session secret), a full JSON backup endpoint, and server-side-only AI key handling (the key is write-only — never serialized back to the browser in any response). **Still not built**: 2FA backup/recovery codes (losing your authenticator device currently means losing account access — there's no recovery flow), and a built-in automated backup schedule (the export endpoint exists; nothing calls it on a timer).
 
-**Deliberately not built**: restricted/unrestricted fund accounting, a Statement of Financial Activities, and multi-entity consolidation — these are charity/nonprofit-specific and weren't confirmed as relevant to this app's actual use case. Worth building if that changes.
+**Deliberately not built**: real consolidation accounting (intercompany eliminations, minority interest) — the multi-entity consolidation feature is a plain aggregation, documented as such; fund-level opening balances and cumulative funds-carried-forward across periods for the SOFA report.
