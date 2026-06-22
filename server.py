@@ -6,6 +6,9 @@ from pathlib import Path
 from functools import wraps
 
 import uuid
+import re
+import urllib.request
+import urllib.error
 import mimetypes
 
 from flask import Flask, request, jsonify, session, send_from_directory, g
@@ -449,7 +452,12 @@ def list_companies():
         "FROM companies WHERE user_id = ? ORDER BY name",
         (session["user_id"],),
     ).fetchall()
-    return jsonify([dict(r) for r in rows])
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["ai_api_key_set"] = bool(d.pop("ai_api_key"))  # Stage 5: the raw key never leaves the server
+        result.append(d)
+    return jsonify(result)
 
 
 @app.route("/api/companies", methods=["POST"])
@@ -466,7 +474,7 @@ def create_company():
     seed_default_chart(db, cur.lastrowid)
     db.commit()
     return jsonify({
-        "id": cur.lastrowid, "name": name, "default_credit_account": "", "ai_api_key": "",
+        "id": cur.lastrowid, "name": name, "default_credit_account": "", "ai_api_key_set": False,
         "locked_until": "", "period_start_date": "",
     })
 
@@ -488,12 +496,16 @@ def update_settings(company_id):
     data = request.get_json(force=True) or {}
     db = get_db()
     db.execute(
-        "UPDATE companies SET default_credit_account = ?, ai_api_key = ?, locked_until = ?, period_start_date = ? WHERE id = ?",
-        (
-            data.get("defaultCreditAccount", ""), data.get("aiApiKey", ""),
-            data.get("lockedUntil", ""), data.get("periodStartDate", ""), company_id,
-        ),
+        "UPDATE companies SET default_credit_account = ?, locked_until = ?, period_start_date = ? WHERE id = ?",
+        (data.get("defaultCreditAccount", ""), data.get("lockedUntil", ""), data.get("periodStartDate", ""), company_id),
     )
+    # The AI key is write-only from the client's perspective: a blank field never overwrites
+    # whatever's already stored (the browser can't see the real value to "leave it unchanged"
+    # any other way), and clearing it requires the explicit clearAiApiKey flag.
+    if data.get("aiApiKey"):
+        db.execute("UPDATE companies SET ai_api_key = ? WHERE id = ?", (data["aiApiKey"], company_id))
+    elif data.get("clearAiApiKey"):
+        db.execute("UPDATE companies SET ai_api_key = '' WHERE id = ?", (company_id,))
     db.commit()
     return jsonify({"ok": True})
 
@@ -872,6 +884,81 @@ def create_compound_journal(company_id):
     db.commit()
     total = sum(float(ln["amount"]) for ln in valid_lines)
     return jsonify({"journalId": journal_id, "transactionIds": posted, "total": total})
+
+
+# ---------- AI categorization (Stage 5: server-side, key never reaches the browser) ----------
+
+@app.route("/api/companies/<int:company_id>/ai-categorize", methods=["POST"])
+@login_required
+@company_required
+def ai_categorize(company_id):
+    data = request.get_json(force=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "Nothing to analyze."}), 400
+    api_key = g.company["ai_api_key"]
+    if not api_key:
+        return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
+
+    db = get_db()
+    known_accounts = [r["name"] for r in db.execute(
+        "SELECT name FROM accounts WHERE company_id = ? ORDER BY name", (company_id,)
+    ).fetchall()]
+    today = datetime.date.today().isoformat()
+
+    prompt = f"""You are a bookkeeping assistant doing double-entry classification for a small UK business.
+Known chart of accounts already in use (reuse these names exactly when they fit, only invent a new account name when nothing fits): {', '.join(known_accounts) or '(none yet — use sensible standard account names)'}
+
+For each line below, identify it as one bank/cash movement and decide:
+- date (YYYY-MM-DD; if no date is present, use {today})
+- desc: a short clean description
+- amount: a positive number
+- debit: the account that receives value
+- credit: the account value comes from
+
+Money going OUT of the bank/cash account is typically Debit = expense/asset category, Credit = Cash.
+Money coming IN is typically Debit = Cash, Credit = Sales/Trade Recievables/income category.
+Skip lines that aren't real transactions (headers, balances, page numbers, etc).
+
+Return ONLY a JSON array, no prose, no markdown fences:
+[{{"date":"YYYY-MM-DD","desc":"...","amount":0.00,"debit":"...","credit":"..."}}]
+
+Lines:
+{text}"""
+
+    payload = json.dumps({
+        "model": "claude-sonnet-4-6", "max_tokens": 4096,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=payload, method="POST",
+        headers={
+            "Content-Type": "application/json", "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
+    except urllib.error.URLError as e:
+        return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
+
+    raw_text = "".join(block.get("text", "") for block in body.get("content", []))
+    match = re.search(r"\[[\s\S]*\]", raw_text)
+    if not match:
+        return jsonify({"error": "Claude did not return a parseable list."}), 502
+    try:
+        items = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return jsonify({"error": "Claude's response wasn't valid JSON."}), 502
+
+    candidates = [
+        it for it in items
+        if it.get("date") and it.get("desc") and it.get("amount") and it.get("debit") and it.get("credit")
+    ]
+    return jsonify({"candidates": candidates})
 
 
 # ---------- attachments ----------

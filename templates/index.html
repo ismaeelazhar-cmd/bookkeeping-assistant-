@@ -266,8 +266,10 @@
         <div id="inbox-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
         <details style="margin-top:10px;">
           <summary style="font-size:12px; color:var(--muted); cursor:pointer;">AI settings (Claude API key)</summary>
-          <div class="sub" style="margin:8px 0;">Stored against this company on the server (in this app's database), sent directly from your browser to Anthropic when you click Analyze.</div>
-          <input type="password" id="ai-api-key" placeholder="sk-ant-..." oninput="saveSettings()">
+          <div class="sub" style="margin:8px 0;">Stored against this company on the server (in this app's database). The Claude API call happens server-side — this key is never sent to or readable from your browser, including by this app's own frontend.</div>
+          <div class="sub" id="ai-key-status" style="margin:0 0 8px;"></div>
+          <input type="password" id="ai-api-key" placeholder="sk-ant-... (enter to set/replace)" oninput="saveSettings()">
+          <button class="btn-secondary" style="width:100%; margin-top:8px;" onclick="clearAiApiKey()">Clear key</button>
         </details>
         <div id="inbox-table-wrap" style="display:none;">
           <table class="inbox">
@@ -658,7 +660,8 @@ function goToCompanyPicker() {
 async function openCompany(id) {
   currentCompany = companies.find(c => c.id === id);
   document.getElementById('company-name-header').textContent = `${currentCompany.name} — Ledger`;
-  document.getElementById('ai-api-key').value = currentCompany.ai_api_key || '';
+  document.getElementById('ai-api-key').value = '';
+  document.getElementById('ai-key-status').textContent = currentCompany.ai_api_key_set ? 'A key is set.' : 'No key set yet.';
   document.getElementById('f-locked-until').value = currentCompany.locked_until || '';
   document.getElementById('f-period-start').value = currentCompany.period_start_date || '';
   document.getElementById('ob-rows').innerHTML = ''; obRowCount = 0;
@@ -675,18 +678,38 @@ async function openCompany(id) {
 async function saveSettings() {
   if (!currentCompany) return;
   currentCompany.default_credit_account = document.getElementById('f-default-credit').value.trim();
-  currentCompany.ai_api_key = document.getElementById('ai-api-key').value.trim();
   currentCompany.locked_until = document.getElementById('f-locked-until').value;
   currentCompany.period_start_date = document.getElementById('f-period-start').value;
+  const newKey = document.getElementById('ai-api-key').value.trim();
   await api(`/api/companies/${currentCompany.id}/settings`, {
     method: 'PUT',
     body: JSON.stringify({
       defaultCreditAccount: currentCompany.default_credit_account,
-      aiApiKey: currentCompany.ai_api_key,
+      aiApiKey: newKey,
       lockedUntil: currentCompany.locked_until,
       periodStartDate: currentCompany.period_start_date
     })
   });
+  if (newKey) {
+    currentCompany.ai_api_key_set = true;
+    document.getElementById('ai-api-key').value = '';
+    document.getElementById('ai-key-status').textContent = 'A key is set.';
+  }
+}
+
+async function clearAiApiKey() {
+  if (!confirm('Clear the stored Claude API key for this company?')) return;
+  await api(`/api/companies/${currentCompany.id}/settings`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      defaultCreditAccount: currentCompany.default_credit_account,
+      lockedUntil: currentCompany.locked_until,
+      periodStartDate: currentCompany.period_start_date,
+      clearAiApiKey: true
+    })
+  });
+  currentCompany.ai_api_key_set = false;
+  document.getElementById('ai-key-status').textContent = 'No key set yet.';
 }
 
 function escapeHtml(s) {
@@ -1271,48 +1294,19 @@ async function postSelectedCandidates() {
 
 async function analyzeWithAI() {
   const statusEl = document.getElementById('inbox-status');
-  const apiKey = currentCompany.ai_api_key;
-  if (!apiKey) { statusEl.textContent = 'Add your Claude API key under "AI settings" first.'; return; }
+  if (!currentCompany.ai_api_key_set) { statusEl.textContent = 'Add your Claude API key under "AI settings" first.'; return; }
   const text = document.getElementById('movement-text').value.trim();
   if (!text) { statusEl.textContent = 'Nothing to analyze — write, paste, or upload a PDF of movements first.'; return; }
   statusEl.textContent = 'Asking Claude to work out the debits and credits…';
 
-  const knownAccounts = [...new Set(Object.keys(buildAccounts()))].sort();
-  const today = new Date().toISOString().slice(0, 10);
-  const prompt = `You are a bookkeeping assistant doing double-entry classification for a small UK business.
-Known chart of accounts already in use (reuse these names exactly when they fit, only invent a new account name when nothing fits): ${knownAccounts.join(', ') || '(none yet — use sensible standard account names)'}
-
-For each line below, identify it as one bank/cash movement and decide:
-- date (YYYY-MM-DD; if no date is present, use ${today})
-- desc: a short clean description
-- amount: a positive number
-- debit: the account that receives value
-- credit: the account value comes from
-
-Money going OUT of the bank/cash account is typically Debit = expense/asset category, Credit = Cash.
-Money coming IN is typically Debit = Cash, Credit = Sales/Trade Recievables/income category.
-Skip lines that aren't real transactions (headers, balances, page numbers, etc).
-
-Return ONLY a JSON array, no prose, no markdown fences:
-[{"date":"YYYY-MM-DD","desc":"...","amount":0.00,"debit":"...","credit":"..."}]
-
-Lines:
-${text}`;
-
+  // Stage 5: the actual Anthropic call happens server-side now — the API key never reaches this browser tab,
+  // it's read out of the company's settings on the server and used there.
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 4096, messages: [{ role: 'user', content: prompt }] })
-    });
-    if (!res.ok) { const errBody = await res.text(); throw new Error(`${res.status} ${errBody.slice(0, 200)}`); }
-    const data = await res.json();
-    const raw = data.content.map(b => b.text || '').join('');
-    const jsonMatch = raw.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) throw new Error('Claude did not return a parseable list.');
-    const items = JSON.parse(jsonMatch[0]);
-    const newCandidates = items.filter(it => it.date && it.desc && it.amount && it.debit && it.credit)
-      .map(it => ({ id: Date.now() + Math.random().toString(36).slice(2, 7), date: it.date, desc: it.desc, amount: Math.abs(parseFloat(it.amount)), debit: it.debit, credit: it.credit, confidence: 'high', selected: true }));
+    const result = await api(`/api/companies/${currentCompany.id}/ai-categorize`, { method: 'POST', body: JSON.stringify({ text }) });
+    const newCandidates = result.candidates.map(it => ({
+      id: Date.now() + Math.random().toString(36).slice(2, 7), date: it.date, desc: it.desc,
+      amount: Math.abs(parseFloat(it.amount)), debit: it.debit, credit: it.credit, confidence: 'high', selected: true
+    }));
     candidates = candidates.concat(newCandidates);
     statusEl.textContent = `Claude classified ${newCandidates.length} movement(s). Review and post below.`;
     renderCandidates();
