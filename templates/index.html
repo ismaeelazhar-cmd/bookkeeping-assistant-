@@ -617,8 +617,12 @@
         <h2 style="margin-top:0; font-size:13px;">Create a new invoice / bill</h2>
         <div class="sub" style="margin-bottom:12px;">Starts as a draft (no ledger effect). "Send" posts it to Trade Receivables/Payables (with VAT if set). "Mark Paid" settles it against the account you choose.</div>
         <div class="row2">
-          <div><label>Kind</label><select id="ib-kind"><option value="invoice">Invoice (to a customer)</option><option value="bill">Bill (from a supplier)</option></select></div>
+          <div><label>Kind</label><select id="ib-kind" onchange="toggleCreditNoteLinkField()"><option value="invoice">Invoice (to a customer)</option><option value="bill">Bill (from a supplier)</option><option value="credit_note">Credit note (return/correction)</option></select></div>
           <div><label>Contact</label><select id="ib-contact"></select></div>
+        </div>
+        <div id="ib-link-row" style="display:none;">
+          <label>Credit note against <span style="color:var(--muted); font-weight:400;">(the original invoice/bill this corrects)</span></label>
+          <select id="ib-linked-doc"></select>
         </div>
         <div class="row2">
           <div><label>Date</label><input type="date" id="ib-date"></div>
@@ -2872,8 +2876,9 @@ function renderInvoicesBills() {
     if (d.status === 'draft') actions.push(`<button class="btn-secondary" onclick="sendInvoiceBill(${d.id})">Send</button>`);
     if (d.status === 'sent') actions.push(`<button class="btn-secondary" onclick="payInvoiceBill(${d.id})">Mark paid</button>`);
     actions.push(`<button class="btn-danger" onclick="deleteInvoiceBill(${d.id})">✕</button>`);
+    const kindLabel = { invoice: 'Invoice', bill: 'Bill', credit_note: 'Credit note' }[d.kind] || d.kind;
     return `<tr>
-      <td>${d.kind}</td>
+      <td>${escapeHtml(kindLabel)}</td>
       <td>${escapeHtml(d.contactName)}</td>
       <td>${fmtDate(d.date)}</td>
       <td>${fmtDate(d.dueDate)}</td>
@@ -2883,6 +2888,17 @@ function renderInvoicesBills() {
       <td>${actions.join(' ')}</td>
     </tr>`;
   }).join('');
+}
+
+function toggleCreditNoteLinkField() {
+  const isCreditNote = document.getElementById('ib-kind').value === 'credit_note';
+  document.getElementById('ib-link-row').style.display = isCreditNote ? '' : 'none';
+  if (isCreditNote) {
+    const select = document.getElementById('ib-linked-doc');
+    const eligible = invoicesBills.filter(d => (d.kind === 'invoice' || d.kind === 'bill') && d.status === 'sent');
+    select.innerHTML = eligible.map(d => `<option value="${d.id}">${d.kind === 'invoice' ? 'Invoice' : 'Bill'}: ${escapeHtml(d.desc)} (${fmt(d.amount)}, ${escapeHtml(d.contactName)})</option>`).join('')
+      || '<option value="">No sent invoices/bills to credit against yet</option>';
+  }
 }
 
 async function addInvoiceBill() {
@@ -2896,13 +2912,17 @@ async function addInvoiceBill() {
   vatRate = vatRate === 0.001 ? 0 : vatRate;
   const account = document.getElementById('ib-account').value;
   const statusEl = document.getElementById('ib-status');
+  const linkedDocId = kind === 'credit_note' ? parseInt(document.getElementById('ib-linked-doc').value, 10) : null;
 
   if (!contactId || !date || !dueDate || !desc || !amount || amount <= 0 || !account) {
     statusEl.textContent = 'Fill in contact, both dates, description, a positive amount, and an account.'; return;
   }
+  if (kind === 'credit_note' && !linkedDocId) {
+    statusEl.textContent = 'A credit note needs to link to an existing sent invoice or bill.'; return;
+  }
   try {
     await api(`/api/companies/${currentCompany.id}/invoices-bills`, {
-      method: 'POST', body: JSON.stringify({ kind, contactId, date, dueDate, desc, amount, account, vatRate })
+      method: 'POST', body: JSON.stringify({ kind, contactId, date, dueDate, desc, amount, account, vatRate, linkedDocId })
     });
   } catch (e) { statusEl.textContent = e.message; return; }
   statusEl.textContent = '';

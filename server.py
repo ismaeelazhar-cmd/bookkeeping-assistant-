@@ -322,6 +322,7 @@ def init_db():
             status TEXT NOT NULL DEFAULT 'draft',
             transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
             payment_transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
+            linked_doc_id INTEGER REFERENCES invoices_bills(id),
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -470,6 +471,9 @@ def init_db():
         db.execute("ALTER TABLE contacts ADD COLUMN address_city TEXT DEFAULT ''")
         db.execute("ALTER TABLE contacts ADD COLUMN address_postcode TEXT DEFAULT ''")
         db.execute("ALTER TABLE contacts ADD COLUMN address_country TEXT DEFAULT ''")
+    ib_cols = {row[1] for row in db.execute("PRAGMA table_info(invoices_bills)").fetchall()}
+    if "linked_doc_id" not in ib_cols:
+        db.execute("ALTER TABLE invoices_bills ADD COLUMN linked_doc_id INTEGER DEFAULT NULL REFERENCES invoices_bills(id)")
     db.execute("DELETE FROM schema_meta")
     db.execute("INSERT INTO schema_meta (version) VALUES (?)", (SCHEMA_VERSION,))
     db.commit()
@@ -2302,7 +2306,8 @@ def list_invoices_bills(company_id):
     rows = db.execute(
         "SELECT ib.id, ib.kind, ib.contact_id as contactId, c.name as contactName, ib.date, "
         "ib.due_date as dueDate, ib.desc, ib.amount_pence as amountPence, ib.account, ib.vat_rate as vatRate, "
-        "ib.status, ib.transaction_id as transactionId, ib.payment_transaction_id as paymentTransactionId "
+        "ib.status, ib.transaction_id as transactionId, ib.payment_transaction_id as paymentTransactionId, "
+        "ib.linked_doc_id as linkedDocId "
         "FROM invoices_bills ib JOIN contacts c ON c.id = ib.contact_id "
         "WHERE ib.company_id = ? ORDER BY ib.due_date",
         (company_id,),
@@ -2320,17 +2325,28 @@ def create_invoice_bill(company_id):
         data.get("kind"), data.get("contactId"), data.get("date"), data.get("dueDate"),
         data.get("desc"), data.get("amount"), data.get("account"),
     )
-    if kind not in ("invoice", "bill"):
-        return jsonify({"error": "kind must be 'invoice' or 'bill'."}), 400
+    if kind not in ("invoice", "bill", "credit_note"):
+        return jsonify({"error": "kind must be 'invoice', 'bill', or 'credit_note'."}), 400
     if not all([contact_id, date, due_date, desc, account]) or not amount or float(amount) <= 0:
         return jsonify({"error": "Contact, dates, description, account, and a positive amount are all required."}), 400
 
     db = get_db()
-    account = resolve_account(db, company_id, account, "revenue" if kind == "invoice" else "expense")
+    linked_doc_id = None
+    effective_kind = kind
+    if kind == "credit_note":
+        linked_doc_id = data.get("linkedDocId")
+        linked_doc = db.execute(
+            "SELECT kind FROM invoices_bills WHERE id = ? AND company_id = ?", (linked_doc_id, company_id)
+        ).fetchone()
+        if linked_doc is None:
+            return jsonify({"error": "A credit note must link to an existing invoice or bill."}), 400
+        effective_kind = linked_doc["kind"]  # a credit note against an invoice behaves like a (reversed) invoice, etc.
+
+    account = resolve_account(db, company_id, account, "revenue" if effective_kind == "invoice" else "expense")
     cur = db.execute(
-        "INSERT INTO invoices_bills (company_id, kind, contact_id, date, due_date, desc, amount_pence, account, vat_rate) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
-        (company_id, kind, contact_id, date, due_date, desc, to_pence(amount), account, float(data.get("vatRate") or 0)),
+        "INSERT INTO invoices_bills (company_id, kind, contact_id, date, due_date, desc, amount_pence, account, vat_rate, linked_doc_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (company_id, kind, contact_id, date, due_date, desc, to_pence(amount), account, float(data.get("vatRate") or 0), linked_doc_id),
     )
     db.commit()
     return jsonify({"id": cur.lastrowid})
@@ -2351,23 +2367,42 @@ def send_invoice_bill(company_id, doc_id):
         return jsonify({"error": "Only a draft can be sent."}), 400
 
     amount = from_pence(doc["amount_pence"])
-    if doc["kind"] == "invoice":
+    effective_kind = doc["kind"]
+    if doc["kind"] == "credit_note":
+        linked = db.execute("SELECT kind FROM invoices_bills WHERE id = ?", (doc["linked_doc_id"],)).fetchone()
+        effective_kind = linked["kind"] if linked else "invoice"
+
+    if effective_kind == "invoice":
         debtors_account = resolve_account(db, company_id, "Trade Receivables", "current_asset")
-        debit, credit, vat_direction = debtors_account, doc["account"], "output"
+        if doc["kind"] == "credit_note":
+            # reverses a normal invoice posting: reduces Sales (or whatever account), reduces
+            # what the customer owes — same VAT direction (still an output-VAT adjustment)
+            debit, credit, vat_direction = doc["account"], debtors_account, "output"
+        else:
+            debit, credit, vat_direction = debtors_account, doc["account"], "output"
     else:
         creditors_account = resolve_account(db, company_id, "Trade Payables", "current_liability")
-        debit, credit, vat_direction = doc["account"], creditors_account, "input"
+        if doc["kind"] == "credit_note":
+            debit, credit, vat_direction = creditors_account, doc["account"], "input"
+        else:
+            debit, credit, vat_direction = doc["account"], creditors_account, "input"
 
+    label = {"invoice": "Invoice", "bill": "Bill", "credit_note": "Credit note"}[doc["kind"]]
     try:
         tx_id = post_ledger_transaction(
-            db, company_id, doc["date"], f'{"Invoice" if doc["kind"] == "invoice" else "Bill"}: {doc["desc"]}',
+            db, company_id, doc["date"], f'{label}: {doc["desc"]}',
             amount, debit, credit, vat_rate=doc["vat_rate"], vat_direction=vat_direction if doc["vat_rate"] else "",
         )
     except LedgerError as e:
         return jsonify({"error": e.message}), e.status
 
+    # A credit note's ledger effect is fully captured by this one posting — there's no separate
+    # "paid" step the way a normal invoice/bill has, so it goes straight to a terminal 'applied'
+    # status rather than 'sent' (which would otherwise make it show up as outstanding in the
+    # Aging Report and as payable via the /pay endpoint, neither of which is correct for it).
+    new_status = "applied" if doc["kind"] == "credit_note" else "sent"
     db.execute(
-        "UPDATE invoices_bills SET status = 'sent', transaction_id = ? WHERE id = ?", (tx_id, doc_id)
+        "UPDATE invoices_bills SET status = ?, transaction_id = ? WHERE id = ?", (new_status, tx_id, doc_id)
     )
     db.commit()
     return jsonify({"ok": True, "transactionId": tx_id})
@@ -2457,12 +2492,22 @@ def aging_report(company_id):
     db = get_db()
     today = datetime.date.today()
     rows = db.execute(
-        "SELECT ib.kind, ib.contact_id as contactId, c.name as contactName, ib.due_date as dueDate, "
+        "SELECT ib.id, ib.kind, ib.contact_id as contactId, c.name as contactName, ib.due_date as dueDate, "
         "ib.amount_pence as amountPence "
         "FROM invoices_bills ib JOIN contacts c ON c.id = ib.contact_id "
         "WHERE ib.company_id = ? AND ib.status = 'sent'",
         (company_id,),
     ).fetchall()
+    # applied credit notes reduce what's actually still outstanding on the invoice/bill they're
+    # linked to — without this, an invoice with a credit note against it would show as fully
+    # outstanding here even though part (or all) of it has already been credited back
+    credit_notes_by_doc = {}
+    for cn in db.execute(
+        "SELECT linked_doc_id, amount_pence FROM invoices_bills "
+        "WHERE company_id = ? AND kind = 'credit_note' AND status = 'applied' AND linked_doc_id IS NOT NULL",
+        (company_id,),
+    ).fetchall():
+        credit_notes_by_doc[cn["linked_doc_id"]] = credit_notes_by_doc.get(cn["linked_doc_id"], 0) + cn["amount_pence"]
 
     def bucket_for(days_overdue):
         if days_overdue <= 0:
@@ -2477,13 +2522,16 @@ def aging_report(company_id):
 
     result = {"invoice": {}, "bill": {}}
     for r in rows:
+        outstanding_pence = r["amountPence"] - credit_notes_by_doc.get(r["id"], 0)
+        if outstanding_pence <= 0:
+            continue  # fully credited — nothing left outstanding
         due = datetime.date.fromisoformat(r["dueDate"])
         days_overdue = (today - due).days
         bucket = bucket_for(days_overdue)
         contact_bucket = result[r["kind"]].setdefault(r["contactName"], {
             "current": 0, "1-30": 0, "31-60": 0, "61-90": 0, "90+": 0
         })
-        contact_bucket[bucket] += from_pence(r["amountPence"])
+        contact_bucket[bucket] += from_pence(outstanding_pence)
     return jsonify(result)
 
 
