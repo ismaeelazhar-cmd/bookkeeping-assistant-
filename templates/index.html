@@ -76,7 +76,7 @@
   table.journal { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
   table.journal th, table.journal td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; }
   table.journal th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
-  table.journal td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.journal td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
   table.journal tr:hover { background: var(--panel-soft); }
   .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; background: var(--accent-soft); color: var(--accent-hover); font-weight: 600; }
   .empty { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
@@ -86,14 +86,15 @@
   table.inbox th, table.inbox td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; }
   table.inbox th { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; }
   table.inbox input, table.inbox select { padding: 5px 6px; font-size: 12.5px; }
-  table.inbox td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.inbox td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-family: var(--font-mono); }
   table.inbox td.chk { width: 26px; text-align: center; }
   .confidence { font-size: 10px; padding: 1px 6px; border-radius: 999px; font-weight: 600; }
   .confidence.high { background: rgba(75,123,92,.13); color: var(--good); }
   .confidence.low { background: var(--bad-soft); color: var(--bad); }
   table.trial { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
   table.trial td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; }
-  table.trial td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.trial td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+  .tline .amt { font-family: var(--font-mono); }
 
   .center-screen { min-height: 70vh; display: flex; align-items: center; justify-content: center; }
   .auth-card { width: 360px; }
@@ -295,7 +296,7 @@
         <input type="file" id="import-file" accept=".csv" style="display:none" onchange="importCSV(event)">
       </div>
       <button class="btn-secondary" style="width:100%; margin-bottom:10px;" onclick="exportFullBackup()">Full backup (JSON — everything)</button>
-      <button class="btn-secondary" style="width:100%; color:var(--bad);" onclick="if(confirm('Clear all transactions for this company?')) clearAll()">Clear all data</button>
+      <button class="btn-secondary" style="width:100%; color:var(--bad);" onclick="confirmAction('Clear all transactions for this company?').then(ok => ok && clearAll())">Clear all data</button>
 
       <h2 id="section-settings" style="margin-top:24px; scroll-margin-top:60px;">Period Lock</h2>
       <div class="sub" style="margin-bottom:8px;">Once you've filed a VAT return or finalized accounts up to a date, lock it — transactions on or before that date can no longer be added, edited, or deleted by anyone.</div>
@@ -510,6 +511,10 @@
   </div>
 
   <div class="panel" id="section-reports" style="margin-top:20px; scroll-margin-top:60px;">
+    <div class="report-actions">
+      <button class="btn-secondary" onclick="exportCSV()">Export CSV</button>
+      <button class="btn-secondary" onclick="window.print()">Export PDF</button>
+    </div>
     <h2>Financial Statements <span class="pill" id="period-label"></span></h2>
     <div class="sub" id="fs-build-summary" style="margin-bottom:12px;"></div>
     <div class="row2" style="align-items:start;">
@@ -676,6 +681,17 @@
     </table>
   </div>
 </div>
+
+<dialog id="confirm-dialog" style="border:1px solid var(--color-border); border-radius:10px; padding:0; max-width:420px;">
+  <div class="panel" style="margin:0; border:none;">
+    <h2 style="margin-top:0;">Are you sure?</h2>
+    <div class="sub" id="confirm-dialog-message" style="margin-bottom:16px;"></div>
+    <div style="display:flex; gap:8px; justify-content:flex-end;">
+      <button class="btn-secondary" id="confirm-dialog-cancel">Cancel</button>
+      <button class="btn-primary" id="confirm-dialog-ok" style="background:var(--color-danger);">Confirm</button>
+    </div>
+  </div>
+</dialog>
 
 <div id="attachments-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:50; align-items:center; justify-content:center;">
   <div class="panel" style="width:420px; max-height:80vh; overflow:auto;">
@@ -855,7 +871,7 @@ async function createConsolidationGroup() {
 }
 
 async function deleteConsolidationGroup(id) {
-  if (!confirm('Delete this consolidation group? The underlying companies are untouched.')) return;
+  if (!(await confirmAction('Delete this consolidation group? The underlying companies are untouched.'))) return;
   await api(`/api/consolidation-groups/${id}`, { method: 'DELETE' });
   await loadConsolidationGroups();
 }
@@ -950,7 +966,7 @@ async function createCompany() {
 }
 
 async function deleteCompany(id, name) {
-  if (!confirm(`Delete "${name}" and all its transactions? This cannot be undone.`)) return;
+  if (!(await confirmAction(`Delete "${name}" and all its transactions? This cannot be undone.`))) return;
   await api(`/api/companies/${id}`, { method: 'DELETE' });
   await loadCompanies();
 }
@@ -1011,7 +1027,7 @@ async function saveSettings() {
 }
 
 async function clearAiApiKey() {
-  if (!confirm('Clear the stored Claude API key for this company?')) return;
+  if (!(await confirmAction('Clear the stored Claude API key for this company?'))) return;
   await api(`/api/companies/${currentCompany.id}/settings`, {
     method: 'PUT',
     body: JSON.stringify({
@@ -1028,6 +1044,20 @@ async function clearAiApiKey() {
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function confirmAction(message) {
+  return new Promise(resolve => {
+    const dialog = document.getElementById('confirm-dialog');
+    document.getElementById('confirm-dialog-message').textContent = message;
+    const okBtn = document.getElementById('confirm-dialog-ok');
+    const cancelBtn = document.getElementById('confirm-dialog-cancel');
+    const finish = result => { dialog.close(); resolve(result); };
+    okBtn.onclick = () => finish(true);
+    cancelBtn.onclick = () => finish(false);
+    dialog.onclose = () => resolve(false);
+    dialog.showModal();
+  });
 }
 
 let _searchDebounce = null;
@@ -1692,7 +1722,11 @@ function renderCandidates() {
       <td class="num"><input type="number" step="0.01" value="${c.amount}" onchange="updateCandidate('${c.id}','amount',this.value)" style="width:80px; text-align:right;"></td>
       <td><input list="account-list" value="${escapeHtml(c.debit)}" onchange="updateCandidate('${c.id}','debit',this.value)"></td>
       <td><input list="account-list" value="${escapeHtml(c.credit)}" onchange="updateCandidate('${c.id}','credit',this.value)"></td>
-      <td><span class="confidence ${c.confidence}" title="${escapeHtml(c.reason || '')}">${c.confidence === 'high' ? 'matched' : 'review'} ⓘ</span> <button class="btn-danger" onclick="removeCandidate('${c.id}')">✕</button></td>
+      <td>
+        <span class="badge badge-${c.confidence}">${c.confidence === 'high' ? 'matched' : 'review'}</span>
+        ${c.reason ? `<details style="display:inline-block; font-size:11px;"><summary style="cursor:pointer; display:inline; color:var(--muted);">Why?</summary><div style="max-width:220px; color:var(--muted); margin-top:2px;">${escapeHtml(c.reason)}</div></details>` : ''}
+        <button class="btn-danger" onclick="removeCandidate('${c.id}')">✕</button>
+      </td>
     </tr>`).join('');
 }
 
@@ -2013,7 +2047,7 @@ async function updateChartAccountType(accountId, type) {
 }
 
 async function deleteChartAccount(accountId, name) {
-  if (!confirm(`Delete the account "${name}"? Only possible if no transactions use it.`)) return;
+  if (!(await confirmAction(`Delete the account "${name}"? Only possible if no transactions use it.`))) return;
   try {
     await api(`/api/companies/${currentCompany.id}/accounts/${accountId}`, { method: 'DELETE' });
   } catch (e) { alert(e.message); return; }
@@ -2259,7 +2293,14 @@ function accumulatedDepreciation(accumAccount) {
 
 function renderFixedAssets() {
   const body = document.getElementById('fa-body');
-  if (!fixedAssets.length) { body.innerHTML = '<tr><td colspan="6" class="empty">No fixed assets registered yet.</td></tr>'; return; }
+  if (!fixedAssets.length) {
+    body.innerHTML = `<tr><td colspan="6"><div class="empty-state">
+      <div class="empty-state-icon">🏢</div>
+      <div class="empty-state-desc">No fixed assets registered yet — add one to start tracking depreciation.</div>
+      <button class="btn-primary" onclick="document.getElementById('fa-name').focus()">Register an asset</button>
+    </div></td></tr>`;
+    return;
+  }
   body.innerHTML = fixedAssets.map(a => {
     const accum = accumulatedDepreciation(a.accumAccount);
     const nbv = a.cost - accum;
@@ -2304,7 +2345,7 @@ async function addFixedAsset() {
 }
 
 async function deleteFixedAsset(id) {
-  if (!confirm('Remove this asset from the register? Depreciation already posted to the ledger stays — delete those transactions separately if needed.')) return;
+  if (!(await confirmAction('Remove this asset from the register? Depreciation already posted to the ledger stays — delete those transactions separately if needed.'))) return;
   await api(`/api/companies/${currentCompany.id}/fixed-assets/${id}`, { method: 'DELETE' });
   await loadFixedAssets();
 }
@@ -2439,7 +2480,11 @@ function renderContacts() {
       <td>${escapeHtml(c.email || '')}</td>
       <td>${escapeHtml(c.phone || '')}</td>
       <td><button class="btn-danger" onclick="deleteContact(${c.id}, '${c.name.replace(/'/g, "\\'")}')">✕</button></td>
-    </tr>`).join('') : '<tr><td colspan="5" class="empty">No contacts yet.</td></tr>';
+    </tr>`).join('') : `<tr><td colspan="5"><div class="empty-state">
+      <div class="empty-state-icon">👥</div>
+      <div class="empty-state-desc">No contacts yet — add a customer or supplier to start raising invoices and bills.</div>
+      <button class="btn-primary" onclick="document.getElementById('contact-name').focus()">Add a contact</button>
+    </div></td></tr>`;
 }
 
 function populateContactSelect() {
@@ -2469,7 +2514,7 @@ async function addContact() {
 }
 
 async function deleteContact(id, name) {
-  if (!confirm(`Delete contact "${name}"? Only possible if they have no invoices/bills.`)) return;
+  if (!(await confirmAction(`Delete contact "${name}"? Only possible if they have no invoices/bills.`))) return;
   try {
     await api(`/api/companies/${currentCompany.id}/contacts/${id}`, { method: 'DELETE' });
   } catch (e) { alert(e.message); return; }
@@ -2548,7 +2593,7 @@ async function payInvoiceBill(id) {
 }
 
 async function deleteInvoiceBill(id) {
-  if (!confirm('Delete this invoice/bill? Any linked ledger transactions will be voided, not left orphaned.')) return;
+  if (!(await confirmAction('Delete this invoice/bill? Any linked ledger transactions will be voided, not left orphaned.'))) return;
   await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}`, { method: 'DELETE' });
   await refreshAll();
 }
@@ -2787,7 +2832,7 @@ async function syncBankConnection(id) {
 }
 
 async function deleteBankConnection(id) {
-  if (!confirm('Disconnect this bank account? It can be relinked later, but Plaid will need to re-authenticate.')) return;
+  if (!(await confirmAction('Disconnect this bank account? It can be relinked later, but Plaid will need to re-authenticate.'))) return;
   await api(`/api/companies/${currentCompany.id}/bank-connections/${id}`, { method: 'DELETE' });
   await refreshAll();
 }
@@ -2834,7 +2879,7 @@ async function addFund() {
 }
 
 async function deleteFund(id, name) {
-  if (!confirm(`Delete fund "${name}"? Only possible if no transactions use it.`)) return;
+  if (!(await confirmAction(`Delete fund "${name}"? Only possible if no transactions use it.`))) return;
   try {
     await api(`/api/companies/${currentCompany.id}/funds/${id}`, { method: 'DELETE' });
   } catch (e) { alert(e.message); return; }
@@ -2902,7 +2947,7 @@ async function inviteMember() {
 }
 
 async function removeMember(memberId) {
-  if (!confirm('Remove this person\'s access to this company?')) return;
+  if (!(await confirmAction('Remove this person\'s access to this company?'))) return;
   await api(`/api/companies/${currentCompany.id}/members/${memberId}`, { method: 'DELETE' });
   teamMembers = await api(`/api/companies/${currentCompany.id}/members`);
   renderTeam();
