@@ -1,0 +1,72 @@
+/* Design tokens. Named --color-* per the design system spec, but the actual values are aliased
+   onto this app's existing warm-cream palette (defined inline in templates/index.html's :root)
+   rather than the spec's literal forest-green/gray values — swapping in an unrelated palette
+   would clash with the app's established visual identity. Anything reaching for --color-* gets
+   a token; the existing --bg/--text/--accent/etc. names in index.html remain the source of truth
+   and these are kept in sync with them. */
+:root {
+  --color-primary: #2B2825;     /* = --text: warm near-black, used for primary text/headings */
+  --color-accent: #C2682F;      /* = --accent: Claude terracotta */
+  --color-bg: #F5F2EA;          /* = --bg: warm cream page background */
+  --color-surface: #FFFFFF;
+  --color-danger: #B14A3B;      /* = --bad: muted brick red */
+  --color-text: #2B2825;        /* = --text */
+  --color-muted: #8C8273;       /* = --muted: warm grey for secondary text */
+  --color-border: #E4DECF;      /* = --border: warm hairline border */
+  --color-success: #4B7B5C;     /* = --good: muted sage green */
+  --font-mono: 'JetBrains Mono', 'Courier New', monospace;
+}
+
+/* Money amounts: tabular figures, right-aligned, monospaced so columns of numbers line up. */
+.money {
+  font-family: var(--font-mono);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Status pills used on invoices/bills/transactions. */
+.badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+}
+.badge-draft   { background: color-mix(in srgb, var(--color-muted) 20%, transparent);   color: var(--color-muted); }
+.badge-sent    { background: color-mix(in srgb, var(--color-accent) 18%, transparent);  color: var(--color-accent); }
+.badge-paid    { background: color-mix(in srgb, var(--color-success) 18%, transparent); color: var(--color-success); }
+.badge-overdue { background: color-mix(in srgb, var(--color-danger) 18%, transparent);  color: var(--color-danger); }
+.badge-voided  { background: color-mix(in srgb, var(--color-muted) 30%, transparent);   color: var(--color-muted); text-decoration: line-through; }
+/* AI confidence badges (bank import suggestions) reuse the same pill shape */
+.badge-high   { background: color-mix(in srgb, var(--color-success) 18%, transparent); color: var(--color-success); }
+.badge-medium { background: color-mix(in srgb, var(--color-accent) 18%, transparent);  color: var(--color-accent); }
+.badge-low    { background: color-mix(in srgb, var(--color-danger) 18%, transparent);  color: var(--color-danger); }
+
+/* Empty states: shown in place of a table/list body when a query returns zero rows. */
+.empty-state {
+  text-align: center;
+  padding: 36px 20px;
+  color: var(--color-muted);
+}
+.empty-state .empty-state-icon { font-size: 28px; margin-bottom: 8px; opacity: .6; }
+.empty-state .empty-state-desc { font-size: 13px; margin-bottom: 14px; }
+
+/* Scroll-spy active nav link — this app is a single static page with anchor-link sections
+   rather than separate routes, so "current route" is whichever section is in view. */
+nav a.nav-active {
+  color: var(--color-accent) !important;
+  font-weight: 700;
+}
+
+.report-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+@media print {
+  nav, .report-actions, .topbar { display: none !important; }
+}

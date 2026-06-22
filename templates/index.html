@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <title>Bookkeeping — T-Account Ledger</title>
+<link rel="stylesheet" href="/static/css/tokens.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
 <style>
@@ -188,11 +189,14 @@
       <div id="permission-banner" class="pill" style="display:none; margin-top:6px;"></div>
     </div>
     <div class="who">
+      <input type="search" id="global-search" placeholder="Search transactions, accounts, contacts…"
+             oninput="runGlobalSearch()" style="width:220px; display:inline-block; margin-right:10px; vertical-align:middle;">
       <span id="who-email-2"></span> ·
       <a href="#" onclick="goToCompanyPicker()" style="color:var(--accent);">Switch company</a> ·
       <a href="#" onclick="logout(event)" style="color:var(--muted);">Log out</a>
     </div>
   </div>
+  <div id="global-search-results" style="display:none; margin-bottom:16px;"></div>
 
   <div id="dashboard" class="row2" style="grid-template-columns: repeat(4, 1fr); margin-bottom:16px;">
     <div class="panel" style="margin:0;">
@@ -311,7 +315,7 @@
 
     <div>
       <div class="panel" style="margin-bottom:20px;">
-        <h2>Movements Inbox</h2>
+        <h2>Import Bank Statement</h2>
         <div class="sub" style="margin-bottom:12px;">Upload a bank statement PDF, or type/paste movements (one per line). The app guesses the debit/credit accounts — review and post.</div>
         <div class="row2">
           <div>
@@ -369,7 +373,7 @@
       </div>
 
       <div class="panel" style="margin-top:20px;">
-        <h2>Compilation of T-Accounts <span class="pill" id="trial-status"></span></h2>
+        <h2>Trial Balance <span class="pill" id="trial-status"></span></h2>
         <table class="trial">
           <thead><tr><td><b>Account</b></td><td class="num"><b>Total Debit</b></td><td class="num"><b>Total Credit</b></td><td class="num"><b>Balance</b></td></tr></thead>
           <tbody id="trial-body"></tbody>
@@ -1025,6 +1029,42 @@ async function clearAiApiKey() {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+
+let _searchDebounce = null;
+async function runGlobalSearch() {
+  const q = document.getElementById('global-search').value.trim();
+  const resultsEl = document.getElementById('global-search-results');
+  clearTimeout(_searchDebounce);
+  if (!q) { resultsEl.style.display = 'none'; resultsEl.innerHTML = ''; return; }
+  _searchDebounce = setTimeout(async () => {
+    const result = await api(`/api/companies/${currentCompany.id}/search?q=${encodeURIComponent(q)}`);
+    const section = (title, rows, renderRow) => rows.length
+      ? `<div style="margin-bottom:8px;"><div class="sub" style="margin-bottom:4px;">${title} (${rows.length})</div>${rows.map(renderRow).join('')}</div>`
+      : '';
+    resultsEl.innerHTML = `<div class="panel" style="margin:0;">` +
+      section('Transactions', result.transactions, t => `<div class="tline"><span class="desc">${fmtDate(t.date)} — ${escapeHtml(t.desc)} (${escapeHtml(t.debit)} / ${escapeHtml(t.credit)})</span><span class="amt money">${fmt(t.amount)}</span></div>`) +
+      section('Accounts', result.accounts, a => `<div class="tline"><span class="desc">${escapeHtml(a.name)} (${escapeHtml(a.type)})</span></div>`) +
+      section('Contacts', result.contacts, c => `<div class="tline"><span class="desc">${escapeHtml(c.name)} (${escapeHtml(c.type)})</span></div>`) +
+      (!result.transactions.length && !result.accounts.length && !result.contacts.length
+        ? `<div class="empty-state"><div class="empty-state-icon">🔍</div><div class="empty-state-desc">No matches for "${escapeHtml(q)}".</div></div>` : '') +
+      `</div>`;
+    resultsEl.style.display = 'block';
+  }, 250);
+}
+
+function setupNavScrollSpy() {
+  const navLinks = [...document.querySelectorAll('nav a[href^="#section-"]')];
+  if (!navLinks.length) return;
+  const sections = navLinks.map(a => document.querySelector(a.getAttribute('href'))).filter(Boolean);
+  const observer = new IntersectionObserver(entries => {
+    const visible = entries.filter(e => e.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+    if (!visible) return;
+    const id = visible.target.id;
+    navLinks.forEach(a => a.classList.toggle('nav-active', a.getAttribute('href') === `#${id}`));
+  }, { rootMargin: '-80px 0px -60% 0px', threshold: [0, 0.25, 0.5] });
+  sections.forEach(s => observer.observe(s));
+}
+document.addEventListener('DOMContentLoaded', setupNavScrollSpy);
 function fmt(n) { return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function fmtDate(iso) { if (!iso) return ''; const [y, m, d] = iso.split('-'); return `${d}/${m}/${y}`; }
 function normalizeDesc(s) { return s.trim().toLowerCase(); }

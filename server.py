@@ -1407,6 +1407,37 @@ def list_transactions(company_id):
     return jsonify([_serialize_transaction(r) for r in rows])
 
 
+@app.route("/api/companies/<int:company_id>/search", methods=["GET"])
+@login_required
+@company_required
+def search(company_id):
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"transactions": [], "accounts": [], "contacts": []})
+    db = get_db()
+    like = f"%{q}%"
+    transactions_out = [
+        _serialize_transaction(r) for r in db.execute(
+            "SELECT t.id, t.date, t.desc, t.amount_pence as amountPence, t.debit, t.credit, t.tax_year as taxYear, "
+            "t.vat_rate as vatRate, t.vat_direction as vatDirection, t.confidence, t.journal_id as journalId, "
+            "t.voided_at as voidedAt, t.voided_by as voidedBy, t.reviewed_by as reviewedBy, t.reviewed_at as reviewedAt, "
+            "NULL as fund, 0 as attachmentCount "
+            "FROM transactions t WHERE t.company_id = ? AND t.voided_at IS NULL AND t.desc LIKE ? "
+            "ORDER BY t.date DESC LIMIT 50",
+            (company_id, like),
+        ).fetchall()
+    ]
+    accounts_out = [dict(r) for r in db.execute(
+        "SELECT id, code, name, type FROM accounts WHERE company_id = ? AND name LIKE ? ORDER BY name LIMIT 50",
+        (company_id, like),
+    ).fetchall()]
+    contacts_out = [dict(r) for r in db.execute(
+        "SELECT id, name, type, email FROM contacts WHERE company_id = ? AND name LIKE ? ORDER BY name LIMIT 50",
+        (company_id, like),
+    ).fetchall()]
+    return jsonify({"transactions": transactions_out, "accounts": accounts_out, "contacts": contacts_out})
+
+
 class LedgerError(Exception):
     def __init__(self, message, status=400):
         self.message = message
