@@ -44,23 +44,40 @@ The Claude API key is **write-only** — once set, it's never serialized back to
 ## Running locally
 
 ```bash
-pip3 install --user flask werkzeug
+pip3 install --user -r requirements.txt
 python3 server.py
 ```
 
-Then open http://127.0.0.1:5050.
+Then open http://127.0.0.1:5050. Set `FLASK_DEBUG=0` to turn off Flask's debug mode (on by default for local dev).
 
 ## Running the tests
 
 ```bash
-pip3 install --user pytest
+pip3 install --user -r requirements-dev.txt
 python3 -m pytest
 ```
 
-38 tests covering auth, the account-dedup fix, pence precision, period locking, soft-delete, the invoice/bill lifecycle, compound journals, permission enforcement, and the full 2FA cycle. Each test run gets an isolated SQLite file — nothing touches your real `data.sqlite`.
+52 tests covering auth, the account-dedup fix, pence precision, period locking, soft-delete, the invoice/bill lifecycle, compound journals, permission enforcement, the full 2FA cycle, bank reconciliation, fixed assets, attachments, and preset learning. Each test run gets an isolated SQLite file — nothing touches your real `data.sqlite`.
+
+## Deploying for real
+
+This app is safe to run for personal/local use as-is. Putting it somewhere reachable from the internet needs three more things, none of which are optional:
+
+**1. A production WSGI server, not Flask's dev server.**
+
+```bash
+pip3 install --user -r requirements-prod.txt
+gunicorn -c gunicorn.conf.py server:app
+```
+
+`gunicorn.conf.py` binds to `127.0.0.1:5050` only (not `0.0.0.0`) — it's meant to sit behind a reverse proxy, not face the internet directly. Worker count is deliberately small; SQLite's single-writer lock is the real concurrency ceiling here, not Python's, so throwing more workers at it doesn't help past a point.
+
+**2. A reverse proxy terminating HTTPS.** Nginx or Caddy in front, forwarding to `127.0.0.1:5050`, with a real TLS certificate (Let's Encrypt via certbot, or Caddy's automatic HTTPS). Without this, every password, session cookie, and AI API key on this app travels in plaintext over the network. This is the single most important thing missing for real-world use and it's infrastructure, not code — there's no way to fix it from inside `server.py`.
+
+**3. Back up two files outside of normal application backups**: `.secret_key` and `.encryption_key`. Losing `.secret_key` just logs everyone out (regenerate and move on). Losing `.encryption_key` means every stored AI API key becomes permanently unreadable — `decrypt_secret()` will silently treat them as unset, and each company's owner will need to re-enter theirs. Neither file is ever committed (both gitignored) and neither is included in the JSON export (deliberately — an export is exactly the kind of file that ends up emailed or dropped in a shared folder).
 
 ## Status
 
-Dev-mode Flask app (SQLite, Flask's built-in server) — fine for local/personal use. Hardened so far: persistent session secret (survives restarts), basic rate limiting on auth endpoints, a full JSON backup endpoint, and server-side-only AI key handling. **Not yet**: HTTPS (needs a real deployment target), encryption at rest for the AI key in the SQLite file itself, and a production WSGI server in place of Flask's dev server.
+Hardened so far: persistent session secret, basic rate limiting on auth endpoints, CSRF protection (Origin/Referer validation on state-changing requests), AI API key encrypted at rest (separate key file from the session secret), a full JSON backup endpoint, and server-side-only AI key handling (the key is write-only — never serialized back to the browser in any response). **Still not built**: 2FA backup/recovery codes (losing your authenticator device currently means losing account access — there's no recovery flow), and a built-in automated backup schedule (the export endpoint exists; nothing calls it on a timer).
 
 **Deliberately not built**: restricted/unrestricted fund accounting, a Statement of Financial Activities, and multi-entity consolidation — these are charity/nonprofit-specific and weren't confirmed as relevant to this app's actual use case. Worth building if that changes.

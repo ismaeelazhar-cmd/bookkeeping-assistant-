@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import secrets
 import json
@@ -2001,6 +2002,8 @@ def match_bank_line(company_id, line_id):
     return jsonify({"ok": True})
 
 
+init_db()  # runs on import too, not just `python3 server.py` directly — gunicorn imports this module without executing __main__
+
 if __name__ == "__main__":
-    init_db()
-    app.run(host="127.0.0.1", port=5050, debug=True)
+    debug = os.environ.get("FLASK_DEBUG", "1") == "1"  # default on for local dev; set FLASK_DEBUG=0 to turn off
+    app.run(host="127.0.0.1", port=5050, debug=debug)
