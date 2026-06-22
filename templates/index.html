@@ -756,6 +756,24 @@
       <div id="forecast-bars"></div>
     </div>
 
+    <div class="panel" style="margin-top:20px;">
+      <h2>Tax Computation (estimate)</h2>
+      <div class="sub" style="margin-bottom:12px;">A working estimate only — uses the Financial Statements period above (Generate that first). Depreciation is added back (it isn't tax-deductible) and capital allowances are deducted instead; enter your own capital allowances figure since this app doesn't track AIA/WDA pools.</div>
+      <div class="row2">
+        <div><label>Capital allowances claimed</label><input type="number" id="tax-capital-allowances" step="0.01" min="0" placeholder="0.00" oninput="renderTaxComputation()"></div>
+        <div><label>Tax rate</label>
+          <select id="tax-rate" onchange="renderTaxComputation()">
+            <option value="19">19% — UK small profits rate</option>
+            <option value="25">25% — UK main rate</option>
+            <option value="20">20% — basic rate (sole trader income tax, rough estimate)</option>
+            <option value="40">40% — higher rate (sole trader income tax, rough estimate)</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn-secondary" onclick="renderTaxComputation()">Calculate</button>
+      <table class="trial" id="tax-computation-table" style="margin-top:10px;"></table>
+    </div>
+
     <div class="panel" id="fund-accounting-panels" style="margin-top:20px; display:none;">
       <h2>Funds</h2>
       <div class="sub" style="margin-bottom:12px;">Restricted/designated funds need a deliberate type — they don't auto-create from typing like accounts do.</div>
@@ -2661,6 +2679,43 @@ function shiftDateOneYearBack(dateStr) {
   const year = y - 1;
   const daysInMonth = new Date(year, m, 0).getDate(); // handles 29 Feb -> 28 Feb in a non-leap year
   return `${year}-${String(m).padStart(2, '0')}-${String(Math.min(d, daysInMonth)).padStart(2, '0')}`;
+}
+
+function renderTaxComputation() {
+  const table = document.getElementById('tax-computation-table');
+  if (!table) return;
+  const from = document.getElementById('fs-from').value;
+  const to = document.getElementById('fs-to').value;
+  const periodTx = transactions.filter(t => (!from || t.date >= from) && (!to || t.date <= to));
+  const periodAccounts = buildAccountsFromTx(periodTx, false);
+
+  let revenue = 0, cogs = 0, expense = 0;
+  for (const name of Object.keys(periodAccounts)) {
+    const type = getAccountType(name);
+    const balance = accountNetBalance(periodAccounts[name], type);
+    if (type === 'revenue') revenue += balance;
+    else if (type === 'cogs') cogs += balance;
+    else if (type === 'expense') expense += balance;
+  }
+  const netProfit = revenue - cogs - expense;
+
+  const depreciationAccounts = new Set(fixedAssets.map(a => a.depreciationAccount));
+  const depreciationCharged = periodTx
+    .filter(t => depreciationAccounts.has(t.debit))
+    .reduce((s, t) => s + t.amount, 0);
+
+  const capitalAllowances = parseFloat(document.getElementById('tax-capital-allowances').value) || 0;
+  const rate = parseFloat(document.getElementById('tax-rate').value);
+  const taxableProfit = netProfit + depreciationCharged - capitalAllowances;
+  const estimatedTax = Math.max(0, taxableProfit) * rate / 100;
+
+  table.innerHTML = [
+    lineRow('Net profit per accounts (this period)', netProfit),
+    lineRow('Add back: depreciation charged', depreciationCharged),
+    lineRow('Less: capital allowances claimed', -capitalAllowances),
+    lineRow('Taxable profit', taxableProfit, { total: true }),
+    lineRow(`Estimated tax due (${rate}%)`, estimatedTax, { total: true }),
+  ].join('');
 }
 
 function renderCashFlowForecast() {
