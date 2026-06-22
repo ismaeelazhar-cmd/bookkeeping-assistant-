@@ -150,7 +150,36 @@
     </div>
   </div>
 
-  <div class="layout">
+  <div id="dashboard" class="row2" style="grid-template-columns: repeat(4, 1fr); margin-bottom:16px;">
+    <div class="panel" style="margin:0;">
+      <div class="sub" style="margin:0;">Cash position</div>
+      <div style="font-size:20px; font-weight:700;" id="dash-cash">—</div>
+    </div>
+    <div class="panel" style="margin:0;">
+      <div class="sub" style="margin:0;">Outstanding receivables</div>
+      <div style="font-size:20px; font-weight:700; color:var(--debit);" id="dash-receivables">—</div>
+    </div>
+    <div class="panel" style="margin:0;">
+      <div class="sub" style="margin:0;">Outstanding payables</div>
+      <div style="font-size:20px; font-weight:700; color:var(--credit);" id="dash-payables">—</div>
+    </div>
+    <div class="panel" style="margin:0;">
+      <div class="sub" style="margin:0;">Net profit (all time)</div>
+      <div style="font-size:20px; font-weight:700;" id="dash-profit">—</div>
+    </div>
+  </div>
+
+  <nav style="position:sticky; top:0; z-index:10; background:var(--bg); padding:10px 0; margin-bottom:16px; border-bottom:1px solid var(--border); display:flex; gap:16px; flex-wrap:wrap; font-size:13px;">
+    <a href="#section-bank" style="color:var(--text); text-decoration:none;">Bank</a>
+    <a href="#section-sales" style="color:var(--text); text-decoration:none;">Sales &amp; Purchases</a>
+    <a href="#section-ledger" style="color:var(--text); text-decoration:none;">Ledger</a>
+    <a href="#section-accounts" style="color:var(--text); text-decoration:none;">Chart of Accounts</a>
+    <a href="#section-reports" style="color:var(--text); text-decoration:none;">Reports</a>
+    <a href="#section-audit" style="color:var(--text); text-decoration:none;">Audit</a>
+    <a href="#section-settings" style="color:var(--text); text-decoration:none;">Settings</a>
+  </nav>
+
+  <div class="layout" id="section-ledger" style="scroll-margin-top:60px;">
     <div class="panel">
       <h2>New Transaction</h2>
       <label>Date</label>
@@ -203,7 +232,7 @@
       </div>
       <button class="btn-secondary" style="width:100%; color:var(--bad);" onclick="if(confirm('Clear all transactions for this company?')) clearAll()">Clear all data</button>
 
-      <h2 style="margin-top:24px;">Period Lock</h2>
+      <h2 id="section-settings" style="margin-top:24px; scroll-margin-top:60px;">Period Lock</h2>
       <div class="sub" style="margin-bottom:8px;">Once you've filed a VAT return or finalized accounts up to a date, lock it — transactions on or before that date can no longer be added, edited, or deleted by anyone.</div>
       <label>Locked up to and including</label>
       <input type="date" id="f-locked-until" oninput="saveSettings()">
@@ -274,7 +303,7 @@
     </div>
   </div>
 
-  <div class="panel" style="margin-top:20px;">
+  <div class="panel" id="section-bank" style="margin-top:20px; scroll-margin-top:60px;">
     <h2>Bank Reconciliation</h2>
     <div class="sub" style="margin-bottom:12px;">Import what your bank statement actually shows for an account, then match each line to a ledger transaction — or post a new one straight from the line. This is what actually catches missing/duplicate/wrong entries, not just categorization.</div>
 
@@ -359,7 +388,7 @@
     <div id="fa-run-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
   </div>
 
-  <div class="panel" style="margin-top:20px;">
+  <div class="panel" id="section-accounts" style="margin-top:20px; scroll-margin-top:60px;">
     <h2>Chart of Accounts</h2>
     <div class="sub" style="margin-bottom:12px;">The single list of accounts this company can use — every debit/credit field elsewhere is chosen from here, not typed, so "Cash" and "cash" can never silently become two different accounts. The type drives the Statement of Profit or Loss / Statement of Financial Position / Cash Flow Statement.</div>
     <table class="inbox"><thead><tr><th>Code</th><th>Account</th><th>Type</th><th></th></tr></thead><tbody id="coa-body"></tbody></table>
@@ -371,7 +400,7 @@
     <div id="coa-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
   </div>
 
-  <div class="panel" style="margin-top:20px;">
+  <div class="panel" id="section-reports" style="margin-top:20px; scroll-margin-top:60px;">
     <h2>Financial Statements <span class="pill" id="period-label"></span></h2>
     <div class="row2" style="align-items:start;">
       <div><h2 style="margin-top:0;">Statement of Profit or Loss</h2><table class="trial"><tbody id="pnl-body"></tbody></table></div>
@@ -396,7 +425,7 @@
     <table class="trial" style="margin-top:14px;"><tbody id="vat-return-body"></tbody></table>
   </div>
 
-  <div class="panel" style="margin-top:20px;">
+  <div class="panel" id="section-sales" style="margin-top:20px; scroll-margin-top:60px;">
     <h2>Contacts</h2>
     <div class="sub" style="margin-bottom:12px;">Customers and suppliers, so invoices and bills are tied to who they're actually for/from.</div>
     <table class="inbox"><thead><tr><th>Name</th><th>Type</th><th>Email</th><th>Phone</th><th></th></tr></thead><tbody id="contacts-body"></tbody></table>
@@ -482,7 +511,7 @@
     <div id="cj-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
   </div>
 
-  <div class="panel" style="margin-top:20px;">
+  <div class="panel" id="section-audit" style="margin-top:20px; scroll-margin-top:60px;">
     <h2>Audit Log <span class="pill" id="audit-count"></span></h2>
     <div class="sub" style="margin-bottom:12px;">Every transaction created or deleted, who did it, and when. This list cannot be edited from the app — it's the record of what actually happened.</div>
     <button class="btn-secondary" onclick="loadAuditLog()">Refresh</button>
@@ -924,6 +953,34 @@ function render() {
   renderAccounts(); renderJournal(); renderTrialBalance();
   renderChartOfAccounts(); renderFinancialStatements(); renderBrecTable(); renderFixedAssets();
   renderOpeningBalances(); renderContacts(); renderInvoicesBills(); renderAgingReport();
+  renderDashboard();
+}
+
+function renderDashboard() {
+  const accounts = buildAccounts();
+  const names = Object.keys(accounts);
+
+  const cash = names.filter(n => getAccountType(n) === 'cash')
+    .reduce((s, n) => s + accountNetBalance(accounts[n], 'cash'), 0);
+  document.getElementById('dash-cash').textContent = fmt(cash);
+
+  const receivables = invoicesBills.filter(d => d.kind === 'invoice' && d.status === 'sent').reduce((s, d) => s + d.amount, 0);
+  const payables = invoicesBills.filter(d => d.kind === 'bill' && d.status === 'sent').reduce((s, d) => s + d.amount, 0);
+  document.getElementById('dash-receivables').textContent = fmt(receivables);
+  document.getElementById('dash-payables').textContent = fmt(payables);
+
+  let revenue = 0, cogs = 0, expenses = 0;
+  for (const name of names) {
+    const type = getAccountType(name);
+    const balance = accountNetBalance(accounts[name], type);
+    if (type === 'revenue') revenue += balance;
+    else if (type === 'cogs') cogs += balance;
+    else if (type === 'expense') expenses += balance;
+  }
+  const profit = revenue - cogs - expenses;
+  const profitEl = document.getElementById('dash-profit');
+  profitEl.textContent = fmt(profit);
+  profitEl.style.color = profit >= 0 ? 'var(--good)' : 'var(--bad)';
 }
 
 function exportCSV() {
