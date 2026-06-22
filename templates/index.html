@@ -247,6 +247,17 @@
       </div>
     </div>
 
+    <div class="panel" id="petty-cash-card" style="display:none; margin-bottom:16px;">
+      <h2 style="margin-top:0;">Petty Cash <span class="pill" id="petty-cash-balance"></span></h2>
+      <div class="sub" style="margin-bottom:10px;">Tracks the balance of the account named "Petty Cash" — top up from another account to record cash drawn for the float.</div>
+      <div class="row2">
+        <div><label>Top-up amount</label><input type="number" id="petty-cash-amount" step="0.01" min="0" placeholder="0.00"></div>
+        <div><label>From account</label><input type="text" id="petty-cash-from" list="account-list" value="Cash"></div>
+      </div>
+      <button class="btn-secondary" onclick="topUpPettyCash()">Record top-up</button>
+      <div id="petty-cash-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
+
     <div class="panel" id="clarification-alert-card" style="display:none; margin-bottom:16px; border-left:3px solid var(--color-danger);">
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <div>
@@ -512,6 +523,23 @@
         <tbody id="brec-body"></tbody>
       </table>
     </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Reconciliation History</h2>
+      <div class="sub" style="margin-bottom:12px;">A formal record of each reconciliation: the statement date, the statement's closing balance, and whether it's been closed off. What an auditor would ask for first.</div>
+      <div class="row2">
+        <div><label>Account</label><input type="text" id="rec-account" list="account-list" value="Cash"></div>
+        <div><label>Statement date</label><input type="date" id="rec-statement-date"></div>
+      </div>
+      <label>Statement closing balance</label>
+      <input type="number" id="rec-closing-balance" step="0.01" placeholder="0.00">
+      <button class="btn-secondary" onclick="createReconciliation()">Start a reconciliation</button>
+      <div id="rec-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+      <table class="inbox" style="margin-top:14px;">
+        <thead><tr><th>Account</th><th>Statement date</th><th class="num">Closing balance</th><th>Status</th><th></th></tr></thead>
+        <tbody id="reconciliation-history-body"></tbody>
+      </table>
+    </div>
   </div>
 
   <div class="page" data-page="accounts" style="display:none;">
@@ -684,6 +712,14 @@
 
   <div class="page" data-page="reports" style="display:none;">
     <div class="panel">
+      <h2>Month-End Checklist</h2>
+      <div class="sub" style="margin-bottom:12px;">A guided close: each item is checked automatically against your data where possible. VAT review is a manual confirmation — there's nothing in the ledger that can tell us you've actually looked at it.</div>
+      <label>Month</label>
+      <input type="month" id="checklist-period" onchange="loadMonthEndChecklist()">
+      <div id="checklist-body" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
       <div class="report-actions">
         <button class="btn-secondary" onclick="exportCSV()">Export CSV</button>
         <button class="btn-secondary" onclick="window.print()">Export PDF</button>
@@ -775,6 +811,12 @@
       </div>
       <button class="btn-secondary" onclick="addBudget()">Set budget for this month</button>
       <div id="budget-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Ratio Analysis</h2>
+      <div class="sub" style="margin-bottom:12px;">Auto-calculated from the ledger, all-time. Debtor/creditor days use the closing balance against all-time revenue/purchases as a rough proxy — for a precise figure, an accountant would use average balances over the period in question.</div>
+      <table class="trial" id="ratios-table"></table>
     </div>
 
     <div class="panel" style="margin-top:20px;">
@@ -896,9 +938,13 @@
 </div>
 
 <div id="drilldown-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:50; align-items:center; justify-content:center;">
-  <div class="panel" style="width:520px; max-height:80vh; overflow:auto;">
+  <div class="panel" style="width:580px; max-height:80vh; overflow:auto;">
     <h2 id="drilldown-title">Account</h2>
-    <table class="journal"><thead><tr><th>Date</th><th>Description</th><th>Side</th><th class="num">Amount</th></tr></thead><tbody id="drilldown-body"></tbody></table>
+    <div class="row2">
+      <div><label>From</label><input type="date" id="drilldown-from" onchange="rerenderDrillDown()"></div>
+      <div><label>To</label><input type="date" id="drilldown-to" onchange="rerenderDrillDown()"></div>
+    </div>
+    <table class="journal"><thead><tr><th>Date</th><th>Description</th><th>Side</th><th class="num">Amount</th><th class="num">Running balance</th></tr></thead><tbody id="drilldown-body"></tbody></table>
     <button class="btn-secondary" style="width:100%; margin-top:14px;" onclick="closeDrillDown()">Close</button>
   </div>
 </div>
@@ -1406,6 +1452,7 @@ async function refreshAll() {
   loadAuditLog();
   await loadClarificationQueue();
   await loadBudgets();
+  await loadReconciliationHistory();
 }
 
 function suggestFromDescription() {
@@ -1692,7 +1739,7 @@ function render() {
   renderAccounts(); renderJournal(); renderTrialBalance();
   renderChartOfAccounts(); renderFinancialStatements(); renderBrecTable(); renderFixedAssets();
   renderOpeningBalances(); renderContacts(); renderInvoicesBills(); renderAgingReport();
-  renderDashboard(); renderAnomalies(); renderPurchaseOrders(); renderBudgetVsActual(); renderDeptPnl();
+  renderDashboard(); renderAnomalies(); renderPurchaseOrders(); renderBudgetVsActual(); renderDeptPnl(); renderRatios(); renderPettyCash();
 }
 
 function renderAnomalies() {
@@ -2277,6 +2324,54 @@ function ledgerLinesForCashAccount(account) {
   return out;
 }
 
+// ---------- Reconciliation history ----------
+
+let reconciliations = [];
+
+async function loadReconciliationHistory() {
+  reconciliations = await api(`/api/companies/${currentCompany.id}/reconciliations`);
+  renderReconciliationHistory();
+}
+
+function renderReconciliationHistory() {
+  const body = document.getElementById('reconciliation-history-body');
+  if (!body) return;
+  body.innerHTML = reconciliations.length ? reconciliations.map(r => `
+    <tr>
+      <td>${escapeHtml(r.account)}</td>
+      <td>${fmtDate(r.statementDate)}</td>
+      <td class="num">${fmt(r.statementClosingBalance)}</td>
+      <td><span class="badge badge-${r.status === 'closed' ? 'paid' : 'sent'}">${escapeHtml(r.status)}</span></td>
+      <td>${r.status === 'open' ? `<button class="btn-secondary" onclick="closeReconciliationRow(${r.id})">Close</button>` : ''}</td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">No reconciliations yet.</td></tr>';
+}
+
+async function createReconciliation() {
+  const account = document.getElementById('rec-account').value.trim();
+  const statementDate = document.getElementById('rec-statement-date').value;
+  const closingBalance = parseFloat(document.getElementById('rec-closing-balance').value);
+  const statusEl = document.getElementById('rec-status');
+  if (!account || !statementDate || isNaN(closingBalance)) {
+    statusEl.textContent = 'Fill in account, statement date, and closing balance.'; return;
+  }
+  try {
+    await api(`/api/companies/${currentCompany.id}/reconciliations`, {
+      method: 'POST', body: JSON.stringify({ account, statementDate, statementClosingBalance: closingBalance })
+    });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = '';
+  document.getElementById('rec-closing-balance').value = '';
+  await loadReconciliationHistory();
+}
+
+async function closeReconciliationRow(id) {
+  try {
+    await api(`/api/companies/${currentCompany.id}/reconciliations/${id}/close`, { method: 'POST' });
+  } catch (e) { showToast(e.message, 'error'); return; }
+  showToast('Reconciliation closed.', 'success');
+  await loadReconciliationHistory();
+}
+
 function renderBrecTable() {
   const account = document.getElementById('brec-account').value.trim() || 'Cash';
   const lines = bankLines.filter(l => l.cashAccount === account).sort((a, b) => a.date.localeCompare(b.date));
@@ -2459,6 +2554,122 @@ function lastTxDate(acc) {
   return dates.length ? dates.reduce((max, d) => d > max ? d : max, dates[0]) : '';
 }
 
+// ---------- Month-end checklist ----------
+
+async function loadMonthEndChecklist() {
+  const period = document.getElementById('checklist-period').value; // 'YYYY-MM'
+  const body = document.getElementById('checklist-body');
+  if (!period) { body.innerHTML = ''; return; }
+
+  const [reconciliations, recurringJournals] = await Promise.all([
+    api(`/api/companies/${currentCompany.id}/reconciliations`),
+    api(`/api/companies/${currentCompany.id}/recurring-journals`),
+  ]);
+
+  const bankRecDone = reconciliations.some(r => r.status === 'closed' && r.statementDate.startsWith(period));
+  const depreciationAccounts = new Set(fixedAssets.map(a => a.depreciationAccount));
+  const depreciationDone = transactions.some(t => t.date.startsWith(period) && depreciationAccounts.has(t.debit));
+  const recurringLabels = new Set(recurringJournals.map(r => r.label));
+  const accrualsDone = transactions.some(t => t.date.startsWith(period) && [...recurringLabels].some(l => t.desc.includes(l)));
+  const vatKey = `vatReviewed:${currentCompany.id}:${period}`;
+  const vatReviewed = sessionStorage.getItem(vatKey) === '1';
+
+  const item = (label, done, detail, extra) => `
+    <div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border);">
+      <span style="font-size:16px;">${done ? '✅' : '⬜'}</span>
+      <div style="flex:1;">
+        <div style="font-weight:600;">${label}</div>
+        <div class="sub" style="margin:0;">${detail}</div>
+      </div>
+      ${extra || ''}
+    </div>`;
+
+  body.innerHTML =
+    item('Bank reconciliation done', bankRecDone, bankRecDone ? 'A closed reconciliation exists for this month.' : 'No closed reconciliation found for this month yet — see the Bank page.') +
+    item('Depreciation run', depreciationDone, depreciationDone || !fixedAssets.length ? (fixedAssets.length ? 'A depreciation posting was found for this month.' : 'No fixed assets registered — nothing to depreciate.') : 'No depreciation posting found for this month — see Accounts → Fixed Asset Register.') +
+    item('Accruals / recurring journals posted', accrualsDone, recurringJournals.length ? (accrualsDone ? 'A matching posting was found for this month.' : 'No matching posting found for this month — see Transactions → Period close.') : 'No recurring journals set up.') +
+    item('VAT period reviewed', vatReviewed, 'Manual confirmation — not derived from the ledger.',
+      `<button class="btn-secondary" onclick="toggleVatReviewed('${period}')">${vatReviewed ? 'Unmark' : 'Mark reviewed'}</button>`);
+}
+
+function toggleVatReviewed(period) {
+  const key = `vatReviewed:${currentCompany.id}:${period}`;
+  if (sessionStorage.getItem(key) === '1') sessionStorage.removeItem(key);
+  else sessionStorage.setItem(key, '1');
+  loadMonthEndChecklist();
+}
+
+function renderPettyCash() {
+  const card = document.getElementById('petty-cash-card');
+  if (!card) return;
+  const accounts = buildAccounts();
+  const pettyCashName = Object.keys(accounts).find(n => n.toLowerCase() === 'petty cash');
+  card.style.display = '';
+  const balance = pettyCashName ? accountNetBalance(accounts[pettyCashName], 'cash') : 0;
+  document.getElementById('petty-cash-balance').textContent = fmt(balance);
+}
+
+async function topUpPettyCash() {
+  const amount = parseFloat(document.getElementById('petty-cash-amount').value);
+  const fromAccount = document.getElementById('petty-cash-from').value.trim() || 'Cash';
+  const statusEl = document.getElementById('petty-cash-status');
+  if (!amount || amount <= 0) { statusEl.textContent = 'Enter a positive top-up amount.'; return; }
+  try {
+    await api(`/api/companies/${currentCompany.id}/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({ date: new Date().toISOString().slice(0, 10), desc: 'Petty cash top-up', amount, debit: 'Petty Cash', credit: fromAccount })
+    });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = '';
+  document.getElementById('petty-cash-amount').value = '';
+  showToast(`Petty cash topped up by ${fmt(amount)}.`, 'success');
+  await refreshAll();
+}
+
+function renderRatios() {
+  const table = document.getElementById('ratios-table');
+  if (!table) return;
+  const accounts = buildAccounts();
+  const names = Object.keys(accounts);
+  if (!names.length) { table.innerHTML = '<tr><td class="empty">No transactions yet.</td></tr>'; return; }
+
+  let currentAssets = 0, quickAssets = 0, currentLiabilities = 0, revenue = 0, cogs = 0, expenses = 0;
+  let receivables = 0, payables = 0;
+  for (const name of names) {
+    const type = getAccountType(name);
+    const balance = accountNetBalance(accounts[name], type);
+    if (type === 'cash' || type === 'current_asset') {
+      currentAssets += balance;
+      if (!/stock|inventory/i.test(name)) quickAssets += balance;
+    }
+    if (type === 'current_liability') currentLiabilities += balance;
+    if (type === 'revenue') revenue += balance;
+    if (type === 'cogs') cogs += balance;
+    if (type === 'expense') expenses += balance;
+    if (/trade receivable/i.test(name)) receivables += balance;
+    if (/trade payable/i.test(name)) payables += balance;
+  }
+  const grossProfit = revenue - cogs;
+  const netProfit = grossProfit - expenses;
+  const purchases = cogs + expenses; // proxy for "purchases" — no separate purchases ledger total kept
+
+  const ratio = (a, b) => b ? (a / b) : null;
+  const pct = (a, b) => b ? (a / b * 100) : null;
+  const days = (balance, flow) => flow ? (balance / flow * 365) : null;
+  const fmtRatio = v => v === null ? 'n/a' : v.toFixed(2);
+  const fmtPct = v => v === null ? 'n/a' : `${v.toFixed(1)}%`;
+  const fmtDays = v => v === null ? 'n/a' : `${v.toFixed(0)} days`;
+
+  table.innerHTML = [
+    ['Current ratio', fmtRatio(ratio(currentAssets, currentLiabilities)), 'Current assets ÷ current liabilities — can short-term obligations be covered?'],
+    ['Quick ratio', fmtRatio(ratio(quickAssets, currentLiabilities)), 'Like current ratio, excluding stock/inventory accounts.'],
+    ['Gross margin', fmtPct(pct(grossProfit, revenue)), 'Gross profit ÷ revenue.'],
+    ['Net margin', fmtPct(pct(netProfit, revenue)), 'Net profit ÷ revenue.'],
+    ['Debtor days', fmtDays(days(receivables, revenue)), 'Trade Receivables balance ÷ revenue × 365 — roughly how long customers take to pay.'],
+    ['Creditor days', fmtDays(days(payables, purchases)), 'Trade Payables balance ÷ (COGS + expenses) × 365 — roughly how long you take to pay suppliers.'],
+  ].map(([label, value, hint]) => `<tr><td>${label}</td><td class="num">${value}</td><td style="color:var(--muted); font-size:12px;">${hint}</td></tr>`).join('');
+}
+
 function lineRow(label, value, opts) {
   opts = opts || {};
   const cls = opts.total ? ' style="font-weight:700; border-top:1px solid var(--border);"' : '';
@@ -2470,26 +2681,51 @@ function lineRow(label, value, opts) {
   return `<tr${cls}><td>${labelHtml}${flag}</td><td class="num">${v}</td></tr>`;
 }
 
+let drilldownAccountName = null;
+
 function drillDownAccount(name) {
+  drilldownAccountName = name;
+  document.getElementById('drilldown-title').textContent = name;
+  document.getElementById('drilldown-from').value = '';
+  document.getElementById('drilldown-to').value = '';
+  rerenderDrillDown();
+  document.getElementById('drilldown-overlay').style.display = 'flex';
+}
+
+function rerenderDrillDown() {
+  const name = drilldownAccountName;
+  const from = document.getElementById('drilldown-from').value;
+  const to = document.getElementById('drilldown-to').value;
   const accounts = buildAccounts();
   const acc = accounts[name];
-  document.getElementById('drilldown-title').textContent = name;
   const body = document.getElementById('drilldown-body');
-  if (!acc) { body.innerHTML = '<tr><td colspan="4" class="empty">No transactions.</td></tr>'; }
-  else {
-    const lines = [
-      ...acc.debits.map(t => ({ ...t, side: 'debit' })),
-      ...acc.credits.map(t => ({ ...t, side: 'credit' })),
-    ].sort((a, b) => a.date.localeCompare(b.date));
-    body.innerHTML = lines.length ? lines.map(t => `
-      <tr>
-        <td>${fmtDate(t.date)}</td>
-        <td>${escapeHtml(t.desc)}${t._isOpeningBalance ? ' <span class="pill">opening balance</span>' : ''}${t._isVatLine ? ' <span class="pill">VAT</span>' : ''}</td>
-        <td style="color:${t.side === 'debit' ? 'var(--debit)' : 'var(--credit)'}">${t.side}</td>
-        <td class="num">${fmt(t.amount)}</td>
-      </tr>`).join('') : '<tr><td colspan="4" class="empty">No transactions.</td></tr>';
-  }
-  document.getElementById('drilldown-overlay').style.display = 'flex';
+  if (!acc) { body.innerHTML = '<tr><td colspan="5" class="empty">No transactions.</td></tr>'; return; }
+
+  const isDebitNormal = DEBIT_NORMAL[getAccountType(name)];
+  const allLines = [
+    ...acc.debits.map(t => ({ ...t, side: 'debit' })),
+    ...acc.credits.map(t => ({ ...t, side: 'credit' })),
+  ].sort((a, b) => a.date.localeCompare(b.date));
+
+  // running balance is cumulative from inception (so it's correct even when the date filter
+  // below only shows a window into the middle of the account's history), then we filter the
+  // rows actually displayed
+  let running = 0;
+  const withRunning = allLines.map(t => {
+    const signed = (t.side === 'debit') === isDebitNormal ? t.amount : -t.amount;
+    running += signed;
+    return { ...t, runningBalance: running };
+  });
+  const lines = withRunning.filter(t => (!from || t.date >= from) && (!to || t.date <= to));
+
+  body.innerHTML = lines.length ? lines.map(t => `
+    <tr>
+      <td>${fmtDate(t.date)}</td>
+      <td>${escapeHtml(t.desc)}${t._isOpeningBalance ? ' <span class="pill">opening balance</span>' : ''}${t._isVatLine ? ' <span class="pill">VAT</span>' : ''}</td>
+      <td style="color:${t.side === 'debit' ? 'var(--debit)' : 'var(--credit)'}">${t.side}</td>
+      <td class="num">${fmt(t.amount)}</td>
+      <td class="num">${fmt(t.runningBalance)}</td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">No transactions in this range.</td></tr>';
 }
 
 function closeDrillDown() {

@@ -553,7 +553,7 @@ DEFAULT_CHART = [
 
 def guess_account_type(name):
     n = name.lower()
-    if n == "cash" or "bank" in n:
+    if n == "cash" or "bank" in n or "petty cash" in n:
         return "cash"
     if "accumulated depreciation" in n:
         return "noncurrent_asset"
