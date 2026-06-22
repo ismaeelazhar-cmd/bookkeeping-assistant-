@@ -3,6 +3,7 @@ import secrets
 import json
 import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from functools import wraps
 
 import uuid
@@ -56,6 +57,24 @@ def close_db(exception=None):
     db = g.pop("db", None)
     if db is not None:
         db.close()
+
+
+@app.before_request
+def check_csrf_origin():
+    """Lightweight CSRF mitigation: every JSON endpoint already resists CSRF because a plain
+    cross-origin HTML form can't trigger a application/json request without a CORS preflight
+    we don't allow. The one real gap was the multipart attachment upload (a plain <form
+    enctype="multipart/form-data"> CAN cross origins). This closes that gap: if a browser sends
+    Origin or Referer on a state-changing request, it must match our own host. Non-browser
+    clients (curl, the test suite) send neither and are unaffected — they can't exploit CSRF in
+    the first place since they don't carry the victim's session cookie."""
+    if request.method not in ("POST", "PUT", "DELETE"):
+        return
+    origin = request.headers.get("Origin") or request.headers.get("Referer")
+    if not origin:
+        return
+    if urlparse(origin).netloc != urlparse(request.host_url).netloc:
+        return jsonify({"error": "Cross-origin request blocked."}), 403
 
 
 SCHEMA_VERSION = 3  # bumped for Stage 2: contacts + invoices/bills
