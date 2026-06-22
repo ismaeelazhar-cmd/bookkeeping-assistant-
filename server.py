@@ -244,12 +244,28 @@ def init_db():
             uploaded_by TEXT NOT NULL,
             uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+
+        -- Stage 7: collaboration. The company's owner (companies.user_id) always has full
+        -- access; this table adds others on top with a capped permission level. "comment" is
+        -- accepted as a value now for forward-compatibility but currently behaves like "view"
+        -- — there's no commenting feature yet to gate.
+        CREATE TABLE IF NOT EXISTS company_members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            permission TEXT NOT NULL DEFAULT 'view',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (company_id, user_id)
+        );
         """
     )
     # additive column for compound journals — safe to ALTER in place, no need to wipe data for this one
     tx_cols = {row[1] for row in db.execute("PRAGMA table_info(transactions)").fetchall()}
     if "journal_id" not in tx_cols:
         db.execute("ALTER TABLE transactions ADD COLUMN journal_id TEXT DEFAULT NULL")
+    if "reviewed_by" not in tx_cols:
+        db.execute("ALTER TABLE transactions ADD COLUMN reviewed_by TEXT DEFAULT NULL")
+        db.execute("ALTER TABLE transactions ADD COLUMN reviewed_at TEXT DEFAULT NULL")
     db.execute("DELETE FROM schema_meta")
     db.execute("INSERT INTO schema_meta (version) VALUES (?)", (SCHEMA_VERSION,))
     db.commit()
@@ -404,17 +420,48 @@ def login_required(fn):
 
 
 def company_required(fn):
+    """Grants access if the caller owns the company OR is an invited member. Sets
+    g.company_permission to 'owner', or to the member's permission level ('view'/'comment'/'post')."""
     @wraps(fn)
     def wrapper(company_id, *args, **kwargs):
         db = get_db()
-        row = db.execute(
-            "SELECT * FROM companies WHERE id = ? AND user_id = ?",
-            (company_id, session["user_id"]),
-        ).fetchone()
+        row = db.execute("SELECT * FROM companies WHERE id = ?", (company_id,)).fetchone()
         if row is None:
             return jsonify({"error": "Company not found"}), 404
+        if row["user_id"] == session["user_id"]:
+            permission = "owner"
+        else:
+            member = db.execute(
+                "SELECT permission FROM company_members WHERE company_id = ? AND user_id = ?",
+                (company_id, session["user_id"]),
+            ).fetchone()
+            if member is None:
+                return jsonify({"error": "Company not found"}), 404
+            permission = member["permission"]
         g.company = row
+        g.company_permission = permission
         return fn(company_id, *args, **kwargs)
+    return wrapper
+
+
+def write_required(fn):
+    """Stage 7: gate mutations to owner or 'post'-permission members. Apply AFTER
+    @company_required in the decorator stack (so g.company_permission is already set)."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if g.company_permission not in ("owner", "post"):
+            return jsonify({"error": "You have view-only access to this company."}), 403
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def owner_required(fn):
+    """For company deletion and member management — stricter than write_required, only the actual owner."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if g.company_permission != "owner":
+            return jsonify({"error": "Only the company owner can do this."}), 403
+        return fn(*args, **kwargs)
     return wrapper
 
 
@@ -488,9 +535,16 @@ def me():
 def list_companies():
     db = get_db()
     rows = db.execute(
-        "SELECT id, name, default_credit_account, ai_api_key, locked_until, period_start_date "
-        "FROM companies WHERE user_id = ? ORDER BY name",
-        (session["user_id"],),
+        "SELECT id, name, default_credit_account, ai_api_key, locked_until, period_start_date, "
+        "'owner' as permission "
+        "FROM companies WHERE user_id = ? "
+        "UNION ALL "
+        "SELECT c.id, c.name, c.default_credit_account, c.ai_api_key, c.locked_until, c.period_start_date, "
+        "cm.permission "
+        "FROM companies c JOIN company_members cm ON cm.company_id = c.id "
+        "WHERE cm.user_id = ? "
+        "ORDER BY name",
+        (session["user_id"], session["user_id"]),
     ).fetchall()
     result = []
     for r in rows:
@@ -522,6 +576,7 @@ def create_company():
 @app.route("/api/companies/<int:company_id>", methods=["DELETE"])
 @login_required
 @company_required
+@owner_required
 def delete_company(company_id):
     db = get_db()
     db.execute("DELETE FROM companies WHERE id = ?", (company_id,))
@@ -532,6 +587,7 @@ def delete_company(company_id):
 @app.route("/api/companies/<int:company_id>/settings", methods=["PUT"])
 @login_required
 @company_required
+@write_required
 def update_settings(company_id):
     data = request.get_json(force=True) or {}
     db = get_db()
@@ -546,6 +602,58 @@ def update_settings(company_id):
         db.execute("UPDATE companies SET ai_api_key = ? WHERE id = ?", (data["aiApiKey"], company_id))
     elif data.get("clearAiApiKey"):
         db.execute("UPDATE companies SET ai_api_key = '' WHERE id = ?", (company_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+VALID_PERMISSIONS = ("view", "comment", "post")
+
+
+@app.route("/api/companies/<int:company_id>/members", methods=["GET"])
+@login_required
+@company_required
+def list_members(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT cm.id, u.email, cm.permission FROM company_members cm "
+        "JOIN users u ON u.id = cm.user_id WHERE cm.company_id = ? ORDER BY u.email",
+        (company_id,),
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/members", methods=["POST"])
+@login_required
+@company_required
+@owner_required
+def invite_member(company_id):
+    data = request.get_json(force=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    permission = data.get("permission") or "view"
+    if permission not in VALID_PERMISSIONS:
+        return jsonify({"error": "Invalid permission level."}), 400
+    db = get_db()
+    user = db.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+    if user is None:
+        return jsonify({"error": f'No account exists for "{email}" yet — they need to sign up first, then you can invite them.'}), 404
+    if user["id"] == session["user_id"]:
+        return jsonify({"error": "You already own this company."}), 400
+    db.execute(
+        "INSERT INTO company_members (company_id, user_id, permission) VALUES (?,?,?) "
+        "ON CONFLICT(company_id, user_id) DO UPDATE SET permission = excluded.permission",
+        (company_id, user["id"], permission),
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/members/<int:member_id>", methods=["DELETE"])
+@login_required
+@company_required
+@owner_required
+def remove_member(company_id, member_id):
+    db = get_db()
+    db.execute("DELETE FROM company_members WHERE id = ? AND company_id = ?", (member_id, company_id))
     db.commit()
     return jsonify({"ok": True})
 
@@ -567,6 +675,7 @@ def list_accounts(company_id):
 @app.route("/api/companies/<int:company_id>/accounts", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def create_account(company_id):
     data = request.get_json(force=True) or {}
     name = (data.get("name") or "").strip()
@@ -588,6 +697,7 @@ def create_account(company_id):
 @app.route("/api/companies/<int:company_id>/accounts/<int:account_id>", methods=["PUT"])
 @login_required
 @company_required
+@write_required
 def update_account(company_id, account_id):
     data = request.get_json(force=True) or {}
     db = get_db()
@@ -633,6 +743,7 @@ def update_account(company_id, account_id):
 @app.route("/api/companies/<int:company_id>/accounts/<int:account_id>", methods=["DELETE"])
 @login_required
 @company_required
+@write_required
 def delete_account(company_id, account_id):
     db = get_db()
     account = db.execute(
@@ -674,6 +785,7 @@ def list_opening_balances(company_id):
 @app.route("/api/companies/<int:company_id>/opening-balances/bulk", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def set_opening_balances(company_id):
     items = request.get_json(force=True) or []
     db = get_db()
@@ -702,6 +814,7 @@ def set_opening_balances(company_id):
 @app.route("/api/companies/<int:company_id>/opening-balances/<int:ob_id>", methods=["DELETE"])
 @login_required
 @company_required
+@write_required
 def delete_opening_balance(company_id, ob_id):
     db = get_db()
     db.execute("DELETE FROM opening_balances WHERE id = ? AND company_id = ?", (ob_id, company_id))
@@ -731,7 +844,7 @@ def list_transactions(company_id):
     rows = db.execute(
         f"SELECT t.id, t.date, t.desc, t.amount_pence as amountPence, t.debit, t.credit, t.tax_year as taxYear, "
         f"t.vat_rate as vatRate, t.vat_direction as vatDirection, t.confidence, t.journal_id as journalId, "
-        f"t.voided_at as voidedAt, t.voided_by as voidedBy, "
+        f"t.voided_at as voidedAt, t.voided_by as voidedBy, t.reviewed_by as reviewedBy, t.reviewed_at as reviewedAt, "
         f"(SELECT COUNT(*) FROM attachments a WHERE a.transaction_id = t.id) as attachmentCount "
         f"FROM transactions t WHERE t.company_id = ? {voided_clause} ORDER BY t.date",
         (company_id,),
@@ -778,6 +891,7 @@ def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit, t
 @app.route("/api/companies/<int:company_id>/transactions", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def create_transaction(company_id):
     data = request.get_json(force=True) or {}
     db = get_db()
@@ -797,6 +911,7 @@ def create_transaction(company_id):
 @app.route("/api/companies/<int:company_id>/transactions/bulk", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def bulk_create_transactions(company_id):
     items = request.get_json(force=True) or []
     db = get_db()
@@ -822,6 +937,7 @@ def bulk_create_transactions(company_id):
 @app.route("/api/companies/<int:company_id>/transactions/<int:tx_id>", methods=["DELETE"])
 @login_required
 @company_required
+@write_required
 def void_transaction(company_id, tx_id):
     db = get_db()
     row = db.execute(
@@ -843,9 +959,44 @@ def void_transaction(company_id, tx_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/companies/<int:company_id>/transactions/<int:tx_id>/review", methods=["POST"])
+@login_required
+@company_required
+def review_transaction(company_id, tx_id):
+    """Separate from who POSTED a transaction — a second pair of eyes (e.g. an invited
+    accountant) marking it checked. Any access level can review; reviewing isn't a ledger
+    mutation in the accounting sense, just an annotation, so it's not write_required-gated."""
+    db = get_db()
+    row = db.execute("SELECT id FROM transactions WHERE id = ? AND company_id = ?", (tx_id, company_id)).fetchone()
+    if row is None:
+        return jsonify({"error": "Not found."}), 404
+    now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    db.execute(
+        "UPDATE transactions SET reviewed_by = ?, reviewed_at = ? WHERE id = ? AND company_id = ?",
+        (session.get("email", "unknown"), now, tx_id, company_id),
+    )
+    log_audit(db, company_id, "review", "transaction", tx_id, after={"reviewedBy": session.get("email")})
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/transactions/<int:tx_id>/unreview", methods=["POST"])
+@login_required
+@company_required
+def unreview_transaction(company_id, tx_id):
+    db = get_db()
+    db.execute(
+        "UPDATE transactions SET reviewed_by = NULL, reviewed_at = NULL WHERE id = ? AND company_id = ?",
+        (tx_id, company_id),
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/companies/<int:company_id>/transactions/clear", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def clear_transactions(company_id):
     db = get_db()
     locked_until = g.company["locked_until"] or ""
@@ -885,6 +1036,7 @@ def clear_transactions(company_id):
 @app.route("/api/companies/<int:company_id>/journals", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def create_compound_journal(company_id):
     data = request.get_json(force=True) or {}
     date, desc, pivot_account, pivot_side, lines = (
@@ -1074,6 +1226,7 @@ def list_attachments(company_id, tx_id):
 @app.route("/api/companies/<int:company_id>/transactions/<int:tx_id>/attachments", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def upload_attachment(company_id, tx_id):
     db = get_db()
     tx = db.execute("SELECT id FROM transactions WHERE id = ? AND company_id = ?", (tx_id, company_id)).fetchone()
@@ -1179,6 +1332,7 @@ def extract_attachment(company_id, attachment_id):
 @app.route("/api/companies/<int:company_id>/attachments/<int:attachment_id>", methods=["DELETE"])
 @login_required
 @company_required
+@write_required
 def delete_attachment(company_id, attachment_id):
     db = get_db()
     row = db.execute(
@@ -1224,6 +1378,7 @@ def list_contacts(company_id):
 @app.route("/api/companies/<int:company_id>/contacts", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def create_contact(company_id):
     data = request.get_json(force=True) or {}
     name = (data.get("name") or "").strip()
@@ -1241,6 +1396,7 @@ def create_contact(company_id):
 @app.route("/api/companies/<int:company_id>/contacts/<int:contact_id>", methods=["DELETE"])
 @login_required
 @company_required
+@write_required
 def delete_contact(company_id, contact_id):
     db = get_db()
     in_use = db.execute(
@@ -1286,6 +1442,7 @@ def list_invoices_bills(company_id):
 @app.route("/api/companies/<int:company_id>/invoices-bills", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def create_invoice_bill(company_id):
     data = request.get_json(force=True) or {}
     kind, contact_id, date, due_date, desc, amount, account = (
@@ -1311,6 +1468,7 @@ def create_invoice_bill(company_id):
 @app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>/send", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def send_invoice_bill(company_id, doc_id):
     db = get_db()
     doc = db.execute(
@@ -1347,6 +1505,7 @@ def send_invoice_bill(company_id, doc_id):
 @app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>/pay", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def pay_invoice_bill(company_id, doc_id):
     data = request.get_json(force=True) or {}
     payment_date = data.get("date") or datetime.date.today().isoformat()
@@ -1386,6 +1545,7 @@ def pay_invoice_bill(company_id, doc_id):
 @app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>", methods=["DELETE"])
 @login_required
 @company_required
+@write_required
 def delete_invoice_bill(company_id, doc_id):
     db = get_db()
     doc = db.execute(
@@ -1473,6 +1633,7 @@ def list_fixed_assets(company_id):
 @app.route("/api/companies/<int:company_id>/fixed-assets", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def create_fixed_asset(company_id):
     data = request.get_json(force=True) or {}
     name, asset_account, cost, purchase_date, useful_life = (
@@ -1504,6 +1665,7 @@ def create_fixed_asset(company_id):
 @app.route("/api/companies/<int:company_id>/fixed-assets/<int:asset_id>", methods=["DELETE"])
 @login_required
 @company_required
+@write_required
 def delete_fixed_asset(company_id, asset_id):
     db = get_db()
     db.execute("DELETE FROM fixed_assets WHERE id = ? AND company_id = ?", (asset_id, company_id))
@@ -1620,6 +1782,7 @@ def list_bank_lines(company_id):
 @app.route("/api/companies/<int:company_id>/bank-lines/bulk", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def bulk_create_bank_lines(company_id):
     items = request.get_json(force=True) or []
     db = get_db()
@@ -1641,6 +1804,7 @@ def bulk_create_bank_lines(company_id):
 @app.route("/api/companies/<int:company_id>/bank-lines/<int:line_id>", methods=["DELETE"])
 @login_required
 @company_required
+@write_required
 def delete_bank_line(company_id, line_id):
     db = get_db()
     db.execute("DELETE FROM bank_lines WHERE id = ? AND company_id = ?", (line_id, company_id))
@@ -1651,6 +1815,7 @@ def delete_bank_line(company_id, line_id):
 @app.route("/api/companies/<int:company_id>/bank-lines/<int:line_id>/match", methods=["POST"])
 @login_required
 @company_required
+@write_required
 def match_bank_line(company_id, line_id):
     data = request.get_json(force=True) or {}
     tx_id = data.get("transactionId")

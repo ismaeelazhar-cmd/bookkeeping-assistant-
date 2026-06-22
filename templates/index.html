@@ -142,6 +142,7 @@
     <div>
       <h1 id="company-name-header">Bookkeeping — Double Entry Ledger</h1>
       <div class="sub" style="margin-bottom:0;">Enter a transaction once. It posts as a Debit and a Credit, and shows up on both accounts' T-tables.</div>
+      <div id="permission-banner" class="pill" style="display:none; margin-top:6px;"></div>
     </div>
     <div class="who">
       <span id="who-email-2"></span> ·
@@ -544,6 +545,18 @@
     <table class="journal"><thead><tr><th>Type</th><th>Account</th><th>Date</th><th>Description</th><th class="num">Amount</th><th>Why</th></tr></thead><tbody id="anomaly-body"></tbody></table>
   </div>
 
+  <div class="panel" style="margin-top:20px;">
+    <h2>Team</h2>
+    <div class="sub" style="margin-bottom:12px;">Invite an accountant or colleague to this company. They need an existing account on this app first — invite by the email they signed up with. "View" can read everything; "post" can also enter/edit transactions and everything else; only the owner can manage the team or delete the company.</div>
+    <table class="inbox"><thead><tr><th>Email</th><th>Permission</th><th></th></tr></thead><tbody id="team-body"></tbody></table>
+    <div id="team-owner-controls" class="row2" style="margin-top:12px;">
+      <div><label>Invite by email</label><input type="email" id="team-invite-email" placeholder="colleague@example.com"></div>
+      <div><label>Permission</label><select id="team-invite-permission"><option value="view">View</option><option value="comment">Comment</option><option value="post">Post (full access)</option></select></div>
+    </div>
+    <button class="btn-primary" id="team-invite-btn" onclick="inviteMember()">Invite</button>
+    <div id="team-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+  </div>
+
   <div class="panel" id="section-audit" style="margin-top:20px; scroll-margin-top:60px;">
     <h2>Audit Log <span class="pill" id="audit-count"></span></h2>
     <div class="sub" style="margin-bottom:12px;">Every transaction created or deleted, who did it, and when. This list cannot be edited from the app — it's the record of what actually happened.</div>
@@ -656,8 +669,8 @@ function renderCompanyList() {
   }
   list.innerHTML = companies.map(c => `
     <div class="company-card" onclick="openCompany(${c.id})">
-      <span>${escapeHtml(c.name)}</span>
-      <button class="btn-danger" onclick="event.stopPropagation(); deleteCompany(${c.id}, '${c.name.replace(/'/g, "\\'")}')">Delete</button>
+      <span>${escapeHtml(c.name)} ${c.permission !== 'owner' ? `<span class="pill">shared (${c.permission})</span>` : ''}</span>
+      ${c.permission === 'owner' ? `<button class="btn-danger" onclick="event.stopPropagation(); deleteCompany(${c.id}, '${c.name.replace(/'/g, "\\'")}')">Delete</button>` : ''}
     </div>`).join('');
 }
 
@@ -696,6 +709,7 @@ async function openCompany(id) {
   document.getElementById('cj-date').valueAsDate = new Date();
   recentlyPosted = []; renderUndoBar();
   askHistory = []; renderAskHistory();
+  applyPermissionBanner();
   show('app-screen');
   await refreshAll();
   addOpeningBalanceRow();
@@ -786,9 +800,11 @@ let contacts = [];
 let invoicesBills = [];
 let agingReport = { invoice: {}, bill: {} };
 
+let teamMembers = [];
+
 async function refreshAll() {
   const cid = currentCompany.id;
-  [transactions, presets, chartAccounts, bankLines, fixedAssets, openingBalances, contacts, invoicesBills, agingReport] = await Promise.all([
+  [transactions, presets, chartAccounts, bankLines, fixedAssets, openingBalances, contacts, invoicesBills, agingReport, teamMembers] = await Promise.all([
     api(`/api/companies/${cid}/transactions`),
     api(`/api/companies/${cid}/presets`),
     api(`/api/companies/${cid}/accounts`),
@@ -797,11 +813,13 @@ async function refreshAll() {
     api(`/api/companies/${cid}/opening-balances`),
     api(`/api/companies/${cid}/contacts`),
     api(`/api/companies/${cid}/invoices-bills`),
-    api(`/api/companies/${cid}/aging-report`)
+    api(`/api/companies/${cid}/aging-report`),
+    api(`/api/companies/${cid}/members`)
   ]);
   populateAccountSelects();
   populateContactSelect();
   render();
+  renderTeam();
   loadAuditLog();
 }
 
@@ -940,6 +958,16 @@ async function deleteTransaction(id) {
   await refreshAll();
 }
 
+async function reviewTransaction(id) {
+  await api(`/api/companies/${currentCompany.id}/transactions/${id}/review`, { method: 'POST' });
+  await refreshAll();
+}
+
+async function unreviewTransaction(id) {
+  await api(`/api/companies/${currentCompany.id}/transactions/${id}/unreview`, { method: 'POST' });
+  await refreshAll();
+}
+
 async function clearAll() {
   const result = await api(`/api/companies/${currentCompany.id}/transactions/clear`, { method: 'POST' });
   if (result.skippedLocked) alert(`${result.skippedLocked} transaction(s) in locked periods were kept; ${result.deleted} were cleared.`);
@@ -1019,6 +1047,9 @@ function renderJournal() {
       <td class="num">${fmt(t.amount)}</td>
       <td>${t.vatDirection ? `<span class="pill">${t.vatRate}% ${t.vatDirection}</span>` : ''}</td>
       <td>
+        ${t.reviewedBy
+          ? `<span class="confidence high" title="Reviewed by ${escapeHtml(t.reviewedBy)} on ${fmtDate(t.reviewedAt.slice(0,10))}">reviewed ✓</span> <a href="#" onclick="unreviewTransaction(${t.id}); return false;" style="font-size:11px; color:var(--muted);">undo</a>`
+          : `<button class="btn-secondary" onclick="reviewTransaction(${t.id})">Mark reviewed</button>`}
         <button class="btn-secondary" onclick="openAttachmentsModal(${t.id}, '${t.desc.replace(/'/g, "\\'")}')">📎${t.attachmentCount ? ' ' + t.attachmentCount : ''}</button>
         <button class="btn-danger" onclick="deleteTransaction(${t.id})">Delete</button>
       </td>
@@ -2368,6 +2399,56 @@ async function deleteAttachmentItem(id) {
   await api(`/api/companies/${currentCompany.id}/attachments/${id}`, { method: 'DELETE' });
   await renderAttachmentsModal();
   await refreshAll();
+}
+
+// ---------- Team & permissions ----------
+
+function applyPermissionBanner() {
+  const banner = document.getElementById('permission-banner');
+  const perm = currentCompany.permission || 'owner';
+  if (perm === 'owner') { banner.style.display = 'none'; return; }
+  banner.style.display = 'inline-block';
+  if (perm === 'post') {
+    banner.textContent = 'Shared with you — full access, but you are not the owner (can\'t manage the team or delete this company).';
+  } else {
+    banner.textContent = `Shared with you — ${perm}-only access. Posting/editing is disabled; you'll see a permission error if you try.`;
+  }
+}
+
+function renderTeam() {
+  const body = document.getElementById('team-body');
+  body.innerHTML = teamMembers.length ? teamMembers.map(m => `
+    <tr>
+      <td>${escapeHtml(m.email)}</td>
+      <td>${escapeHtml(m.permission)}</td>
+      <td>${currentCompany.permission === 'owner' ? `<button class="btn-danger" onclick="removeMember(${m.id})">✕</button>` : ''}</td>
+    </tr>`).join('') : '<tr><td colspan="3" class="empty">No one else has access to this company yet.</td></tr>';
+
+  const isOwner = currentCompany.permission === 'owner';
+  document.getElementById('team-owner-controls').style.display = isOwner ? '' : 'none';
+  document.getElementById('team-invite-btn').style.display = isOwner ? '' : 'none';
+  document.getElementById('team-status').textContent = isOwner ? '' : 'Only the company owner can manage the team.';
+}
+
+async function inviteMember() {
+  const email = document.getElementById('team-invite-email').value.trim();
+  const permission = document.getElementById('team-invite-permission').value;
+  const statusEl = document.getElementById('team-status');
+  if (!email) { statusEl.textContent = 'Enter an email address.'; return; }
+  try {
+    await api(`/api/companies/${currentCompany.id}/members`, { method: 'POST', body: JSON.stringify({ email, permission }) });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = `Invited ${email} as ${permission}.`;
+  document.getElementById('team-invite-email').value = '';
+  teamMembers = await api(`/api/companies/${currentCompany.id}/members`);
+  renderTeam();
+}
+
+async function removeMember(memberId) {
+  if (!confirm('Remove this person\'s access to this company?')) return;
+  await api(`/api/companies/${currentCompany.id}/members/${memberId}`, { method: 'DELETE' });
+  teamMembers = await api(`/api/companies/${currentCompany.id}/members`);
+  renderTeam();
 }
 
 // ---------- Audit log ----------
