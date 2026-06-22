@@ -259,8 +259,6 @@
       <datalist id="account-list"></datalist>
       <label>Default credit account <span style="color:var(--muted); font-weight:400;">(auto-fills credit when posting)</span></label>
       <select id="f-default-credit" onchange="saveSettings()"></select>
-      <label>Tax year (optional)</label>
-      <input type="text" id="f-taxyear" placeholder="e.g. 2025/26">
 
       <label>VAT</label>
       <div class="row2">
@@ -1122,7 +1120,6 @@ async function addTransaction() {
   const debit = document.getElementById('f-debit').value.trim();
   let credit = document.getElementById('f-credit').value.trim();
   if (!credit) credit = currentCompany.default_credit_account || '';
-  const taxYear = document.getElementById('f-taxyear').value.trim();
   const errEl = document.getElementById('form-error');
 
   if (!date || !desc || !amount || amount <= 0 || !debit || !credit) {
@@ -1141,7 +1138,7 @@ async function addTransaction() {
   let result;
   try {
     result = await api(`/api/companies/${currentCompany.id}/transactions`, {
-      method: 'POST', body: JSON.stringify({ date, desc, amount, debit, credit, taxYear, vatRate, vatDirection, fund })
+      method: 'POST', body: JSON.stringify({ date, desc, amount, debit, credit, vatRate, vatDirection, fund })
     });
   } catch (e) { errEl.textContent = e.message; return; }
 

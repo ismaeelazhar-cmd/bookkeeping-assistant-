@@ -2,6 +2,7 @@ import os
 import sqlite3
 import secrets
 import json
+import logging
 import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -23,6 +24,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from cryptography.fernet import Fernet, InvalidToken
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "data.sqlite"
 UPLOADS_DIR = BASE_DIR / "uploads"
@@ -31,7 +34,12 @@ MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # 10MB
 
 def load_or_create_secret_key():
     """Stage 7: persist the session secret to disk so a server restart doesn't log
-    everyone out. The file is gitignored, same treatment as data.sqlite."""
+    everyone out. The file is gitignored, same treatment as data.sqlite.
+    A SECRET_KEY env var (set by the host platform / deploy config) takes priority over the
+    file, so production deployments aren't forced to rely on a key written to local disk."""
+    env_key = os.environ.get("SECRET_KEY")
+    if env_key:
+        return env_key
     secret_path = BASE_DIR / ".secret_key"
     if secret_path.exists():
         return secret_path.read_text().strip()
@@ -81,6 +89,7 @@ def get_db():
         g.db = sqlite3.connect(DB_PATH)
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA foreign_keys = ON")
+        g.db.execute("PRAGMA journal_mode = WAL")
     return g.db
 
 
@@ -166,6 +175,7 @@ def init_db():
             ai_api_key TEXT DEFAULT '',
             locked_until TEXT DEFAULT '',
             period_start_date TEXT DEFAULT '',
+            currency TEXT NOT NULL DEFAULT 'GBP',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -280,6 +290,10 @@ def init_db():
             type TEXT NOT NULL DEFAULT 'customer',
             email TEXT DEFAULT '',
             phone TEXT DEFAULT '',
+            address_line1 TEXT DEFAULT '',
+            address_city TEXT DEFAULT '',
+            address_postcode TEXT DEFAULT '',
+            address_country TEXT DEFAULT '',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -388,6 +402,14 @@ def init_db():
     )
     if "fund_id" not in tx_cols:
         db.execute("ALTER TABLE transactions ADD COLUMN fund_id INTEGER DEFAULT NULL REFERENCES funds(id)")
+    if "currency" not in company_cols:
+        db.execute("ALTER TABLE companies ADD COLUMN currency TEXT NOT NULL DEFAULT 'GBP'")
+    contact_cols = {row[1] for row in db.execute("PRAGMA table_info(contacts)").fetchall()}
+    if "address_line1" not in contact_cols:
+        db.execute("ALTER TABLE contacts ADD COLUMN address_line1 TEXT DEFAULT ''")
+        db.execute("ALTER TABLE contacts ADD COLUMN address_city TEXT DEFAULT ''")
+        db.execute("ALTER TABLE contacts ADD COLUMN address_postcode TEXT DEFAULT ''")
+        db.execute("ALTER TABLE contacts ADD COLUMN address_country TEXT DEFAULT ''")
     db.execute("DELETE FROM schema_meta")
     db.execute("INSERT INTO schema_meta (version) VALUES (?)", (SCHEMA_VERSION,))
     db.commit()
@@ -439,6 +461,8 @@ def guess_account_type(name):
         return "current_liability"
     if "receivable" in n or "recievable" in n:
         return "current_asset"
+    if "current portion" in n:
+        return "current_liability"
     if "sale" in n or "revenue" in n or "income" in n:
         return "revenue"
     if "cost of sale" in n or "purchase" in n:
@@ -513,6 +537,23 @@ def log_audit(db, company_id, action, entity_type, entity_id, before=None, after
             json.dumps(after) if after is not None else "",
         ),
     )
+
+
+def compute_tax_year(date_str, period_start_date):
+    """Derive the tax year label server-side from the transaction date and the company's fiscal
+    year anchor (companies.period_start_date), rather than trusting a client-supplied string —
+    a client can't be allowed to pick its own tax year. If no anchor is set, falls back to the
+    calendar year. Anchor month/day define the fiscal year start; the anchor's own year is
+    irrelevant, just its month/day."""
+    tx_date = datetime.date.fromisoformat(date_str)
+    if not period_start_date:
+        return str(tx_date.year)
+    anchor = datetime.date.fromisoformat(period_start_date)
+    fy_start_this_year = datetime.date(tx_date.year, anchor.month, anchor.day)
+    start_year = tx_date.year if tx_date >= fy_start_this_year else tx_date.year - 1
+    if anchor.month == 1 and anchor.day == 1:
+        return str(start_year)
+    return f"{start_year}-{start_year + 1}"
 
 
 def is_locked(company_row, date_str):
@@ -1333,11 +1374,15 @@ class LedgerError(Exception):
         self.status = status
 
 
-def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit, tax_year="",
+def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit,
                              vat_rate=0, vat_direction="", confidence="high", journal_id=None, fund_id=None):
     """Shared insert path for anything that writes to the ledger — manual entries, bulk
     imports, invoice/bill send-and-pay postings, and (Stage 2) compound journal legs — so
-    they all get the same account resolution, locking check, preset learning, and audit trail."""
+    they all get the same account resolution, locking check, preset learning, and audit trail.
+
+    tax_year is NOT a caller-supplied parameter: a client (or a bulk-import row) could otherwise
+    claim any tax year it likes. It's always derived here from the transaction date against the
+    company's own fiscal-year anchor (companies.period_start_date)."""
     if not all([date, desc, debit, credit]) or not amount or float(amount) <= 0 or debit == credit:
         raise LedgerError("Invalid transaction.")
     if not _valid_vat_direction(vat_direction):
@@ -1347,6 +1392,16 @@ def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit, t
 
     debit = resolve_account(db, company_id, debit)
     credit = resolve_account(db, company_id, credit)
+
+    if vat_direction:
+        credit_type = get_account_by_name(db, company_id, credit)["type"]
+        debit_type = get_account_by_name(db, company_id, debit)["type"]
+        if credit_type == "revenue" and vat_direction != "output":
+            raise LedgerError('VAT on a sale (credit to a revenue account) must use vatDirection "output".')
+        if debit_type in ("expense", "cogs") and vat_direction != "input":
+            raise LedgerError('VAT on a purchase (debit to an expense/COGS account) must use vatDirection "input".')
+
+    tax_year = compute_tax_year(date, g.company["period_start_date"])
     cur = db.execute(
         "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1374,7 +1429,7 @@ def create_transaction(company_id):
         fund_id = resolve_fund_id(db, company_id, data.get("fund"))
         tx_id = post_ledger_transaction(
             db, company_id, data.get("date"), data.get("desc"), data.get("amount"),
-            data.get("debit"), data.get("credit"), data.get("taxYear", ""),
+            data.get("debit"), data.get("credit"),
             float(data.get("vatRate") or 0), data.get("vatDirection") or "",
             data.get("confidence") or "high", fund_id=fund_id,
         )
@@ -1398,7 +1453,7 @@ def bulk_create_transactions(company_id):
             fund_id = resolve_fund_id(db, company_id, it.get("fund"))
             post_ledger_transaction(
                 db, company_id, it.get("date"), it.get("desc"), it.get("amount"),
-                it.get("debit"), it.get("credit"), it.get("taxYear", ""),
+                it.get("debit"), it.get("credit"),
                 float(it.get("vatRate") or 0), it.get("vatDirection") or "",
                 it.get("confidence") or "high", fund_id=fund_id,
             )
@@ -1543,7 +1598,7 @@ def create_compound_journal(company_id):
                 debit, credit = pivot_account, account
             tx_id = post_ledger_transaction(
                 db, company_id, date, f"{desc} ({account})", amount, debit, credit,
-                data.get("taxYear", ""), journal_id=journal_id,
+                journal_id=journal_id,
             )
             posted.append(tx_id)
     except LedgerError as e:
@@ -1561,6 +1616,7 @@ def create_compound_journal(company_id):
 @login_required
 @company_required
 @write_required
+@rate_limit(max_attempts=20, window_seconds=3600)
 def ai_categorize(company_id):
     data = request.get_json(force=True) or {}
     text = (data.get("text") or "").strip()
@@ -1673,6 +1729,7 @@ def call_plaid(company, path, payload):
 @login_required
 @company_required
 @write_required
+@rate_limit(max_attempts=20, window_seconds=3600)
 def ask_ledger(company_id):
     """Stage 5 flagship feature: natural-language Q&A over this company's actual ledger.
     The model only sees a compact CSV export built fresh per request — no separate index to
@@ -2010,7 +2067,7 @@ def send_invoice_bill(company_id, doc_id):
     try:
         tx_id = post_ledger_transaction(
             db, company_id, doc["date"], f'{"Invoice" if doc["kind"] == "invoice" else "Bill"}: {doc["desc"]}',
-            amount, debit, credit, "", doc["vat_rate"], vat_direction if doc["vat_rate"] else "",
+            amount, debit, credit, vat_rate=doc["vat_rate"], vat_direction=vat_direction if doc["vat_rate"] else "",
         )
     except LedgerError as e:
         return jsonify({"error": e.message}), e.status
