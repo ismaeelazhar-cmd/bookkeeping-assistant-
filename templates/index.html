@@ -743,6 +743,13 @@
       </div>
     </div>
 
+    <div class="panel" style="margin-top:20px;">
+      <h2>Comparative Period</h2>
+      <div class="sub" style="margin-bottom:12px;">This period's P&amp;L vs. the same dates one year earlier (the From/To above shifted back exactly 365 days), with £ and % variance. Uses the same period set in Financial Statements above — Generate that first.</div>
+      <button class="btn-secondary" onclick="renderComparativePeriod()">Compare to last year</button>
+      <table class="trial" id="comparative-table" style="margin-top:10px;"></table>
+    </div>
+
     <div class="panel" id="fund-accounting-panels" style="margin-top:20px; display:none;">
       <h2>Funds</h2>
       <div class="sub" style="margin-bottom:12px;">Restricted/designated funds need a deliberate type — they don't auto-create from typing like accounts do.</div>
@@ -794,6 +801,7 @@
       </div>
       <button class="btn-primary" onclick="renderVatReturn()">Calculate VAT Return</button>
       <table class="trial" style="margin-top:14px;"><tbody id="vat-return-body"></tbody></table>
+      <div id="vat-reconciliation" style="margin-top:10px;"></div>
     </div>
 
     <div class="panel" style="margin-top:20px;">
@@ -2626,6 +2634,44 @@ async function topUpPettyCash() {
   await refreshAll();
 }
 
+function shiftDateOneYearBack(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const year = y - 1;
+  const daysInMonth = new Date(year, m, 0).getDate(); // handles 29 Feb -> 28 Feb in a non-leap year
+  return `${year}-${String(m).padStart(2, '0')}-${String(Math.min(d, daysInMonth)).padStart(2, '0')}`;
+}
+
+function renderComparativePeriod() {
+  const table = document.getElementById('comparative-table');
+  if (!table) return;
+  const from = document.getElementById('fs-from').value;
+  const to = document.getElementById('fs-to').value;
+  if (!from || !to) { table.innerHTML = '<tr><td class="empty">Set a From and To date in Financial Statements above, then Generate, before comparing.</td></tr>'; return; }
+
+  const priorFrom = shiftDateOneYearBack(from);
+  const priorTo = shiftDateOneYearBack(to);
+  const thisYearTx = transactions.filter(t => t.date >= from && t.date <= to);
+  const lastYearTx = transactions.filter(t => t.date >= priorFrom && t.date <= priorTo);
+  const thisYearAccounts = buildAccountsFromTx(thisYearTx, false);
+  const lastYearAccounts = buildAccountsFromTx(lastYearTx, false);
+
+  const names = new Set([...Object.keys(thisYearAccounts), ...Object.keys(lastYearAccounts)]
+    .filter(n => ['revenue', 'cogs', 'expense'].includes(getAccountType(n))));
+  if (!names.size) { table.innerHTML = '<tr><td class="empty">No revenue/COGS/expense activity in either period.</td></tr>'; return; }
+
+  let html = `<thead><tr><td><b>Account</b></td><td class="num"><b>${fmtDate(from)} – ${fmtDate(to)}</b></td><td class="num"><b>${fmtDate(priorFrom)} – ${fmtDate(priorTo)}</b></td><td class="num"><b>£ Variance</b></td><td class="num"><b>% Variance</b></td></tr></thead><tbody>`;
+  for (const name of [...names].sort()) {
+    const type = getAccountType(name);
+    const thisVal = thisYearAccounts[name] ? accountNetBalance(thisYearAccounts[name], type) : 0;
+    const lastVal = lastYearAccounts[name] ? accountNetBalance(lastYearAccounts[name], type) : 0;
+    const variance = thisVal - lastVal;
+    const variancePct = lastVal ? (variance / Math.abs(lastVal) * 100) : null;
+    html += `<tr><td>${escapeHtml(name)}</td><td class="num">${fmt(thisVal)}</td><td class="num">${fmt(lastVal)}</td><td class="num">${fmt(variance)}</td><td class="num">${variancePct === null ? 'n/a' : variancePct.toFixed(1) + '%'}</td></tr>`;
+  }
+  html += '</tbody>';
+  table.innerHTML = html;
+}
+
 function renderRatios() {
   const table = document.getElementById('ratios-table');
   if (!table) return;
@@ -2934,6 +2980,33 @@ function renderVatReturn() {
     lineRow('Box 7 — Total value of purchases, excluding VAT', netPurchases),
   ].join('');
   if (!vatTxns.length) body.innerHTML = '<tr><td class="empty">No VAT-tagged transactions in this period.</td></tr>';
+
+  renderVatReconciliation(from, to, netVatDue);
+}
+
+function renderVatReconciliation(from, to, netVatDueFromBoxes) {
+  const el = document.getElementById('vat-reconciliation');
+  if (!el) return;
+  // The Box 5 figure above is built only from vat-tagged transactions. This check walks every
+  // transaction touching the VAT Control Account in the same period — including anything posted
+  // there directly (a manual correction, an opening balance) that wouldn't show up in the boxes
+  // — and confirms the two agree. A mismatch means something was posted to VAT Control outside
+  // the normal VAT mechanism.
+  let ledgerMovement = 0; // credit-normal: current_liability
+  for (const t of transactions) {
+    if ((!from || t.date >= from) && (!to || t.date <= to)) {
+      if (t.credit === VAT_ACCOUNT) ledgerMovement += t.amount;
+      if (t.debit === VAT_ACCOUNT) ledgerMovement -= t.amount;
+    }
+  }
+  const diff = ledgerMovement - netVatDueFromBoxes;
+  const matches = Math.abs(diff) < 0.005;
+  el.innerHTML = `
+    <div class="sub" style="margin:0;">VAT Control Account net movement this period: <span class="money">${fmt(ledgerMovement)}</span></div>
+    <div class="sub" style="margin:2px 0 0; color:${matches ? 'var(--good)' : 'var(--bad)'};">
+      ${matches ? 'Reconciles to the return — nothing posted to VAT Control outside the VAT-tagged transactions above.'
+                 : `Does not reconcile: ${fmt(Math.abs(diff))} was posted to VAT Control Account in this period outside the VAT-tagged transactions above — check for manual entries or opening balances on that account.`}
+    </div>`;
 }
 
 // ---------- Budget vs Actual ----------
