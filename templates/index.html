@@ -180,8 +180,9 @@
   </nav>
 
   <div class="layout" id="section-ledger" style="scroll-margin-top:60px;">
-    <div class="panel">
-      <h2>New Transaction</h2>
+    <div class="panel" onkeydown="handleRapidEntryKeydown(event)">
+      <h2>New Transaction <span style="font-size:10px; color:var(--muted); text-transform:none; font-weight:400;">(Ctrl/Cmd+Enter to post)</span></h2>
+      <div id="undo-bar" style="margin-bottom:8px;"></div>
       <label>Date</label>
       <input type="date" id="f-date">
       <label>Description</label>
@@ -661,6 +662,7 @@ async function openCompany(id) {
   document.getElementById('ob-rows').innerHTML = ''; obRowCount = 0;
   document.getElementById('cj-rows').innerHTML = ''; cjRowCount = 0;
   document.getElementById('cj-date').valueAsDate = new Date();
+  recentlyPosted = []; renderUndoBar();
   show('app-screen');
   await refreshAll();
   addOpeningBalanceRow();
@@ -787,11 +789,14 @@ async function addTransaction() {
 
   errEl.textContent = '';
 
+  let result;
   try {
-    await api(`/api/companies/${currentCompany.id}/transactions`, {
+    result = await api(`/api/companies/${currentCompany.id}/transactions`, {
       method: 'POST', body: JSON.stringify({ date, desc, amount, debit, credit, taxYear, vatRate, vatDirection })
     });
   } catch (e) { errEl.textContent = e.message; return; }
+
+  pushUndoStack({ id: result.id, desc, amount });
 
   document.getElementById('f-desc').value = '';
   document.getElementById('f-amount').value = '';
@@ -802,6 +807,43 @@ async function addTransaction() {
   document.getElementById('suggest-hint').textContent = '';
   document.getElementById('vat-preview').textContent = '';
   await refreshAll();
+  document.getElementById('f-desc').focus(); // rapid entry: stay in the form, ready for the next line
+}
+
+// ---------- Keyboard rapid entry ----------
+
+let recentlyPosted = [];
+
+function pushUndoStack(entry) {
+  recentlyPosted.unshift(entry);
+  recentlyPosted = recentlyPosted.slice(0, 5);
+  renderUndoBar();
+}
+
+function renderUndoBar() {
+  const bar = document.getElementById('undo-bar');
+  if (!recentlyPosted.length) { bar.innerHTML = ''; return; }
+  bar.innerHTML = recentlyPosted.map(e => `
+    <span class="pill" style="margin-right:6px;">
+      ${escapeHtml(e.desc)} (${fmt(e.amount)})
+      <a href="#" onclick="undoPostedEntry(${e.id}); return false;" style="color:var(--bad); margin-left:4px;" title="Undo this entry">↩</a>
+    </span>`).join('');
+}
+
+async function undoPostedEntry(id) {
+  try {
+    await api(`/api/companies/${currentCompany.id}/transactions/${id}`, { method: 'DELETE' });
+  } catch (e) { alert(e.message); return; }
+  recentlyPosted = recentlyPosted.filter(e => e.id !== id);
+  renderUndoBar();
+  await refreshAll();
+}
+
+function handleRapidEntryKeydown(e) {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    e.preventDefault();
+    addTransaction();
+  }
 }
 
 function updateVatPreview() {
