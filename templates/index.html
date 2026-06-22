@@ -775,6 +775,13 @@
       <table class="trial" id="tax-computation-table" style="margin-top:10px;"></table>
     </div>
 
+    <div class="panel" style="margin-top:20px;">
+      <h2>Self Assessment Helper (SA103)</h2>
+      <div class="sub" style="margin-bottom:12px;">For sole traders: maps P&amp;L accounts to SA103 self-employment boxes by keyword, using the Financial Statements period above. A starting point for your return, not a substitute for checking each account lands in the right box.</div>
+      <button class="btn-secondary" onclick="renderSelfAssessment()">Map to SA103</button>
+      <table class="trial" id="sa103-table" style="margin-top:10px;"></table>
+    </div>
+
     <div class="panel" id="fund-accounting-panels" style="margin-top:20px; display:none;">
       <h2>Funds</h2>
       <div class="sub" style="margin-bottom:12px;">Restricted/designated funds need a deliberate type — they don't auto-create from typing like accounts do.</div>
@@ -2684,6 +2691,57 @@ function shiftDateOneYearBack(dateStr) {
   const year = y - 1;
   const daysInMonth = new Date(year, m, 0).getDate(); // handles 29 Feb -> 28 Feb in a non-leap year
   return `${year}-${String(m).padStart(2, '0')}-${String(Math.min(d, daysInMonth)).padStart(2, '0')}`;
+}
+
+const SA103_BOXES = [
+  { box: 'Box 9 — Turnover', match: () => false, fallback: 'revenue' },
+  { box: 'Box 16 — Cost of goods bought for resale', match: () => false, fallback: 'cogs' },
+  { box: 'Box 17 — Car, van and travel expenses', match: /travel|mileage|fuel|vehicle|parking/i },
+  { box: 'Box 18 — Wages, salaries and other staff costs', match: /salary|salaries|wage|staff|payroll|ni payable|paye payable|pension payable/i },
+  { box: 'Box 19 — Rent, rates, power and insurance costs', match: /rent|rates|insurance|electric|gas|utility|utilities/i },
+  { box: 'Box 20 — Repairs and renewals of property and equipment', match: /repair|renewal|maintenance/i },
+  { box: 'Box 21 — Phone, fax, stationery and other office costs', match: /phone|telephone|stationery|postage|software|subscription|office/i },
+  { box: 'Box 22 — Advertising and business entertainment costs', match: /advertis|marketing|entertain/i },
+  { box: 'Box 23 — Interest on bank and other loans', match: /loan interest|interest/i },
+  { box: 'Box 24 — Bank, credit card and other financial charges', match: /bank charge|card charge|financial charge|merchant fee/i },
+  { box: 'Box 25 — Accountancy, legal and other professional fees', match: /accountan|legal|solicitor|professional fee/i },
+  { box: 'Box 28 — Other business expenses', match: () => true }, // catch-all, checked last
+];
+
+function mapAccountToSA103Box(name, type) {
+  if (type === 'revenue') return 'Box 9 — Turnover';
+  if (type === 'cogs') return 'Box 16 — Cost of goods bought for resale';
+  for (const entry of SA103_BOXES) {
+    if (entry.match instanceof RegExp && entry.match.test(name)) return entry.box;
+  }
+  return 'Box 28 — Other business expenses';
+}
+
+function renderSelfAssessment() {
+  const table = document.getElementById('sa103-table');
+  if (!table) return;
+  const from = document.getElementById('fs-from').value;
+  const to = document.getElementById('fs-to').value;
+  const periodTx = transactions.filter(t => (!from || t.date >= from) && (!to || t.date <= to));
+  const periodAccounts = buildAccountsFromTx(periodTx, false);
+
+  const byBox = {};
+  for (const name of Object.keys(periodAccounts)) {
+    const type = getAccountType(name);
+    if (type !== 'revenue' && type !== 'cogs' && type !== 'expense') continue;
+    const balance = accountNetBalance(periodAccounts[name], type);
+    const box = mapAccountToSA103Box(name, type);
+    if (!byBox[box]) byBox[box] = { total: 0, accounts: [] };
+    byBox[box].total += balance;
+    byBox[box].accounts.push(name);
+  }
+
+  const boxOrder = ['Box 9 — Turnover', 'Box 16 — Cost of goods bought for resale', ...SA103_BOXES.slice(2).map(b => b.box)];
+  const rows = boxOrder.filter(box => byBox[box]).map(box => {
+    const b = byBox[box];
+    return `<tr><td>${escapeHtml(box)}<div class="sub" style="margin:0;">${b.accounts.map(escapeHtml).join(', ')}</div></td><td class="num">${fmt(b.total)}</td></tr>`;
+  });
+  table.innerHTML = rows.length ? rows.join('') : '<tr><td class="empty">No revenue/expense activity in this period.</td></tr>';
 }
 
 function renderTaxComputation() {
