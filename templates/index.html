@@ -27,17 +27,33 @@
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    font-family: "Iowan Old Style", "Georgia", "Times New Roman", serif;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     background: var(--bg);
     color: var(--text);
     padding: 28px;
     line-height: 1.45;
   }
-  h1, h2 { font-family: Georgia, "Iowan Old Style", "Times New Roman", serif; font-weight: 600; }
+  /* One consistent typeface app-wide — every element used to inherit the browser default serif
+     unless something overrode it locally; h1/h2 previously forced Georgia, which clashed with
+     the sans-serif body and any element that didn't set a font-family at all. */
+  h1, h2, h3, table, input, select, textarea, button { font-family: inherit; }
+  h1, h2 { font-weight: 600; }
   h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
   .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
   .layout { display: grid; grid-template-columns: 380px 1fr; gap: 20px; align-items: start; }
+
+  nav.page-tabs {
+    position: sticky; top: 0; z-index: 10; background: var(--bg);
+    padding: 10px 0; margin-bottom: 16px; border-bottom: 1px solid var(--border);
+    display: flex; gap: 4px; flex-wrap: wrap; font-size: 13px;
+  }
+  nav.page-tabs a {
+    color: var(--text); text-decoration: none; padding: 8px 14px; border-radius: 7px;
+    font-weight: 600; transition: background .12s ease;
+  }
+  nav.page-tabs a:hover { background: var(--panel-soft); }
+  nav.page-tabs a.nav-active { background: var(--accent-soft); color: var(--accent-hover); }
+  .kpi-card { transition: box-shadow .12s ease; }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; box-shadow: 0 1px 2px rgba(43,40,37,0.03); }
   .panel h2 { font-size: 13px; margin: 0 0 12px; color: var(--accent); text-transform: uppercase; letter-spacing: .07em; font-weight: 700; }
@@ -192,113 +208,468 @@
     <div class="who">
       <input type="search" id="global-search" placeholder="Search transactions, accounts, contacts…"
              oninput="runGlobalSearch()" style="width:220px; display:inline-block; margin-right:10px; vertical-align:middle;">
-      <span id="who-email-2"></span> ·
-      <a href="#" onclick="goToCompanyPicker()" style="color:var(--accent);">Switch company</a> ·
-      <a href="#" onclick="logout(event)" style="color:var(--muted);">Log out</a>
+      <span id="who-email-2" style="margin-right:10px; color:var(--muted); font-size:13px;"></span>
+      <button class="btn-secondary" style="margin-top:0;" onclick="goToCompanyPicker()">Switch company</button>
+      <button class="btn-secondary" style="margin-top:0;" onclick="logout(event)">Log out</button>
     </div>
   </div>
   <div id="global-search-results" style="display:none; margin-bottom:16px;"></div>
+  <div id="toast-container" style="position:fixed; top:16px; right:16px; z-index:200; display:flex; flex-direction:column; gap:8px; max-width:340px;"></div>
 
-  <div id="dashboard" class="row2" style="grid-template-columns: repeat(4, 1fr); margin-bottom:16px;">
-    <div class="panel" style="margin:0;">
-      <div class="sub" style="margin:0;">Cash position</div>
-      <div style="font-size:20px; font-weight:700;" id="dash-cash">—</div>
-    </div>
-    <div class="panel" style="margin:0;">
-      <div class="sub" style="margin:0;">Outstanding receivables</div>
-      <div style="font-size:20px; font-weight:700; color:var(--debit);" id="dash-receivables">—</div>
-    </div>
-    <div class="panel" style="margin:0;">
-      <div class="sub" style="margin:0;">Outstanding payables</div>
-      <div style="font-size:20px; font-weight:700; color:var(--credit);" id="dash-payables">—</div>
-    </div>
-    <div class="panel" style="margin:0;">
-      <div class="sub" style="margin:0;">Net profit (all time)</div>
-      <div style="font-size:20px; font-weight:700;" id="dash-profit">—</div>
-    </div>
-  </div>
-
-  <div class="panel" id="section-ask" style="margin-bottom:16px; scroll-margin-top:60px;">
-    <h2>Ask Your Ledger</h2>
-    <div class="sub" style="margin-bottom:10px;">Ask a plain-English question — e.g. "how much did I spend on travel last quarter" or "what's my biggest expense this year". Claude reads your actual transactions to answer; needs a Claude API key set under Movements Inbox → AI settings.</div>
-    <div id="ask-history" style="max-height:260px; overflow-y:auto; margin-bottom:10px;"></div>
-    <div class="row2">
-      <input type="text" id="ask-question" placeholder="Ask a question about this company's ledger…" onkeydown="if(event.key==='Enter'){askLedger();}">
-      <button class="btn-primary" style="margin-top:0;" onclick="askLedger()">Ask</button>
-    </div>
-    <div id="ask-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
-  </div>
-
-  <nav style="position:sticky; top:0; z-index:10; background:var(--bg); padding:10px 0; margin-bottom:16px; border-bottom:1px solid var(--border); display:flex; gap:16px; flex-wrap:wrap; font-size:13px;">
-    <a href="#section-ask" style="color:var(--text); text-decoration:none;">Ask</a>
-    <a href="#section-bank" style="color:var(--text); text-decoration:none;">Bank</a>
-    <a href="#section-sales" style="color:var(--text); text-decoration:none;">Sales &amp; Purchases</a>
-    <a href="#section-ledger" style="color:var(--text); text-decoration:none;">Ledger</a>
-    <a href="#section-accounts" style="color:var(--text); text-decoration:none;">Chart of Accounts</a>
-    <a href="#section-reports" style="color:var(--text); text-decoration:none;">Reports</a>
-    <a href="#section-audit" style="color:var(--text); text-decoration:none;">Audit</a>
-    <a href="#section-settings" style="color:var(--text); text-decoration:none;">Settings</a>
+  <nav class="page-tabs">
+    <a href="#page-dashboard" data-page="dashboard">Dashboard</a>
+    <a href="#page-transactions" data-page="transactions">Transactions</a>
+    <a href="#page-bank" data-page="bank">Bank</a>
+    <a href="#page-accounts" data-page="accounts">Accounts</a>
+    <a href="#page-invoices" data-page="invoices">Invoices</a>
+    <a href="#page-reports" data-page="reports">Reports</a>
+    <a href="#page-settings" data-page="settings">Settings</a>
+    <a href="#page-audit" data-page="audit">Audit</a>
   </nav>
 
-  <div class="layout" id="section-ledger" style="scroll-margin-top:60px;">
-    <div class="panel" onkeydown="handleRapidEntryKeydown(event)">
-      <h2>New Transaction <span style="font-size:10px; color:var(--muted); text-transform:none; font-weight:400;">(Ctrl/Cmd+Enter to post)</span></h2>
-      <div id="undo-bar" style="margin-bottom:8px;"></div>
-      <label>Date</label>
-      <input type="date" id="f-date">
-      <label>Description</label>
-      <input type="text" id="f-desc" placeholder="e.g. Laptop purchase" oninput="suggestFromDescription()" autocomplete="off">
-      <div id="suggest-hint" style="font-size:11px; color:var(--good); margin-top:2px; min-height:14px;"></div>
-      <label>Amount</label>
-      <input type="number" id="f-amount" step="0.01" min="0" placeholder="0.00" oninput="updateVatPreview()">
+  <div class="page" data-page="dashboard">
+    <div id="dashboard" class="row2" style="grid-template-columns: repeat(4, 1fr); margin-bottom:16px;">
+      <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--text);">
+        <div class="sub" style="margin:0;">Cash position</div>
+        <div style="font-size:22px; font-weight:700;" id="dash-cash">—</div>
+      </div>
+      <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--debit);">
+        <div class="sub" style="margin:0;">Outstanding receivables</div>
+        <div style="font-size:22px; font-weight:700; color:var(--debit);" id="dash-receivables">—</div>
+      </div>
+      <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--credit);">
+        <div class="sub" style="margin:0;">Outstanding payables</div>
+        <div style="font-size:22px; font-weight:700; color:var(--credit);" id="dash-payables">—</div>
+      </div>
+      <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--good);">
+        <div class="sub" style="margin:0;">Net profit <span id="dash-profit-period" style="color:var(--muted);">(all time)</span></div>
+        <div style="font-size:22px; font-weight:700;" id="dash-profit">—</div>
+      </div>
+    </div>
+
+    <div class="panel" id="section-ask" style="margin-bottom:16px;">
+      <h2>Ask Your Ledger</h2>
+      <div class="sub" style="margin-bottom:10px;">Ask a plain-English question — e.g. "how much did I spend on travel last quarter" or "what's my biggest expense this year". Claude reads your actual transactions to answer; needs a Claude API key set under Settings → AI settings.</div>
+      <div id="ask-history" style="max-height:260px; overflow-y:auto; margin-bottom:10px;"></div>
+      <div class="row2">
+        <input type="text" id="ask-question" placeholder="Ask a question about this company's ledger…" onkeydown="if(event.key==='Enter'){askLedger();}">
+        <button class="btn-primary" style="margin-top:0;" onclick="askLedger()">Ask</button>
+      </div>
+      <div id="ask-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
+  </div>
+
+  <div class="page" data-page="transactions" style="display:none;">
+    <div class="layout">
+      <div class="panel" onkeydown="handleRapidEntryKeydown(event)">
+        <h2>New Transaction <span style="font-size:10px; color:var(--muted); text-transform:none; font-weight:400;">(Ctrl/Cmd+Enter to post)</span></h2>
+        <div id="undo-bar" style="margin-bottom:8px;"></div>
+        <label>Date</label>
+        <input type="date" id="f-date">
+        <label>Description</label>
+        <input type="text" id="f-desc" placeholder="e.g. Laptop purchase" oninput="suggestFromDescription()" autocomplete="off">
+        <div id="suggest-hint" style="font-size:11px; color:var(--good); margin-top:2px; min-height:14px;"></div>
+        <label>Amount</label>
+        <input type="number" id="f-amount" step="0.01" min="0" placeholder="0.00" oninput="updateVatPreview()">
+        <div class="row2">
+          <div>
+            <label>Debit account <span style="color:var(--muted); font-weight:400;">— receives the value</span></label>
+            <input type="text" id="f-debit" list="account-list" autocomplete="off" placeholder="Start typing an account…">
+          </div>
+          <div>
+            <label>Credit account <span style="color:var(--muted); font-weight:400;">— value comes from here</span></label>
+            <input type="text" id="f-credit" list="account-list" autocomplete="off" placeholder="Start typing an account…">
+          </div>
+        </div>
+        <datalist id="account-list"></datalist>
+
+        <label>VAT</label>
+        <div class="row2">
+          <select id="f-vat-rate" onchange="updateVatPreview()">
+            <option value="0">No VAT</option>
+            <option value="20">20% (Standard)</option>
+            <option value="5">5% (Reduced)</option>
+            <option value="0.001">0% (Zero-rated)</option>
+          </select>
+          <select id="f-vat-direction">
+            <option value="">—</option>
+            <option value="input">Input VAT (purchase/expense)</option>
+            <option value="output">Output VAT (sale)</option>
+          </select>
+        </div>
+        <div class="sub" id="vat-preview" style="margin:4px 0 0;"></div>
+
+        <div id="f-fund-row" style="display:none;">
+          <label>Fund <span style="color:var(--muted); font-weight:400;">(optional)</span></label>
+          <select id="f-fund"><option value="">— none —</option></select>
+        </div>
+
+        <button class="btn-primary" onclick="addTransaction()">Post Transaction</button>
+        <div id="form-error" style="color:var(--bad); font-size:12px; margin-top:8px;"></div>
+
+        <h2 style="margin-top:24px;">Data</h2>
+        <div class="toolbar">
+          <button class="btn-secondary" onclick="exportCSV()">Export CSV</button>
+          <button class="btn-secondary" onclick="document.getElementById('import-file').click()">Import CSV</button>
+          <input type="file" id="import-file" accept=".csv" style="display:none" onchange="importCSV(event)">
+        </div>
+        <button class="btn-secondary" style="width:100%; margin-bottom:10px;" onclick="exportFullBackup()">Full backup (JSON — everything)</button>
+        <button class="btn-secondary" style="width:100%; color:var(--bad);" onclick="confirmAction('Clear all transactions for this company? This cannot be undone.', 'Clear all data').then(ok => ok && clearAll())">Clear all data</button>
+      </div>
+
+      <div>
+        <div class="panel" style="margin-bottom:20px;">
+          <h2>T-Accounts <span class="pill" id="tx-count">0 transactions</span></h2>
+          <div id="accounts" class="accounts-grid"><div class="empty">No transactions yet — post one on the left.</div></div>
+        </div>
+
+        <div class="panel">
+          <h2>Journal (all transactions) <span class="pill" id="journal-count">0 transactions</span></h2>
+          <div class="row2">
+            <input type="text" id="jf-text" placeholder="Search description or account…" oninput="renderJournal()">
+            <input type="number" id="jf-min-amount" step="0.01" placeholder="Min amount" oninput="renderJournal()">
+          </div>
+          <div class="row2">
+            <input type="date" id="jf-from" oninput="renderJournal()">
+            <input type="date" id="jf-to" oninput="renderJournal()">
+          </div>
+          <button class="btn-secondary" style="margin:10px 0;" onclick="clearJournalFilters()">Clear filters</button>
+          <table class="journal">
+            <thead><tr><th>Date</th><th>Description</th><th>Debit</th><th>Credit</th><th class="num">Amount</th><th>VAT</th><th></th></tr></thead>
+            <tbody id="journal-body"></tbody>
+          </table>
+        </div>
+
+        <div class="panel" style="margin-top:20px;">
+          <h2>Trial Balance <span class="pill" id="trial-status"></span></h2>
+          <table class="trial">
+            <thead><tr><td><b>Account</b></td><td class="num"><b>Total Debit</b></td><td class="num"><b>Total Credit</b></td><td class="num"><b>Balance</b></td></tr></thead>
+            <tbody id="trial-body"></tbody>
+          </table>
+          <div class="toolbar" style="margin-top:14px; margin-bottom:0;">
+            <button class="btn-secondary" onclick="printCompilation()">Print / Export Compilation</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Compound Journal Entry</h2>
+      <div class="sub" style="margin-bottom:12px;">For one payment or receipt that splits across several accounts (e.g. a BACS run covering Rent + Utilities + Insurance from one bank line). Pick the one account every line below shares — and add a line per other account. This posts as linked entries sharing one journal ID, with the exact same net ledger effect as a single multi-line posting.</div>
+
+      <div class="row2">
+        <div><label>Date</label><input type="date" id="cj-date"></div>
+        <div><label>Description</label><input type="text" id="cj-desc" placeholder="e.g. June outgoings BACS"></div>
+      </div>
+      <div class="row2">
+        <div><label>Shared account <span style="color:var(--muted); font-weight:400;" title="The one account every line below has in common — e.g. the bank account a single payment was split across several expense accounts from.">(the account every line shares)</span></label><select id="cj-pivot-account"></select></div>
+        <div><label>Which side is the shared account on?</label>
+          <select id="cj-pivot-side">
+            <option value="credit">Credit — money going OUT of it (e.g. a bank payment)</option>
+            <option value="debit">Debit — money coming IN to it (e.g. a bank receipt)</option>
+          </select>
+        </div>
+      </div>
+
+      <table class="inbox" style="margin-top:10px;">
+        <thead><tr><th>Account</th><th class="num">Amount</th><th></th></tr></thead>
+        <tbody id="cj-rows"></tbody>
+      </table>
+      <div class="toolbar" style="margin-top:10px;">
+        <button class="btn-secondary" onclick="addCompoundJournalRow()">+ Add line</button>
+        <span class="pill" id="cj-total"></span>
+      </div>
+      <button class="btn-primary" onclick="postCompoundJournal()">Post compound journal</button>
+      <div id="cj-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
+  </div>
+
+  <div class="page" data-page="bank" style="display:none;">
+    <div class="panel" style="margin-bottom:20px;">
+      <h2>Import Bank Statement</h2>
+      <div class="sub" style="margin-bottom:12px;">Upload a bank statement PDF, or type/paste movements (one per line). The app guesses the debit/credit accounts — review and post.</div>
       <div class="row2">
         <div>
-          <label>Debit account (where value goes)</label>
-          <select id="f-debit"></select>
+          <label>Upload PDF statement</label>
+          <input type="file" id="pdf-file" accept="application/pdf" onchange="handlePdfUpload(event)">
         </div>
         <div>
-          <label>Credit account (where value comes from)</label>
-          <select id="f-credit"></select>
+          <label>&nbsp;</label>
+          <button class="btn-secondary" style="width:100%;" onclick="document.getElementById('movement-text').value=''; renderCandidates();">Clear inbox</button>
         </div>
       </div>
-      <datalist id="account-list"></datalist>
-      <label>Default credit account <span style="color:var(--muted); font-weight:400;">(auto-fills credit when posting)</span></label>
-      <select id="f-default-credit" onchange="saveSettings()"></select>
+      <label>Or write/paste movements (one per line)</label>
+      <textarea id="movement-text" rows="3" placeholder="21/06/2026 Paid EON 79.45&#10;Received invoice payment 500 Chikaan Rashid"></textarea>
+      <div class="row2" style="margin-top:10px;">
+        <button class="btn-secondary" style="width:100%; margin-top:0;" onclick="parseFreeformMovements()">Work it out (rules)</button>
+        <button class="btn-primary" style="width:100%; margin-top:0;" onclick="analyzeWithAI()">✨ Analyze with AI</button>
+      </div>
+      <div class="sub" style="margin-top:6px;">Needs a Claude API key — set one under Settings → AI settings.</div>
+      <div id="inbox-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+      <div id="inbox-table-wrap" style="display:none;">
+        <table class="inbox">
+          <thead><tr><th class="chk"><input type="checkbox" id="inbox-select-all" onchange="toggleAllCandidates(this.checked)"></th><th>Date</th><th>Description</th><th class="num">Amount</th><th>Debit</th><th>Credit</th><th></th></tr></thead>
+          <tbody id="inbox-body"></tbody>
+        </table>
+        <button class="btn-primary" onclick="postSelectedCandidates()">Post selected to ledger</button>
+      </div>
+    </div>
 
-      <label>VAT</label>
+    <div class="panel" style="margin-top:20px;">
+      <h2>Live Bank Feed</h2>
+      <div class="sub" style="margin-bottom:12px;">Link a real bank account or card via Plaid — transactions sync into the Bank Reconciliation lines below automatically (and in near-real-time once this app is deployed somewhere Plaid's webhook can reach; locally, use "Sync now"). This is the same regulated approach Xero/FreeAgent use — no custom bank scraping. Set the Plaid credentials once under Settings → Bank feed credentials.</div>
+      <div id="bank-connections-body" style="margin-top:12px;"></div>
+      <button class="btn-primary" onclick="connectBankAccount()">+ Connect bank account</button>
+      <div id="plaid-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Bank Reconciliation</h2>
+      <div class="sub" style="margin-bottom:12px;">Import what your bank statement actually shows for an account, then match each line to a ledger transaction — or post a new one straight from the line. This is what actually catches missing/duplicate/wrong entries, not just categorization.</div>
+
       <div class="row2">
-        <select id="f-vat-rate" onchange="updateVatPreview()">
-          <option value="0">No VAT</option>
-          <option value="20">20% (Standard)</option>
-          <option value="5">5% (Reduced)</option>
-          <option value="0.001">0% (Zero-rated)</option>
-        </select>
-        <select id="f-vat-direction">
-          <option value="">—</option>
-          <option value="input">Input VAT (purchase/expense)</option>
-          <option value="output">Output VAT (sale)</option>
-        </select>
+        <div>
+          <label>Cash/bank account</label>
+          <select id="brec-account" onchange="renderBrecTable()"></select>
+        </div>
+        <div>
+          <label>Upload PDF statement</label>
+          <input type="file" id="brec-pdf-file" accept="application/pdf" onchange="handleBrecPdfUpload(event)">
+        </div>
       </div>
-      <div class="sub" id="vat-preview" style="margin:4px 0 0;"></div>
+      <label>Or paste statement lines (one per line — prefix outgoing amounts with a minus, e.g. "21/06/2026 -79.45 EON")</label>
+      <textarea id="brec-text" rows="3" placeholder="01/06/2026 -389.95 Card payment Laptop&#10;03/06/2026 500.00 Faster payment received"></textarea>
+      <button class="btn-primary" onclick="parseBrecLines()">Import lines</button>
+      <div id="brec-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
 
-      <div id="f-fund-row" style="display:none;">
-        <label>Fund <span style="color:var(--muted); font-weight:400;">(optional)</span></label>
-        <select id="f-fund"><option value="">— none —</option></select>
+      <div id="brec-summary" class="row2" style="margin-top:14px;"></div>
+
+      <table class="inbox" style="margin-top:10px;">
+        <thead><tr><th>Date</th><th>Statement description</th><th class="num">Amount</th><th>Status</th><th>Match to ledger transaction</th><th></th></tr></thead>
+        <tbody id="brec-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="page" data-page="accounts" style="display:none;">
+    <div class="panel">
+      <h2>Chart of Accounts</h2>
+      <div class="sub" style="margin-bottom:12px;">The single list of accounts this company can use — every debit/credit field elsewhere is chosen from here, not typed, so "Cash" and "cash" can never silently become two different accounts. The type drives the Statement of Profit or Loss / Statement of Financial Position / Cash Flow Statement.</div>
+      <input type="text" id="coa-filter" placeholder="Filter accounts…" oninput="renderChartOfAccounts()" style="margin-bottom:10px;">
+      <table class="inbox"><thead><tr><th>Code</th><th>Account</th><th>Type</th><th></th></tr></thead><tbody id="coa-body"></tbody></table>
+      <div id="coa-legend" class="sub" style="margin:10px 0;"></div>
+      <div class="panel" style="background:var(--panel-soft); margin-top:14px; box-shadow:none;">
+        <h2 style="margin-top:0; font-size:13px;">Add an account</h2>
+        <div class="row2">
+          <div><label>New account name</label><input type="text" id="coa-new-name" placeholder="e.g. Stationery"></div>
+          <div><label>Type</label><select id="coa-new-type"></select></div>
+        </div>
+        <button class="btn-primary" onclick="addChartAccount()">Add account</button>
+        <div id="coa-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
       </div>
+    </div>
 
-      <button class="btn-primary" onclick="addTransaction()">Post Transaction</button>
-      <div id="form-error" style="color:var(--bad); font-size:12px; margin-top:8px;"></div>
+    <div class="panel" style="margin-top:20px;">
+      <h2>Opening Balances</h2>
+      <div class="sub" style="margin-bottom:12px;">Onboarding a business that already has history? Set each account's balance as of a chosen date instead of starting from zero. These live in their own record (not as disguised transactions) and are added on top of the ledger when building the trial balance, Statement of Financial Position, and the Cash Flow Statement's brought-forward cash figure.</div>
 
-      <h2 style="margin-top:24px;">Data</h2>
-      <div class="toolbar">
+      <table class="inbox">
+        <thead><tr><th>Account</th><th class="num">Opening balance</th><th>Side</th><th>As of</th><th></th></tr></thead>
+        <tbody id="ob-existing-body"></tbody>
+      </table>
+
+      <label style="margin-top:14px;">As of date (for new rows below)</label>
+      <input type="date" id="ob-date">
+      <table class="inbox" style="margin-top:10px;">
+        <thead><tr><th>Account</th><th class="num">Amount</th><th>Side</th><th></th></tr></thead>
+        <tbody id="ob-rows"></tbody>
+      </table>
+      <div class="toolbar" style="margin-top:10px;">
+        <button class="btn-secondary" onclick="addOpeningBalanceRow()">+ Add row</button>
+        <button class="btn-primary" style="margin-top:0;" onclick="postOpeningBalances()">Save opening balances</button>
+      </div>
+      <div id="ob-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Fixed Asset Register</h2>
+      <div class="sub" style="margin-bottom:12px;">Register a non-current asset to track its depreciation. "Run Depreciation" posts one month's charge per registered asset as a normal Dr Depreciation Expense / Cr Accumulated Depreciation transaction — so it flows straight into the P&L and reduces net book value on the Statement of Financial Position.</div>
+
+      <div class="row2">
+        <div><label>Asset name</label><input type="text" id="fa-name" placeholder="e.g. Laptop"></div>
+        <div><label>Asset account</label><select id="fa-account"></select></div>
+      </div>
+      <div class="row2">
+        <div><label>Cost</label><input type="number" id="fa-cost" step="0.01" min="0" placeholder="0.00"></div>
+        <div><label>Purchase date</label><input type="date" id="fa-date"></div>
+      </div>
+      <div class="row2">
+        <div><label>Useful life (years)</label><input type="number" id="fa-life" step="0.5" min="0.5" placeholder="3"></div>
+        <div><label>Residual value (optional)</label><input type="number" id="fa-residual" step="0.01" min="0" placeholder="0.00"></div>
+      </div>
+      <label>Depreciation method</label>
+      <select id="fa-method">
+        <option value="straight_line">Straight-line</option>
+        <option value="reducing_balance">Reducing balance (uses 100/useful-life as the annual %)</option>
+      </select>
+      <button class="btn-primary" onclick="addFixedAsset()">Register asset</button>
+      <div id="fa-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+
+      <table class="inbox" style="margin-top:14px;">
+        <thead><tr><th>Asset</th><th>Account</th><th class="num">Cost</th><th class="num">Accum. Depreciation</th><th class="num">Net Book Value</th><th></th></tr></thead>
+        <tbody id="fa-body"></tbody>
+      </table>
+
+      <div class="row2" style="margin-top:14px;">
+        <div><label>Run depreciation for month</label><input type="month" id="fa-run-month"></div>
+        <div><label>&nbsp;</label><button class="btn-secondary" style="width:100%;" onclick="runDepreciation()">Run Depreciation</button></div>
+      </div>
+      <div id="fa-run-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
+  </div>
+
+  <div class="page" data-page="invoices" style="display:none;">
+    <div class="panel">
+      <h2>Contacts</h2>
+      <div class="sub" style="margin-bottom:12px;">Customers and suppliers, so invoices and bills are tied to who they're actually for/from.</div>
+      <table class="inbox"><thead><tr><th>Name</th><th>Type</th><th>Email</th><th>Phone</th><th></th></tr></thead><tbody id="contacts-body"></tbody></table>
+      <div class="panel" style="background:var(--panel-soft); margin-top:14px; box-shadow:none;">
+        <h2 style="margin-top:0; font-size:13px;">Add a contact</h2>
+        <div class="row2">
+          <div><label>Name</label><input type="text" id="contact-name" placeholder="e.g. Acme Ltd"></div>
+          <div><label>Type</label><select id="contact-type"><option value="customer">Customer</option><option value="supplier">Supplier</option><option value="both">Both</option></select></div>
+        </div>
+        <div class="row2">
+          <div><label>Email (optional)</label><input type="email" id="contact-email"></div>
+          <div><label>Phone (optional)</label><input type="text" id="contact-phone"></div>
+        </div>
+        <button class="btn-primary" onclick="addContact()">Add contact</button>
+        <div id="contact-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Invoices &amp; Bills</h2>
+      <table class="inbox">
+        <thead><tr><th>Kind</th><th>Contact</th><th>Date</th><th>Due</th><th>Description</th><th class="num">Amount</th><th>Status</th><th></th></tr></thead>
+        <tbody id="ib-body"></tbody>
+      </table>
+
+      <div class="panel" style="background:var(--panel-soft); margin-top:14px; box-shadow:none;">
+        <h2 style="margin-top:0; font-size:13px;">Create a new invoice / bill</h2>
+        <div class="sub" style="margin-bottom:12px;">Starts as a draft (no ledger effect). "Send" posts it to Trade Receivables/Payables (with VAT if set). "Mark Paid" settles it against the account you choose.</div>
+        <div class="row2">
+          <div><label>Kind</label><select id="ib-kind"><option value="invoice">Invoice (to a customer)</option><option value="bill">Bill (from a supplier)</option></select></div>
+          <div><label>Contact</label><select id="ib-contact"></select></div>
+        </div>
+        <div class="row2">
+          <div><label>Date</label><input type="date" id="ib-date"></div>
+          <div><label>Due date</label><input type="date" id="ib-due-date"></div>
+        </div>
+        <label>Description</label>
+        <input type="text" id="ib-desc" placeholder="e.g. June consulting">
+        <div class="row2">
+          <div><label>Amount (gross)</label><input type="number" id="ib-amount" step="0.01" min="0" placeholder="0.00"></div>
+          <div><label>VAT rate</label>
+            <select id="ib-vat-rate"><option value="0">No VAT</option><option value="20">20%</option><option value="5">5%</option><option value="0.001">0% (Zero-rated)</option></select>
+          </div>
+        </div>
+        <label>Account <span style="color:var(--muted); font-weight:400;">(Sales for invoices; the expense/asset account for bills)</span></label>
+        <select id="ib-account"></select>
+        <button class="btn-primary" onclick="addInvoiceBill()">Save as draft</button>
+        <div id="ib-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Aging Report</h2>
+      <div class="sub" style="margin-bottom:12px;">Outstanding (sent but not paid) invoices and bills, bucketed by how overdue they are.</div>
+      <h2 style="margin-top:0; color:var(--debit);">Receivables (money owed to you)</h2>
+      <table class="trial"><thead><tr><td><b>Customer</b></td><td class="num"><b>Current</b></td><td class="num"><b>1-30</b></td><td class="num"><b>31-60</b></td><td class="num"><b>61-90</b></td><td class="num"><b>90+</b></td></tr></thead><tbody id="aging-invoice-body"></tbody></table>
+      <h2 style="margin-top:18px; color:var(--credit);">Payables (money you owe)</h2>
+      <table class="trial"><thead><tr><td><b>Supplier</b></td><td class="num"><b>Current</b></td><td class="num"><b>1-30</b></td><td class="num"><b>31-60</b></td><td class="num"><b>61-90</b></td><td class="num"><b>90+</b></td></tr></thead><tbody id="aging-bill-body"></tbody></table>
+    </div>
+  </div>
+
+  <div class="page" data-page="reports" style="display:none;">
+    <div class="panel">
+      <div class="report-actions">
         <button class="btn-secondary" onclick="exportCSV()">Export CSV</button>
-        <button class="btn-secondary" onclick="document.getElementById('import-file').click()">Import CSV</button>
-        <input type="file" id="import-file" accept=".csv" style="display:none" onchange="importCSV(event)">
+        <button class="btn-secondary" onclick="window.print()">Export PDF</button>
       </div>
-      <button class="btn-secondary" style="width:100%; margin-bottom:10px;" onclick="exportFullBackup()">Full backup (JSON — everything)</button>
-      <button class="btn-secondary" style="width:100%; color:var(--bad);" onclick="confirmAction('Clear all transactions for this company?').then(ok => ok && clearAll())">Clear all data</button>
+      <h2>Financial Statements <span class="pill" id="period-label"></span></h2>
+      <div class="row2" style="align-items:end;">
+        <div><label>From <span style="color:var(--muted); font-weight:400;">(blank = inception)</span></label><input type="date" id="fs-from"></div>
+        <div><label>To <span style="color:var(--muted); font-weight:400;">(blank = today)</span></label><input type="date" id="fs-to"></div>
+      </div>
+      <button class="btn-primary" onclick="renderFinancialStatements()">Generate</button>
+      <div class="sub" id="fs-build-summary" style="margin:10px 0 12px;"></div>
+      <div class="row2" style="align-items:start;">
+        <div><h2 style="margin-top:0;">Statement of Profit or Loss</h2><table class="trial"><tbody id="pnl-body"></tbody></table></div>
+        <div><h2 style="margin-top:0;">Statement of Financial Position</h2><table class="trial"><tbody id="sofp-body"></tbody></table></div>
+      </div>
+      <h2 style="margin-top:20px;">Statement of Cash Flows <span class="pill" id="cashflow-check"></span></h2>
+      <div class="sub" style="margin-bottom:0;">Built directly from cash movements in your ledger (IAS 7 direct method).</div>
+      <table class="trial"><tbody id="cashflow-body"></tbody></table>
+      <div class="toolbar" style="margin-top:14px; margin-bottom:0;">
+        <button class="btn-secondary" onclick="printFinancialStatements()">Print / Export Financial Statements</button>
+      </div>
+    </div>
 
-      <h2 id="section-settings" style="margin-top:24px; scroll-margin-top:60px;">Period Lock</h2>
+    <div class="panel" id="fund-accounting-panels" style="margin-top:20px; display:none;">
+      <h2>Funds</h2>
+      <div class="sub" style="margin-bottom:12px;">Restricted/designated funds need a deliberate type — they don't auto-create from typing like accounts do.</div>
+      <table class="inbox"><thead><tr><th>Name</th><th>Type</th><th></th></tr></thead><tbody id="funds-body"></tbody></table>
+      <div class="row2" style="margin-top:12px;">
+        <div><label>New fund name</label><input type="text" id="fund-new-name" placeholder="e.g. Building Appeal"></div>
+        <div><label>Type</label>
+          <select id="fund-new-type">
+            <option value="unrestricted">Unrestricted</option>
+            <option value="restricted">Restricted</option>
+            <option value="designated">Designated</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn-primary" onclick="addFund()">Add fund</button>
+      <div id="fund-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+
+      <h2 style="margin-top:24px;">Statement of Financial Activities</h2>
+      <div class="sub" style="margin-bottom:12px;">Incoming resources and resources expended, segmented by fund type. Net movement only — funds carried forward across periods isn't tracked yet.</div>
+      <button class="btn-secondary" onclick="loadSofa()">Refresh</button>
+      <table class="trial" style="margin-top:10px;">
+        <thead><tr><td><b>Fund type</b></td><td class="num"><b>Incoming</b></td><td class="num"><b>Expended</b></td><td class="num"><b>Net</b></td></tr></thead>
+        <tbody id="sofa-body"></tbody>
+        <tfoot><tr id="sofa-total-row" style="font-weight:700; border-top:2px solid var(--border);"></tr></tfoot>
+      </table>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>VAT Return</h2>
+      <div class="sub" style="margin-bottom:12px;">Simplified UK VAT return boxes, calculated from transactions tagged with Input/Output VAT in the period below. This is a working figure for review with your accountant/MTD software, not a filing in itself.</div>
+      <div class="row2">
+        <div><label>From</label><input type="date" id="vat-from"></div>
+        <div><label>To</label><input type="date" id="vat-to"></div>
+      </div>
+      <button class="btn-primary" onclick="renderVatReturn()">Calculate VAT Return</button>
+      <table class="trial" style="margin-top:14px;"><tbody id="vat-return-body"></tbody></table>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Anomalies <span class="pill" id="anomaly-count"></span></h2>
+      <div class="sub" style="margin-bottom:12px;">Computed live from your ledger: accounts used for the first time recently, and transactions whose amount is far outside that account's usual range. Not AI — plain statistics, so it works without an API key.</div>
+      <table class="journal"><thead><tr><th>Type</th><th>Account</th><th>Date</th><th>Description</th><th class="num">Amount</th><th>Why</th></tr></thead><tbody id="anomaly-body"></tbody></table>
+    </div>
+  </div>
+
+  <div class="page" data-page="settings" style="display:none;">
+    <div class="panel">
+      <h2>Defaults</h2>
+      <label>Default credit account <span style="color:var(--muted); font-weight:400;">(auto-fills credit when posting a transaction)</span></label>
+      <select id="f-default-credit" onchange="saveSettings()"></select>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Period Lock</h2>
       <div class="sub" style="margin-bottom:8px;">Once you've filed a VAT return or finalized accounts up to a date, lock it — transactions on or before that date can no longer be added, edited, or deleted by anyone.</div>
       <label>Locked up to and including</label>
       <input type="date" id="f-locked-until" oninput="saveSettings()">
@@ -314,85 +685,17 @@
       </label>
     </div>
 
-    <div>
-      <div class="panel" style="margin-bottom:20px;">
-        <h2>Import Bank Statement</h2>
-        <div class="sub" style="margin-bottom:12px;">Upload a bank statement PDF, or type/paste movements (one per line). The app guesses the debit/credit accounts — review and post.</div>
-        <div class="row2">
-          <div>
-            <label>Upload PDF statement</label>
-            <input type="file" id="pdf-file" accept="application/pdf" onchange="handlePdfUpload(event)">
-          </div>
-          <div>
-            <label>&nbsp;</label>
-            <button class="btn-secondary" style="width:100%;" onclick="document.getElementById('movement-text').value=''; renderCandidates();">Clear inbox</button>
-          </div>
-        </div>
-        <label>Or write/paste movements (one per line)</label>
-        <textarea id="movement-text" rows="3" placeholder="21/06/2026 Paid EON 79.45&#10;Received invoice payment 500 Chikaan Rashid"></textarea>
-        <div class="row2" style="margin-top:10px;">
-          <button class="btn-secondary" style="width:100%; margin-top:0;" onclick="parseFreeformMovements()">Work it out (rules)</button>
-          <button class="btn-primary" style="width:100%; margin-top:0;" onclick="analyzeWithAI()">✨ Analyze with AI</button>
-        </div>
-        <div id="inbox-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
-        <details style="margin-top:10px;">
-          <summary style="font-size:12px; color:var(--muted); cursor:pointer;">AI settings (Claude API key)</summary>
-          <div class="sub" style="margin:8px 0;">Stored against this company on the server (in this app's database). The Claude API call happens server-side — this key is never sent to or readable from your browser, including by this app's own frontend.</div>
-          <div class="sub" id="ai-key-status" style="margin:0 0 8px;"></div>
-          <input type="password" id="ai-api-key" placeholder="sk-ant-... (enter to set/replace)" oninput="saveSettings()">
-          <button class="btn-secondary" style="width:100%; margin-top:8px;" onclick="clearAiApiKey()">Clear key</button>
-        </details>
-        <div id="inbox-table-wrap" style="display:none;">
-          <table class="inbox">
-            <thead><tr><th class="chk"><input type="checkbox" id="inbox-select-all" onchange="toggleAllCandidates(this.checked)"></th><th>Date</th><th>Description</th><th class="num">Amount</th><th>Debit</th><th>Credit</th><th></th></tr></thead>
-            <tbody id="inbox-body"></tbody>
-          </table>
-          <button class="btn-primary" onclick="postSelectedCandidates()">Post selected to ledger</button>
-        </div>
-      </div>
-
-      <div class="panel" style="margin-bottom:20px;">
-        <h2>T-Accounts <span class="pill" id="tx-count">0 transactions</span></h2>
-        <div id="accounts" class="accounts-grid"><div class="empty">No transactions yet — post one on the left.</div></div>
-      </div>
-
-      <div class="panel">
-        <h2>Journal (all transactions) <span class="pill" id="journal-count">0 transactions</span></h2>
-        <div class="row2">
-          <input type="text" id="jf-text" placeholder="Search description or account…" oninput="renderJournal()">
-          <input type="number" id="jf-min-amount" step="0.01" placeholder="Min amount" oninput="renderJournal()">
-        </div>
-        <div class="row2">
-          <input type="date" id="jf-from" oninput="renderJournal()">
-          <input type="date" id="jf-to" oninput="renderJournal()">
-        </div>
-        <button class="btn-secondary" style="margin:10px 0;" onclick="clearJournalFilters()">Clear filters</button>
-        <table class="journal">
-          <thead><tr><th>Date</th><th>Description</th><th>Debit</th><th>Credit</th><th class="num">Amount</th><th>VAT</th><th></th></tr></thead>
-          <tbody id="journal-body"></tbody>
-        </table>
-      </div>
-
-      <div class="panel" style="margin-top:20px;">
-        <h2>Trial Balance <span class="pill" id="trial-status"></span></h2>
-        <table class="trial">
-          <thead><tr><td><b>Account</b></td><td class="num"><b>Total Debit</b></td><td class="num"><b>Total Credit</b></td><td class="num"><b>Balance</b></td></tr></thead>
-          <tbody id="trial-body"></tbody>
-        </table>
-        <div class="toolbar" style="margin-top:14px; margin-bottom:0;">
-          <button class="btn-secondary" onclick="printCompilation()">Print / Export Compilation</button>
-        </div>
-      </div>
+    <div class="panel" style="margin-top:20px;">
+      <h2>AI settings (Claude API key)</h2>
+      <div class="sub" style="margin:8px 0;">Stored against this company on the server (in this app's database). The Claude API call happens server-side — this key is never sent to or readable from your browser, including by this app's own frontend. Powers Ask Your Ledger (Dashboard) and "Analyze with AI" (Bank → Import Bank Statement).</div>
+      <div class="sub" id="ai-key-status" style="margin:0 0 8px;"></div>
+      <input type="password" id="ai-api-key" placeholder="sk-ant-... (enter to set/replace)" oninput="saveSettings()">
+      <button class="btn-secondary" style="width:100%; margin-top:8px;" onclick="clearAiApiKey()">Clear key</button>
     </div>
-  </div>
 
-  <div class="panel" id="section-bank" style="margin-top:20px; scroll-margin-top:60px;">
-    <h2>Live Bank Feed</h2>
-    <div class="sub" style="margin-bottom:12px;">Link a real bank account or card via Plaid — transactions sync into the Bank Reconciliation lines below automatically (and in near-real-time once this app is deployed somewhere Plaid's webhook can reach; locally, use "Sync now"). This is the same regulated approach Xero/FreeAgent use — no custom bank scraping.</div>
-
-    <details>
-      <summary style="font-size:12px; color:var(--muted); cursor:pointer;">Plaid credentials</summary>
-      <div class="sub" style="margin:8px 0;">From a free account at <span style="color:var(--text);">dashboard.plaid.com</span>. Secret is write-only — encrypted at rest, never sent back to this browser.</div>
+    <div class="panel" style="margin-top:20px;">
+      <h2>Bank feed credentials (Plaid)</h2>
+      <div class="sub" style="margin:8px 0;">From a free account at <span style="color:var(--text);">dashboard.plaid.com</span>. Secret is write-only — encrypted at rest, never sent back to this browser. Connect or sync the actual bank account under the Bank page once these are set.</div>
       <div class="row2">
         <div><label>Client ID</label><input type="text" id="plaid-client-id" oninput="savePlaidSettings()"></div>
         <div><label>Environment</label>
@@ -405,280 +708,31 @@
       </div>
       <label>Secret <span id="plaid-secret-status" style="color:var(--muted); font-weight:400;"></span></label>
       <input type="password" id="plaid-secret" placeholder="enter to set/replace" oninput="savePlaidSettings()">
-    </details>
+    </div>
 
-    <div id="bank-connections-body" style="margin-top:12px;"></div>
-    <button class="btn-primary" onclick="connectBankAccount()">+ Connect bank account</button>
-    <div id="plaid-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
-  </div>
-
-  <div class="panel" id="section-bank-rec" style="margin-top:20px;">
-    <h2>Bank Reconciliation</h2>
-    <div class="sub" style="margin-bottom:12px;">Import what your bank statement actually shows for an account, then match each line to a ledger transaction — or post a new one straight from the line. This is what actually catches missing/duplicate/wrong entries, not just categorization.</div>
-
-    <div class="row2">
-      <div>
-        <label>Cash/bank account</label>
-        <select id="brec-account" onchange="renderBrecTable()"></select>
+    <div class="panel" style="margin-top:20px;">
+      <h2>Team</h2>
+      <div class="sub" style="margin-bottom:12px;">Invite an accountant or colleague to this company. They need an existing account on this app first — invite by the email they signed up with. "View" can read everything; "post" can also enter/edit transactions and everything else; only the owner can manage the team or delete the company.</div>
+      <table class="inbox"><thead><tr><th>Email</th><th>Permission</th><th></th></tr></thead><tbody id="team-body"></tbody></table>
+      <div id="team-owner-controls" class="row2" style="margin-top:12px;">
+        <div><label>Invite by email</label><input type="email" id="team-invite-email" placeholder="colleague@example.com"></div>
+        <div><label>Permission</label><select id="team-invite-permission"><option value="view">View</option><option value="comment">Comment</option><option value="post">Post (full access)</option></select></div>
       </div>
-      <div>
-        <label>Upload PDF statement</label>
-        <input type="file" id="brec-pdf-file" accept="application/pdf" onchange="handleBrecPdfUpload(event)">
-      </div>
-    </div>
-    <label>Or paste statement lines (one per line — prefix outgoing amounts with a minus, e.g. "21/06/2026 -79.45 EON")</label>
-    <textarea id="brec-text" rows="3" placeholder="01/06/2026 -389.95 Card payment Laptop&#10;03/06/2026 500.00 Faster payment received"></textarea>
-    <button class="btn-primary" onclick="parseBrecLines()">Import lines</button>
-    <div id="brec-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
-
-    <div id="brec-summary" class="row2" style="margin-top:14px;"></div>
-
-    <table class="inbox" style="margin-top:10px;">
-      <thead><tr><th>Date</th><th>Statement description</th><th class="num">Amount</th><th>Status</th><th>Match to ledger transaction</th><th></th></tr></thead>
-      <tbody id="brec-body"></tbody>
-    </table>
-  </div>
-
-  <div class="panel" style="margin-top:20px;">
-    <h2>Opening Balances</h2>
-    <div class="sub" style="margin-bottom:12px;">Onboarding a business that already has history? Set each account's balance as of a chosen date instead of starting from zero. These live in their own record (not as disguised transactions) and are added on top of the ledger when building the trial balance, Statement of Financial Position, and the Cash Flow Statement's brought-forward cash figure.</div>
-
-    <table class="inbox">
-      <thead><tr><th>Account</th><th class="num">Opening balance</th><th>Side</th><th>As of</th><th></th></tr></thead>
-      <tbody id="ob-existing-body"></tbody>
-    </table>
-
-    <label style="margin-top:14px;">As of date (for new rows below)</label>
-    <input type="date" id="ob-date">
-    <table class="inbox" style="margin-top:10px;">
-      <thead><tr><th>Account</th><th class="num">Amount</th><th>Side</th><th></th></tr></thead>
-      <tbody id="ob-rows"></tbody>
-    </table>
-    <div class="toolbar" style="margin-top:10px;">
-      <button class="btn-secondary" onclick="addOpeningBalanceRow()">+ Add row</button>
-      <button class="btn-primary" style="margin-top:0;" onclick="postOpeningBalances()">Save opening balances</button>
-    </div>
-    <div id="ob-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
-  </div>
-
-  <div class="panel" style="margin-top:20px;">
-    <h2>Fixed Asset Register</h2>
-    <div class="sub" style="margin-bottom:12px;">Register a non-current asset to track its depreciation. "Run Depreciation" posts one month's charge per registered asset as a normal Dr Depreciation Expense / Cr Accumulated Depreciation transaction — so it flows straight into the P&L and reduces net book value on the Statement of Financial Position.</div>
-
-    <div class="row2">
-      <div><label>Asset name</label><input type="text" id="fa-name" placeholder="e.g. Laptop"></div>
-      <div><label>Asset account</label><select id="fa-account"></select></div>
-    </div>
-    <div class="row2">
-      <div><label>Cost</label><input type="number" id="fa-cost" step="0.01" min="0" placeholder="0.00"></div>
-      <div><label>Purchase date</label><input type="date" id="fa-date"></div>
-    </div>
-    <div class="row2">
-      <div><label>Useful life (years)</label><input type="number" id="fa-life" step="0.5" min="0.5" placeholder="3"></div>
-      <div><label>Residual value (optional)</label><input type="number" id="fa-residual" step="0.01" min="0" placeholder="0.00"></div>
-    </div>
-    <label>Depreciation method</label>
-    <select id="fa-method">
-      <option value="straight_line">Straight-line</option>
-      <option value="reducing_balance">Reducing balance (uses 100/useful-life as the annual %)</option>
-    </select>
-    <button class="btn-primary" onclick="addFixedAsset()">Register asset</button>
-    <div id="fa-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
-
-    <table class="inbox" style="margin-top:14px;">
-      <thead><tr><th>Asset</th><th>Account</th><th class="num">Cost</th><th class="num">Accum. Depreciation</th><th class="num">Net Book Value</th><th></th></tr></thead>
-      <tbody id="fa-body"></tbody>
-    </table>
-
-    <div class="row2" style="margin-top:14px;">
-      <div><label>Run depreciation for month</label><input type="month" id="fa-run-month"></div>
-      <div><label>&nbsp;</label><button class="btn-secondary" style="width:100%;" onclick="runDepreciation()">Run Depreciation</button></div>
-    </div>
-    <div id="fa-run-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
-  </div>
-
-  <div class="panel" id="section-accounts" style="margin-top:20px; scroll-margin-top:60px;">
-    <h2>Chart of Accounts</h2>
-    <div class="sub" style="margin-bottom:12px;">The single list of accounts this company can use — every debit/credit field elsewhere is chosen from here, not typed, so "Cash" and "cash" can never silently become two different accounts. The type drives the Statement of Profit or Loss / Statement of Financial Position / Cash Flow Statement.</div>
-    <table class="inbox"><thead><tr><th>Code</th><th>Account</th><th>Type</th><th></th></tr></thead><tbody id="coa-body"></tbody></table>
-    <div id="coa-legend" class="sub" style="margin:10px 0;"></div>
-    <div class="row2" style="margin-top:12px;">
-      <div><label>New account name</label><input type="text" id="coa-new-name" placeholder="e.g. Stationery"></div>
-      <div><label>Type</label><select id="coa-new-type"></select></div>
-    </div>
-    <button class="btn-primary" onclick="addChartAccount()">Add account</button>
-    <div id="coa-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
-  </div>
-
-  <div class="panel" id="section-reports" style="margin-top:20px; scroll-margin-top:60px;">
-    <div class="report-actions">
-      <button class="btn-secondary" onclick="exportCSV()">Export CSV</button>
-      <button class="btn-secondary" onclick="window.print()">Export PDF</button>
-    </div>
-    <h2>Financial Statements <span class="pill" id="period-label"></span></h2>
-    <div class="sub" id="fs-build-summary" style="margin-bottom:12px;"></div>
-    <div class="row2" style="align-items:start;">
-      <div><h2 style="margin-top:0;">Statement of Profit or Loss</h2><table class="trial"><tbody id="pnl-body"></tbody></table></div>
-      <div><h2 style="margin-top:0;">Statement of Financial Position</h2><table class="trial"><tbody id="sofp-body"></tbody></table></div>
-    </div>
-    <h2 style="margin-top:20px;">Statement of Cash Flows <span class="pill" id="cashflow-check"></span></h2>
-    <div class="sub" style="margin-bottom:0;">Built directly from cash movements in your ledger (IAS 7 direct method).</div>
-    <table class="trial"><tbody id="cashflow-body"></tbody></table>
-    <div class="toolbar" style="margin-top:14px; margin-bottom:0;">
-      <button class="btn-secondary" onclick="printFinancialStatements()">Print / Export Financial Statements</button>
+      <button class="btn-primary" id="team-invite-btn" onclick="inviteMember()">Invite</button>
+      <div id="team-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
   </div>
 
-  <div class="panel" id="fund-accounting-panels" style="margin-top:20px; display:none;">
-    <h2>Funds</h2>
-    <div class="sub" style="margin-bottom:12px;">Restricted/designated funds need a deliberate type — they don't auto-create from typing like accounts do.</div>
-    <table class="inbox"><thead><tr><th>Name</th><th>Type</th><th></th></tr></thead><tbody id="funds-body"></tbody></table>
-    <div class="row2" style="margin-top:12px;">
-      <div><label>New fund name</label><input type="text" id="fund-new-name" placeholder="e.g. Building Appeal"></div>
-      <div><label>Type</label>
-        <select id="fund-new-type">
-          <option value="unrestricted">Unrestricted</option>
-          <option value="restricted">Restricted</option>
-          <option value="designated">Designated</option>
-        </select>
-      </div>
+  <div class="page" data-page="audit" style="display:none;">
+    <div class="panel">
+      <h2>Audit Log <span class="pill" id="audit-count"></span></h2>
+      <div class="sub" style="margin-bottom:12px;">Every transaction created or deleted, who did it, and when. This list cannot be edited from the app — it's the record of what actually happened.</div>
+      <button class="btn-secondary" onclick="loadAuditLog()">Refresh</button>
+      <table class="journal" style="margin-top:10px;">
+        <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Transaction</th><th>Details</th></tr></thead>
+        <tbody id="audit-log-body"></tbody>
+      </table>
     </div>
-    <button class="btn-primary" onclick="addFund()">Add fund</button>
-    <div id="fund-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
-
-    <h2 style="margin-top:24px;">Statement of Financial Activities</h2>
-    <div class="sub" style="margin-bottom:12px;">Incoming resources and resources expended, segmented by fund type. Net movement only — funds carried forward across periods isn't tracked yet.</div>
-    <button class="btn-secondary" onclick="loadSofa()">Refresh</button>
-    <table class="trial" style="margin-top:10px;">
-      <thead><tr><td><b>Fund type</b></td><td class="num"><b>Incoming</b></td><td class="num"><b>Expended</b></td><td class="num"><b>Net</b></td></tr></thead>
-      <tbody id="sofa-body"></tbody>
-      <tfoot><tr id="sofa-total-row" style="font-weight:700; border-top:2px solid var(--border);"></tr></tfoot>
-    </table>
-  </div>
-
-  <div class="panel" style="margin-top:20px;">
-    <h2>VAT Return</h2>
-    <div class="sub" style="margin-bottom:12px;">Simplified UK VAT return boxes, calculated from transactions tagged with Input/Output VAT in the period below. This is a working figure for review with your accountant/MTD software, not a filing in itself.</div>
-    <div class="row2">
-      <div><label>From</label><input type="date" id="vat-from"></div>
-      <div><label>To</label><input type="date" id="vat-to"></div>
-    </div>
-    <button class="btn-primary" onclick="renderVatReturn()">Calculate VAT Return</button>
-    <table class="trial" style="margin-top:14px;"><tbody id="vat-return-body"></tbody></table>
-  </div>
-
-  <div class="panel" id="section-sales" style="margin-top:20px; scroll-margin-top:60px;">
-    <h2>Contacts</h2>
-    <div class="sub" style="margin-bottom:12px;">Customers and suppliers, so invoices and bills are tied to who they're actually for/from.</div>
-    <table class="inbox"><thead><tr><th>Name</th><th>Type</th><th>Email</th><th>Phone</th><th></th></tr></thead><tbody id="contacts-body"></tbody></table>
-    <div class="row2" style="margin-top:12px;">
-      <div><label>Name</label><input type="text" id="contact-name" placeholder="e.g. Acme Ltd"></div>
-      <div><label>Type</label><select id="contact-type"><option value="customer">Customer</option><option value="supplier">Supplier</option><option value="both">Both</option></select></div>
-    </div>
-    <div class="row2">
-      <div><label>Email (optional)</label><input type="email" id="contact-email"></div>
-      <div><label>Phone (optional)</label><input type="text" id="contact-phone"></div>
-    </div>
-    <button class="btn-primary" onclick="addContact()">Add contact</button>
-    <div id="contact-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
-  </div>
-
-  <div class="panel" style="margin-top:20px;">
-    <h2>Invoices &amp; Bills</h2>
-    <div class="sub" style="margin-bottom:12px;">An invoice/bill starts as a draft (no ledger effect). "Send" posts it to Trade Receivables/Payables (with VAT if set). "Mark Paid" settles it against the account you choose.</div>
-
-    <div class="row2">
-      <div><label>Kind</label><select id="ib-kind"><option value="invoice">Invoice (to a customer)</option><option value="bill">Bill (from a supplier)</option></select></div>
-      <div><label>Contact</label><select id="ib-contact"></select></div>
-    </div>
-    <div class="row2">
-      <div><label>Date</label><input type="date" id="ib-date"></div>
-      <div><label>Due date</label><input type="date" id="ib-due-date"></div>
-    </div>
-    <label>Description</label>
-    <input type="text" id="ib-desc" placeholder="e.g. June consulting">
-    <div class="row2">
-      <div><label>Amount (gross)</label><input type="number" id="ib-amount" step="0.01" min="0" placeholder="0.00"></div>
-      <div><label>VAT rate</label>
-        <select id="ib-vat-rate"><option value="0">No VAT</option><option value="20">20%</option><option value="5">5%</option><option value="0.001">0% (Zero-rated)</option></select>
-      </div>
-    </div>
-    <label>Account <span style="color:var(--muted); font-weight:400;">(Sales for invoices; the expense/asset account for bills)</span></label>
-    <select id="ib-account"></select>
-    <button class="btn-primary" onclick="addInvoiceBill()">Save as draft</button>
-    <div id="ib-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
-
-    <table class="inbox" style="margin-top:14px;">
-      <thead><tr><th>Kind</th><th>Contact</th><th>Date</th><th>Due</th><th>Description</th><th class="num">Amount</th><th>Status</th><th></th></tr></thead>
-      <tbody id="ib-body"></tbody>
-    </table>
-  </div>
-
-  <div class="panel" style="margin-top:20px;">
-    <h2>Aging Report</h2>
-    <div class="sub" style="margin-bottom:12px;">Outstanding (sent but not paid) invoices and bills, bucketed by how overdue they are.</div>
-    <h2 style="margin-top:0; color:var(--debit);">Receivables (money owed to you)</h2>
-    <table class="trial"><thead><tr><td><b>Customer</b></td><td class="num"><b>Current</b></td><td class="num"><b>1-30</b></td><td class="num"><b>31-60</b></td><td class="num"><b>61-90</b></td><td class="num"><b>90+</b></td></tr></thead><tbody id="aging-invoice-body"></tbody></table>
-    <h2 style="margin-top:18px; color:var(--credit);">Payables (money you owe)</h2>
-    <table class="trial"><thead><tr><td><b>Supplier</b></td><td class="num"><b>Current</b></td><td class="num"><b>1-30</b></td><td class="num"><b>31-60</b></td><td class="num"><b>61-90</b></td><td class="num"><b>90+</b></td></tr></thead><tbody id="aging-bill-body"></tbody></table>
-  </div>
-
-  <div class="panel" style="margin-top:20px;">
-    <h2>Compound Journal Entry</h2>
-    <div class="sub" style="margin-bottom:12px;">For one payment or receipt that splits across several accounts (e.g. a BACS run covering Rent + Utilities + Insurance from one bank line). Pick the one account every line shares — the "pivot" — and add a line per other account. This posts as linked entries sharing one journal ID, with the exact same net ledger effect as a single multi-line posting.</div>
-
-    <div class="row2">
-      <div><label>Date</label><input type="date" id="cj-date"></div>
-      <div><label>Description</label><input type="text" id="cj-desc" placeholder="e.g. June outgoings BACS"></div>
-    </div>
-    <div class="row2">
-      <div><label>Pivot account</label><select id="cj-pivot-account"></select></div>
-      <div><label>Pivot side</label>
-        <select id="cj-pivot-side">
-          <option value="credit">Credit (money going OUT of the pivot, e.g. a bank payment)</option>
-          <option value="debit">Debit (money coming IN to the pivot, e.g. a bank receipt)</option>
-        </select>
-      </div>
-    </div>
-
-    <table class="inbox" style="margin-top:10px;">
-      <thead><tr><th>Account</th><th class="num">Amount</th><th></th></tr></thead>
-      <tbody id="cj-rows"></tbody>
-    </table>
-    <div class="toolbar" style="margin-top:10px;">
-      <button class="btn-secondary" onclick="addCompoundJournalRow()">+ Add line</button>
-      <span class="pill" id="cj-total"></span>
-    </div>
-    <button class="btn-primary" onclick="postCompoundJournal()">Post compound journal</button>
-    <div id="cj-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
-  </div>
-
-  <div class="panel" style="margin-top:20px;">
-    <h2>Anomalies <span class="pill" id="anomaly-count"></span></h2>
-    <div class="sub" style="margin-bottom:12px;">Computed live from your ledger: accounts used for the first time recently, and transactions whose amount is far outside that account's usual range. Not AI — plain statistics, so it works without an API key.</div>
-    <table class="journal"><thead><tr><th>Type</th><th>Account</th><th>Date</th><th>Description</th><th class="num">Amount</th><th>Why</th></tr></thead><tbody id="anomaly-body"></tbody></table>
-  </div>
-
-  <div class="panel" style="margin-top:20px;">
-    <h2>Team</h2>
-    <div class="sub" style="margin-bottom:12px;">Invite an accountant or colleague to this company. They need an existing account on this app first — invite by the email they signed up with. "View" can read everything; "post" can also enter/edit transactions and everything else; only the owner can manage the team or delete the company.</div>
-    <table class="inbox"><thead><tr><th>Email</th><th>Permission</th><th></th></tr></thead><tbody id="team-body"></tbody></table>
-    <div id="team-owner-controls" class="row2" style="margin-top:12px;">
-      <div><label>Invite by email</label><input type="email" id="team-invite-email" placeholder="colleague@example.com"></div>
-      <div><label>Permission</label><select id="team-invite-permission"><option value="view">View</option><option value="comment">Comment</option><option value="post">Post (full access)</option></select></div>
-    </div>
-    <button class="btn-primary" id="team-invite-btn" onclick="inviteMember()">Invite</button>
-    <div id="team-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
-  </div>
-
-  <div class="panel" id="section-audit" style="margin-top:20px; scroll-margin-top:60px;">
-    <h2>Audit Log <span class="pill" id="audit-count"></span></h2>
-    <div class="sub" style="margin-bottom:12px;">Every transaction created or deleted, who did it, and when. This list cannot be edited from the app — it's the record of what actually happened.</div>
-    <button class="btn-secondary" onclick="loadAuditLog()">Refresh</button>
-    <table class="journal" style="margin-top:10px;">
-      <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Transaction</th><th>Details</th></tr></thead>
-      <tbody id="audit-log-body"></tbody>
-    </table>
   </div>
 </div>
 
@@ -973,12 +1027,15 @@ async function deleteCompany(id, name) {
 
 function goToCompanyPicker() {
   currentCompany = null;
+  document.title = 'Bookkeeping — T-Account Ledger';
   show('company-screen');
 }
 
 async function openCompany(id) {
   currentCompany = companies.find(c => c.id === id);
   document.getElementById('company-name-header').textContent = `${currentCompany.name} — Ledger`;
+  document.title = `${currentCompany.name} — Bookkeeping`;
+  showPage('dashboard');
   document.getElementById('ai-api-key').value = '';
   document.getElementById('ai-key-status').textContent = currentCompany.ai_api_key_set ? 'A key is set.' : 'No key set yet.';
   document.getElementById('f-locked-until').value = currentCompany.locked_until || '';
@@ -1046,12 +1103,14 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-function confirmAction(message) {
+function confirmAction(message, actionLabel) {
   return new Promise(resolve => {
     const dialog = document.getElementById('confirm-dialog');
     document.getElementById('confirm-dialog-message').textContent = message;
     const okBtn = document.getElementById('confirm-dialog-ok');
     const cancelBtn = document.getElementById('confirm-dialog-cancel');
+    okBtn.textContent = actionLabel || 'Confirm';
+    cancelBtn.textContent = 'Cancel';
     const finish = result => { dialog.close(); resolve(result); };
     okBtn.onclick = () => finish(true);
     cancelBtn.onclick = () => finish(false);
@@ -1059,6 +1118,48 @@ function confirmAction(message) {
     dialog.showModal();
   });
 }
+
+// ---------- toast notifications ----------
+
+function showToast(message, kind) {
+  const container = document.getElementById('toast-container');
+  const colorVar = kind === 'error' ? '--color-danger' : kind === 'success' ? '--color-success' : '--color-muted';
+  const toast = document.createElement('div');
+  toast.className = 'panel';
+  toast.style.margin = '0';
+  toast.style.borderLeft = `3px solid var(${colorVar})`;
+  toast.style.fontSize = '13px';
+  toast.style.boxShadow = '0 4px 14px rgba(0,0,0,.12)';
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), 4000);
+}
+
+// ---------- page router (this app is one HTML file with client-side "pages", not separate
+// server routes — each top-level section is shown/hidden by data-page, driven by the URL hash) ----------
+
+const PAGE_NAMES = ['dashboard', 'transactions', 'bank', 'accounts', 'invoices', 'reports', 'settings', 'audit'];
+
+function showPage(name) {
+  if (!PAGE_NAMES.includes(name)) name = 'dashboard';
+  document.querySelectorAll('.page').forEach(el => { el.style.display = el.dataset.page === name ? '' : 'none'; });
+  document.querySelectorAll('nav.page-tabs a').forEach(a => a.classList.toggle('nav-active', a.dataset.page === name));
+  if (location.hash !== `#page-${name}`) history.replaceState(null, '', `#page-${name}`);
+  window.scrollTo(0, 0);
+}
+
+function pageFromHash() {
+  const m = location.hash.match(/^#page-(.+)$/);
+  return m ? m[1] : 'dashboard';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('nav.page-tabs a').forEach(a => {
+    a.addEventListener('click', e => { e.preventDefault(); showPage(a.dataset.page); });
+  });
+  window.addEventListener('hashchange', () => showPage(pageFromHash()));
+  showPage(pageFromHash());
+});
 
 let _searchDebounce = null;
 async function runGlobalSearch() {
@@ -1082,19 +1183,6 @@ async function runGlobalSearch() {
   }, 250);
 }
 
-function setupNavScrollSpy() {
-  const navLinks = [...document.querySelectorAll('nav a[href^="#section-"]')];
-  if (!navLinks.length) return;
-  const sections = navLinks.map(a => document.querySelector(a.getAttribute('href'))).filter(Boolean);
-  const observer = new IntersectionObserver(entries => {
-    const visible = entries.filter(e => e.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
-    if (!visible) return;
-    const id = visible.target.id;
-    navLinks.forEach(a => a.classList.toggle('nav-active', a.getAttribute('href') === `#${id}`));
-  }, { rootMargin: '-80px 0px -60% 0px', threshold: [0, 0.25, 0.5] });
-  sections.forEach(s => observer.observe(s));
-}
-document.addEventListener('DOMContentLoaded', setupNavScrollSpy);
 function fmt(n) { return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function fmtDate(iso) { if (!iso) return ''; const [y, m, d] = iso.split('-'); return `${d}/${m}/${y}`; }
 function normalizeDesc(s) { return s.trim().toLowerCase(); }
@@ -1119,7 +1207,7 @@ function getAccountType(name) {
 function populateAccountSelects() {
   const sorted = [...chartAccounts].sort((a, b) => a.name.localeCompare(b.name));
   const optionsHtml = sorted.map(a => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)} (${a.code})</option>`).join('');
-  ['f-debit', 'f-credit', 'f-default-credit', 'brec-account', 'fa-account', 'ib-account', 'cj-pivot-account'].forEach(id => {
+  ['f-default-credit', 'brec-account', 'fa-account', 'ib-account', 'cj-pivot-account'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     const prev = el.value;
@@ -1210,8 +1298,9 @@ async function addTransaction() {
     result = await api(`/api/companies/${currentCompany.id}/transactions`, {
       method: 'POST', body: JSON.stringify({ date, desc, amount, debit, credit, vatRate, vatDirection, fund })
     });
-  } catch (e) { errEl.textContent = e.message; return; }
+  } catch (e) { errEl.textContent = e.message; showToast(e.message, 'error'); return; }
 
+  showToast(`Posted: ${desc} — ${fmt(amount)}`, 'success');
   pushUndoStack({ id: result.id, desc, amount });
 
   document.getElementById('f-desc').value = '';
@@ -1307,16 +1396,18 @@ async function clearAll() {
   await refreshAll();
 }
 
-function buildAccounts() {
+function buildAccountsFromTx(txList, includeOpeningBalances) {
   const accounts = {};
   function ensure(name) { if (!accounts[name]) accounts[name] = { debits: [], credits: [] }; return accounts[name]; }
 
-  for (const ob of openingBalances) {
-    const entry = { date: ob.asOfDate, desc: 'Opening balance', amount: ob.amount, debit: ob.side === 'debit' ? ob.account : '(opening balance)', credit: ob.side === 'credit' ? ob.account : '(opening balance)', _isOpeningBalance: true };
-    ensure(ob.account)[ob.side === 'debit' ? 'debits' : 'credits'].push(entry);
+  if (includeOpeningBalances) {
+    for (const ob of openingBalances) {
+      const entry = { date: ob.asOfDate, desc: 'Opening balance', amount: ob.amount, debit: ob.side === 'debit' ? ob.account : '(opening balance)', credit: ob.side === 'debit' ? '(opening balance)' : ob.account, _isOpeningBalance: true };
+      ensure(ob.account)[ob.side === 'debit' ? 'debits' : 'credits'].push(entry);
+    }
   }
 
-  const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
+  const sorted = [...txList].sort((a, b) => a.date.localeCompare(b.date));
   for (const t of sorted) {
     for (const line of expandTransactionLines(t)) {
       const entry = Object.assign({}, t, { amount: line.amount, _isVatLine: line.account === VAT_ACCOUNT });
@@ -1325,6 +1416,11 @@ function buildAccounts() {
   }
   return accounts;
 }
+
+// Every existing caller (T-accounts ledger view, dashboard, journal, etc.) wants the full,
+// unfiltered, all-time ledger — only the Financial Statements "Generate" button needs a
+// period-bounded view, built separately in renderFinancialStatements() below.
+function buildAccounts() { return buildAccountsFromTx(transactions, true); }
 
 function renderAccounts() {
   document.getElementById('tx-count').textContent = `${transactions.length} transaction${transactions.length === 1 ? '' : 's'}`;
@@ -1991,7 +2087,11 @@ const DEBIT_NORMAL = { cash: true, cogs: true, expense: true, current_asset: tru
 
 function renderChartOfAccounts() {
   const body = document.getElementById('coa-body');
-  const sorted = [...chartAccounts].sort((a, b) => a.code.localeCompare(b.code));
+  const filterEl = document.getElementById('coa-filter');
+  const filterText = (filterEl ? filterEl.value : '').trim().toLowerCase();
+  const sorted = [...chartAccounts]
+    .filter(a => !filterText || a.name.toLowerCase().includes(filterText) || a.code.includes(filterText))
+    .sort((a, b) => a.code.localeCompare(b.code));
   body.innerHTML = sorted.length ? sorted.map(a => {
     const options = Object.entries(ACCOUNT_TYPE_LABELS).map(([val, label]) =>
       `<option value="${val}" ${val === a.type ? 'selected' : ''}>${label}</option>`).join('');
@@ -2001,7 +2101,7 @@ function renderChartOfAccounts() {
       <td><select onchange="updateChartAccountType(${a.id}, this.value)">${options}</select></td>
       <td><button class="btn-danger" onclick="deleteChartAccount(${a.id}, '${a.name.replace(/'/g, "\\'")}')">✕</button></td>
     </tr>`;
-  }).join('') : `<tr><td colspan="4" class="empty">No accounts yet.</td></tr>`;
+  }).join('') : `<tr><td colspan="4" class="empty">${filterText ? 'No accounts match that filter.' : 'No accounts yet.'}</td></tr>`;
 
   const typeSelect = document.getElementById('coa-new-type');
   if (!typeSelect.options.length) {
@@ -2104,35 +2204,55 @@ function accountHasUnreviewedEntries(acc) {
 }
 
 function renderFinancialStatements() {
-  const accounts = buildAccounts();
-  const names = Object.keys(accounts);
-  if (!names.length) {
-    ['pnl-body', 'sofp-body', 'cashflow-body'].forEach(id => document.getElementById(id).innerHTML = '<tr><td class="empty">No transactions yet.</td></tr>');
+  // From/To bound the Profit or Loss and Cash Flow statements (flow for the period selected).
+  // The Statement of Financial Position is always cumulative as of the To date (or today/all-time
+  // if blank) — a balance sheet is a snapshot, not a range — same convention real accounting
+  // software uses, so "Retained profit" there is all-time net profit, not just this period's.
+  const fromDate = document.getElementById('fs-from').value;
+  const toDate = document.getElementById('fs-to').value;
+  const inPeriod = t => (!fromDate || t.date >= fromDate) && (!toDate || t.date <= toDate);
+  const upToDate = t => !toDate || t.date <= toDate;
+
+  const periodTx = transactions.filter(inPeriod);
+  const cumulativeTx = transactions.filter(upToDate);
+  const periodAccounts = buildAccountsFromTx(periodTx, false);
+  const cumulativeAccounts = buildAccountsFromTx(cumulativeTx, true);
+  const periodNames = Object.keys(periodAccounts);
+  const cumulativeNames = Object.keys(cumulativeAccounts);
+
+  if (!cumulativeNames.length) {
+    ['pnl-body', 'sofp-body', 'cashflow-body'].forEach(id => document.getElementById(id).innerHTML = '<tr><td class="empty">No transactions in this range yet.</td></tr>');
     document.getElementById('cashflow-check').textContent = '';
     document.getElementById('period-label').textContent = '';
     return;
   }
-  const dates = transactions.map(t => t.date).sort();
-  document.getElementById('period-label').textContent = `${fmtDate(dates[0])} – ${fmtDate(dates[dates.length - 1])}`;
-  const unreviewedCount = transactions.filter(t => t.confidence === 'low').length;
+  document.getElementById('period-label').textContent = (fromDate || toDate)
+    ? `${fromDate ? fmtDate(fromDate) : 'inception'} – ${toDate ? fmtDate(toDate) : 'today'}`
+    : 'all time';
+  const unreviewedCount = periodTx.filter(t => t.confidence === 'low').length;
   const obCount = openingBalances.length;
   document.getElementById('fs-build-summary').textContent =
-    `Built from ${transactions.length} ledger transaction${transactions.length === 1 ? '' : 's'} across ${names.length} account${names.length === 1 ? '' : 's'}` +
+    `Built from ${periodTx.length} ledger transaction${periodTx.length === 1 ? '' : 's'} in this period` +
+    ` (the Statement of Financial Position is cumulative as of ${toDate ? fmtDate(toDate) : 'today'})` +
     (obCount ? `, plus ${obCount} opening balance${obCount === 1 ? '' : 's'}` : '') +
     (unreviewedCount ? `. ${unreviewedCount} transaction${unreviewedCount === 1 ? '' : 's'} unreviewed — see flagged lines below.` : '.');
 
-  const byType = {};
-  for (const name of names) {
-    const type = getAccountType(name);
-    if (!byType[type]) byType[type] = [];
-    byType[type].push({ name, balance: accountNetBalance(accounts[name], type), unreviewed: accountHasUnreviewedEntries(accounts[name]) });
+  function byTypeOf(accountsMap, names) {
+    const byType = {};
+    for (const name of names) {
+      const type = getAccountType(name);
+      if (!byType[type]) byType[type] = [];
+      byType[type].push({ name, balance: accountNetBalance(accountsMap[name], type), unreviewed: accountHasUnreviewedEntries(accountsMap[name]) });
+    }
+    return byType;
   }
-  const sumType = t => (byType[t] || []).reduce((s, a) => s + a.balance, 0);
+  const sumOf = (byType, t) => (byType[t] || []).reduce((s, a) => s + a.balance, 0);
 
-  const revenue = sumType('revenue');
-  const cogs = sumType('cogs');
+  const byTypePeriod = byTypeOf(periodAccounts, periodNames);
+  const revenue = sumOf(byTypePeriod, 'revenue');
+  const cogs = sumOf(byTypePeriod, 'cogs');
   const grossProfit = revenue - cogs;
-  const expenseLines = byType['expense'] || [];
+  const expenseLines = byTypePeriod['expense'] || [];
   const totalExpenses = expenseLines.reduce((s, a) => s + a.balance, 0);
   const netProfit = grossProfit - totalExpenses;
 
@@ -2144,19 +2264,22 @@ function renderFinancialStatements() {
   pnl += lineRow(netProfit >= 0 ? 'Net profit' : 'Net loss', netProfit, { total: true });
   document.getElementById('pnl-body').innerHTML = pnl;
 
-  const nonCurrentAssets = byType['noncurrent_asset'] || [];
-  const currentAssetLines = (byType['current_asset'] || []).concat((byType['cash'] || []));
+  const byTypeCumulative = byTypeOf(cumulativeAccounts, cumulativeNames);
+  const cumulativeNetProfit = sumOf(byTypeCumulative, 'revenue') - sumOf(byTypeCumulative, 'cogs') - sumOf(byTypeCumulative, 'expense');
+
+  const nonCurrentAssets = byTypeCumulative['noncurrent_asset'] || [];
+  const currentAssetLines = (byTypeCumulative['current_asset'] || []).concat((byTypeCumulative['cash'] || []));
   const totalNonCurrentAssets = nonCurrentAssets.reduce((s, a) => s + a.balance, 0);
   const totalCurrentAssets = currentAssetLines.reduce((s, a) => s + a.balance, 0);
   const totalAssets = totalNonCurrentAssets + totalCurrentAssets;
 
-  const equityLines = byType['equity'] || [];
+  const equityLines = byTypeCumulative['equity'] || [];
   const totalEquityIntroduced = equityLines.reduce((s, a) => s + a.balance, 0);
-  const drawingsTotal = sumType('drawings');
-  const totalEquity = totalEquityIntroduced + netProfit - drawingsTotal;
+  const drawingsTotal = sumOf(byTypeCumulative, 'drawings');
+  const totalEquity = totalEquityIntroduced + cumulativeNetProfit - drawingsTotal;
 
-  const currentLiabLines = byType['current_liability'] || [];
-  const nonCurrentLiabLines = byType['noncurrent_liability'] || [];
+  const currentLiabLines = byTypeCumulative['current_liability'] || [];
+  const nonCurrentLiabLines = byTypeCumulative['noncurrent_liability'] || [];
   const totalCurrentLiab = currentLiabLines.reduce((s, a) => s + a.balance, 0);
   const totalNonCurrentLiab = nonCurrentLiabLines.reduce((s, a) => s + a.balance, 0);
   const totalEquityAndLiab = totalEquity + totalCurrentLiab + totalNonCurrentLiab;
@@ -2170,7 +2293,7 @@ function renderFinancialStatements() {
   sofp += lineRow('Total assets', totalAssets, { total: true });
   sofp += '<tr><td style="font-weight:700;">Equity</td><td></td></tr>';
   for (const a of equityLines) sofp += lineRow(a.name, a.balance, { flag: a.unreviewed, account: a.name });
-  sofp += lineRow(netProfit >= 0 ? 'Retained profit' : 'Retained loss', netProfit);
+  sofp += lineRow(cumulativeNetProfit >= 0 ? 'Retained profit' : 'Retained loss', cumulativeNetProfit);
   if (drawingsTotal) sofp += lineRow('Drawings', -drawingsTotal);
   sofp += lineRow('Total equity', totalEquity, { total: true });
   if (nonCurrentLiabLines.length) {
@@ -2182,7 +2305,7 @@ function renderFinancialStatements() {
   sofp += lineRow('Total equity and liabilities', totalEquityAndLiab, { total: true });
   document.getElementById('sofp-body').innerHTML = sofp;
 
-  const cashAccountNames = new Set(names.filter(n => getAccountType(n) === 'cash'));
+  const cashAccountNames = new Set(chartAccounts.filter(a => a.type === 'cash').map(a => a.name));
   const flowTypeBucket = type => {
     if (type === 'noncurrent_asset') return 'investing';
     if (type === 'equity' || type === 'drawings' || type === 'noncurrent_liability') return 'financing';
@@ -2190,7 +2313,7 @@ function renderFinancialStatements() {
   };
   const totals = { operating: 0, investing: 0, financing: 0 };
   const breakdown = { operating: {}, investing: {}, financing: {} };
-  for (const t of transactions) {
+  for (const t of periodTx) {
     const lines = expandTransactionLines(t);
     const hasCashLine = lines.some(l => cashAccountNames.has(l.account));
     if (!hasCashLine) continue;
@@ -2202,12 +2325,14 @@ function renderFinancialStatements() {
       breakdown[bucket][line.account] = (breakdown[bucket][line.account] || 0) + sign * line.amount;
     }
   }
-  // ending cash per the ledger (this already includes opening balances, since buildAccounts() injects them)
-  const cashBalance = [...cashAccountNames].reduce((s, n) => s + accountNetBalance(accounts[n], 'cash'), 0);
-  // beginning cash is the brought-forward figure from Opening Balances alone (Stage 1: no more hardcoded zero)
-  const beginningCash = openingBalances
-    .filter(ob => cashAccountNames.has(ob.account))
-    .reduce((s, ob) => s + (ob.side === 'debit' ? ob.amount : -ob.amount), 0);
+  // ending cash as of toDate, per the ledger (already includes opening balances)
+  const cashBalance = [...cashAccountNames].reduce((s, n) => s + accountNetBalance(cumulativeAccounts[n] || { debits: [], credits: [] }, 'cash'), 0);
+  // beginning cash is the brought-forward figure as of just before fromDate: opening balances
+  // plus any transactions that predate the selected period (zero of those when fromDate is blank,
+  // i.e. the original all-time behavior — opening balances alone).
+  const beforePeriodTx = transactions.filter(t => fromDate && t.date < fromDate);
+  const beginningCashAccounts = buildAccountsFromTx(beforePeriodTx, true);
+  const beginningCash = [...cashAccountNames].reduce((s, n) => s + accountNetBalance(beginningCashAccounts[n] || { debits: [], credits: [] }, 'cash'), 0);
   const netChange = totals.operating + totals.investing + totals.financing;
   const endingCash = beginningCash + netChange;
 
