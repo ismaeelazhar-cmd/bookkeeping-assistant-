@@ -402,6 +402,7 @@
     <h2>Chart of Accounts</h2>
     <div class="sub" style="margin-bottom:12px;">The single list of accounts this company can use — every debit/credit field elsewhere is chosen from here, not typed, so "Cash" and "cash" can never silently become two different accounts. The type drives the Statement of Profit or Loss / Statement of Financial Position / Cash Flow Statement.</div>
     <table class="inbox"><thead><tr><th>Code</th><th>Account</th><th>Type</th><th></th></tr></thead><tbody id="coa-body"></tbody></table>
+    <div id="coa-legend" class="sub" style="margin:10px 0;"></div>
     <div class="row2" style="margin-top:12px;">
       <div><label>New account name</label><input type="text" id="coa-new-name" placeholder="e.g. Stationery"></div>
       <div><label>Type</label><select id="coa-new-type"></select></div>
@@ -412,6 +413,7 @@
 
   <div class="panel" id="section-reports" style="margin-top:20px; scroll-margin-top:60px;">
     <h2>Financial Statements <span class="pill" id="period-label"></span></h2>
+    <div class="sub" id="fs-build-summary" style="margin-bottom:12px;"></div>
     <div class="row2" style="align-items:start;">
       <div><h2 style="margin-top:0;">Statement of Profit or Loss</h2><table class="trial"><tbody id="pnl-body"></tbody></table></div>
       <div><h2 style="margin-top:0;">Statement of Financial Position</h2><table class="trial"><tbody id="sofp-body"></tbody></table></div>
@@ -1143,14 +1145,19 @@ const KEYWORD_RULES = [
 
 function categorize(desc) {
   const key = normalizeDesc(desc);
-  if (presets[key]) return { debit: presets[key].debit, credit: presets[key].credit, confidence: 'high' };
+  if (presets[key]) {
+    return { debit: presets[key].debit, credit: presets[key].credit, confidence: 'high', reason: `Exact match to a previous "${desc}" entry you posted.` };
+  }
   for (const [presetDesc, pair] of Object.entries(presets)) {
-    if (key.includes(presetDesc) || presetDesc.includes(key)) return { debit: pair.debit, credit: pair.credit, confidence: 'high' };
+    if (key.includes(presetDesc) || presetDesc.includes(key)) {
+      return { debit: pair.debit, credit: pair.credit, confidence: 'high', reason: `Partial match to a previous entry described "${presetDesc}".` };
+    }
   }
   for (const rule of KEYWORD_RULES) {
-    if (rule.kws.some(kw => key.includes(kw))) return { debit: rule.debit, credit: rule.credit, confidence: 'high' };
+    const hit = rule.kws.find(kw => key.includes(kw));
+    if (hit) return { debit: rule.debit, credit: rule.credit, confidence: 'high', reason: `Matched the keyword rule "${hit}" → ${rule.debit} / ${rule.credit}.` };
   }
-  return { debit: 'Uncategorized', credit: currentCompany.default_credit_account || 'Cash', confidence: 'low' };
+  return { debit: 'Uncategorized', credit: currentCompany.default_credit_account || 'Cash', confidence: 'low', reason: 'No previous entry or keyword rule matched this description — needs manual review.' };
 }
 
 let candidates = [];
@@ -1179,7 +1186,7 @@ function parseMovementLine(line) {
   let desc = line.replace(best[0], ' ').replace(/\s{2,}/g, ' ').trim().replace(/^[-,\s]+|[-,\s]+$/g, '');
   if (!desc) desc = 'Movement';
   const cat = categorize(desc);
-  return { id: Date.now() + Math.random().toString(36).slice(2, 7), date, desc, amount, debit: cat.debit, credit: cat.credit, confidence: cat.confidence, selected: true };
+  return { id: Date.now() + Math.random().toString(36).slice(2, 7), date, desc, amount, debit: cat.debit, credit: cat.credit, confidence: cat.confidence, reason: cat.reason, selected: true };
 }
 
 function parseFreeformMovements() {
@@ -1240,7 +1247,7 @@ function renderCandidates() {
       <td class="num"><input type="number" step="0.01" value="${c.amount}" onchange="updateCandidate('${c.id}','amount',this.value)" style="width:80px; text-align:right;"></td>
       <td><input list="account-list" value="${escapeHtml(c.debit)}" onchange="updateCandidate('${c.id}','debit',this.value)"></td>
       <td><input list="account-list" value="${escapeHtml(c.credit)}" onchange="updateCandidate('${c.id}','credit',this.value)"></td>
-      <td><span class="confidence ${c.confidence}">${c.confidence === 'high' ? 'matched' : 'review'}</span> <button class="btn-danger" onclick="removeCandidate('${c.id}')">✕</button></td>
+      <td><span class="confidence ${c.confidence}" title="${escapeHtml(c.reason || '')}">${c.confidence === 'high' ? 'matched' : 'review'} ⓘ</span> <button class="btn-danger" onclick="removeCandidate('${c.id}')">✕</button></td>
     </tr>`).join('');
 }
 
@@ -1413,11 +1420,20 @@ function renderBrecTable() {
       const options = ['<option value="">— none —</option>'].concat(
         candidates.map(c => `<option value="${c.transactionId}" ${l.matchedTransactionId === c.transactionId ? 'selected' : ''}>${fmtDate(c.date)} — ${escapeHtml(c.desc)} (${fmt(c.amount)})</option>`)
       ).join('');
+      let reason;
+      if (isMatched) {
+        const matchedTx = ledgerLines.find(tl => tl.transactionId === l.matchedTransactionId);
+        reason = matchedTx ? `Matched to "${matchedTx.desc}" on ${fmtDate(matchedTx.date)}.` : 'Matched to a ledger transaction.';
+      } else if (candidates.length) {
+        reason = `${candidates.length} ledger transaction(s) at exactly ${fmt(l.amount)} are available to pick from the dropdown — none chosen yet.`;
+      } else {
+        reason = `No ledger transaction for this account is posted at exactly ${fmt(l.amount)} — either post one with "Post & match", or check for a typo/rounding difference.`;
+      }
       return `<tr>
         <td>${fmtDate(l.date)}</td>
         <td>${escapeHtml(l.desc)}</td>
         <td class="num" style="color:${l.amount >= 0 ? 'var(--good)' : 'var(--bad)'}">${fmt(l.amount)}</td>
-        <td><span class="confidence ${isMatched ? 'high' : 'low'}">${isMatched ? 'matched' : 'unmatched'}</span></td>
+        <td><span class="confidence ${isMatched ? 'high' : 'low'}" title="${escapeHtml(reason)}">${isMatched ? 'matched' : 'unmatched'} ⓘ</span></td>
         <td><select onchange="matchBankLine(${l.id}, this.value)">${options}</select></td>
         <td>
           ${!isMatched ? `<button class="btn-secondary" onclick="postAndMatchBrecLine(${l.id})">Post &amp; match</button>` : ''}
@@ -1504,6 +1520,22 @@ function renderChartOfAccounts() {
   if (!typeSelect.options.length) {
     typeSelect.innerHTML = Object.entries(ACCOUNT_TYPE_LABELS).map(([val, label]) => `<option value="${val}">${label}</option>`).join('');
   }
+
+  const STATEMENT_FOR_TYPE = {
+    cash: 'Statement of Financial Position (current assets) + drives the Cash Flow Statement',
+    revenue: 'Statement of Profit or Loss (Revenue)', cogs: 'Statement of Profit or Loss (Cost of sales)',
+    expense: 'Statement of Profit or Loss (Expenses)', current_asset: 'Statement of Financial Position (current assets)',
+    noncurrent_asset: 'Statement of Financial Position (non-current assets)',
+    current_liability: 'Statement of Financial Position (current liabilities)',
+    noncurrent_liability: 'Statement of Financial Position (non-current liabilities)',
+    equity: 'Statement of Financial Position (equity)', drawings: 'Statement of Financial Position (deducted from equity)',
+  };
+  const counts = {};
+  chartAccounts.forEach(a => { counts[a.type] = (counts[a.type] || 0) + 1; });
+  const legend = Object.keys(counts).sort().map(type =>
+    `<b>${ACCOUNT_TYPE_LABELS[type] || type}</b> (${counts[type]} account${counts[type] === 1 ? '' : 's'}, ${DEBIT_NORMAL[type] ? 'debit' : 'credit'}-normal) → ${STATEMENT_FOR_TYPE[type] || ''}`
+  ).join('<br>');
+  document.getElementById('coa-legend').innerHTML = legend || 'No accounts yet — add one below.';
 }
 
 async function addChartAccount() {
@@ -1566,6 +1598,12 @@ function renderFinancialStatements() {
   }
   const dates = transactions.map(t => t.date).sort();
   document.getElementById('period-label').textContent = `${fmtDate(dates[0])} – ${fmtDate(dates[dates.length - 1])}`;
+  const unreviewedCount = transactions.filter(t => t.confidence === 'low').length;
+  const obCount = openingBalances.length;
+  document.getElementById('fs-build-summary').textContent =
+    `Built from ${transactions.length} ledger transaction${transactions.length === 1 ? '' : 's'} across ${names.length} account${names.length === 1 ? '' : 's'}` +
+    (obCount ? `, plus ${obCount} opening balance${obCount === 1 ? '' : 's'}` : '') +
+    (unreviewedCount ? `. ${unreviewedCount} transaction${unreviewedCount === 1 ? '' : 's'} unreviewed — see flagged lines below.` : '.');
 
   const byType = {};
   for (const name of names) {
