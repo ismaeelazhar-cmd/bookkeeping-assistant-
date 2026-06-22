@@ -163,16 +163,16 @@
       <div class="row2">
         <div>
           <label>Debit account (where value goes)</label>
-          <input list="account-list" id="f-debit" placeholder="e.g. Computer Equipment">
+          <select id="f-debit"></select>
         </div>
         <div>
           <label>Credit account (where value comes from)</label>
-          <input list="account-list" id="f-credit" placeholder="e.g. Cash">
+          <select id="f-credit"></select>
         </div>
       </div>
       <datalist id="account-list"></datalist>
       <label>Default credit account <span style="color:var(--muted); font-weight:400;">(auto-fills credit when posting)</span></label>
-      <input list="account-list" id="f-default-credit" placeholder="e.g. Cash" oninput="saveSettings()">
+      <select id="f-default-credit" onchange="saveSettings()"></select>
       <label>Tax year (optional)</label>
       <input type="text" id="f-taxyear" placeholder="e.g. 2025/26">
 
@@ -207,6 +207,10 @@
       <div class="sub" style="margin-bottom:8px;">Once you've filed a VAT return or finalized accounts up to a date, lock it — transactions on or before that date can no longer be added, edited, or deleted by anyone.</div>
       <label>Locked up to and including</label>
       <input type="date" id="f-locked-until" oninput="saveSettings()">
+
+      <h2 style="margin-top:24px;">Books Start Date</h2>
+      <div class="sub" style="margin-bottom:8px;">The date your Opening Balances are "as of" — shown as the brought-forward point on the Cash Flow Statement.</div>
+      <input type="date" id="f-period-start" oninput="saveSettings()">
     </div>
 
     <div>
@@ -277,7 +281,7 @@
     <div class="row2">
       <div>
         <label>Cash/bank account</label>
-        <input list="account-list" id="brec-account" placeholder="e.g. Cash" value="Cash" oninput="renderBrecTable()">
+        <select id="brec-account" onchange="renderBrecTable()"></select>
       </div>
       <div>
         <label>Upload PDF statement</label>
@@ -299,8 +303,14 @@
 
   <div class="panel" style="margin-top:20px;">
     <h2>Opening Balances</h2>
-    <div class="sub" style="margin-bottom:12px;">Onboarding a business that already has history? Enter its balances as of a chosen date here instead of starting from zero. Each row posts as a normal transaction against "Opening Balance Equity" — it's regular double-entry, not a special case, so it shows up in the ledger and can be edited/deleted like anything else.</div>
-    <label>As of date</label>
+    <div class="sub" style="margin-bottom:12px;">Onboarding a business that already has history? Set each account's balance as of a chosen date instead of starting from zero. These live in their own record (not as disguised transactions) and are added on top of the ledger when building the trial balance, Statement of Financial Position, and the Cash Flow Statement's brought-forward cash figure.</div>
+
+    <table class="inbox">
+      <thead><tr><th>Account</th><th class="num">Opening balance</th><th>Side</th><th>As of</th><th></th></tr></thead>
+      <tbody id="ob-existing-body"></tbody>
+    </table>
+
+    <label style="margin-top:14px;">As of date (for new rows below)</label>
     <input type="date" id="ob-date">
     <table class="inbox" style="margin-top:10px;">
       <thead><tr><th>Account</th><th class="num">Amount</th><th>Side</th><th></th></tr></thead>
@@ -308,7 +318,7 @@
     </table>
     <div class="toolbar" style="margin-top:10px;">
       <button class="btn-secondary" onclick="addOpeningBalanceRow()">+ Add row</button>
-      <button class="btn-primary" style="margin-top:0;" onclick="postOpeningBalances()">Post opening balances</button>
+      <button class="btn-primary" style="margin-top:0;" onclick="postOpeningBalances()">Save opening balances</button>
     </div>
     <div id="ob-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
   </div>
@@ -319,7 +329,7 @@
 
     <div class="row2">
       <div><label>Asset name</label><input type="text" id="fa-name" placeholder="e.g. Laptop"></div>
-      <div><label>Asset account</label><input list="account-list" id="fa-account" placeholder="e.g. Computer Equipment"></div>
+      <div><label>Asset account</label><select id="fa-account"></select></div>
     </div>
     <div class="row2">
       <div><label>Cost</label><input type="number" id="fa-cost" step="0.01" min="0" placeholder="0.00"></div>
@@ -350,9 +360,15 @@
   </div>
 
   <div class="panel" style="margin-top:20px;">
-    <h2>Account Classification</h2>
-    <div class="sub" style="margin-bottom:12px;">Tell the app what each account represents, so it can build a Statement of Profit or Loss, Statement of Financial Position, and Statement of Cash Flows.</div>
-    <table class="inbox"><thead><tr><th>Account</th><th>Type</th></tr></thead><tbody id="account-types-body"></tbody></table>
+    <h2>Chart of Accounts</h2>
+    <div class="sub" style="margin-bottom:12px;">The single list of accounts this company can use — every debit/credit field elsewhere is chosen from here, not typed, so "Cash" and "cash" can never silently become two different accounts. The type drives the Statement of Profit or Loss / Statement of Financial Position / Cash Flow Statement.</div>
+    <table class="inbox"><thead><tr><th>Code</th><th>Account</th><th>Type</th><th></th></tr></thead><tbody id="coa-body"></tbody></table>
+    <div class="row2" style="margin-top:12px;">
+      <div><label>New account name</label><input type="text" id="coa-new-name" placeholder="e.g. Stationery"></div>
+      <div><label>Type</label><select id="coa-new-type"></select></div>
+    </div>
+    <button class="btn-primary" onclick="addChartAccount()">Add account</button>
+    <div id="coa-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
   </div>
 
   <div class="panel" style="margin-top:20px;">
@@ -504,12 +520,13 @@ function goToCompanyPicker() {
 async function openCompany(id) {
   currentCompany = companies.find(c => c.id === id);
   document.getElementById('company-name-header').textContent = `${currentCompany.name} — Ledger`;
-  document.getElementById('f-default-credit').value = currentCompany.default_credit_account || '';
   document.getElementById('ai-api-key').value = currentCompany.ai_api_key || '';
   document.getElementById('f-locked-until').value = currentCompany.locked_until || '';
-  document.getElementById('ob-rows').innerHTML = ''; obRowCount = 0; addOpeningBalanceRow();
+  document.getElementById('f-period-start').value = currentCompany.period_start_date || '';
+  document.getElementById('ob-rows').innerHTML = ''; obRowCount = 0;
   show('app-screen');
   await refreshAll();
+  addOpeningBalanceRow();
 }
 
 async function saveSettings() {
@@ -517,12 +534,14 @@ async function saveSettings() {
   currentCompany.default_credit_account = document.getElementById('f-default-credit').value.trim();
   currentCompany.ai_api_key = document.getElementById('ai-api-key').value.trim();
   currentCompany.locked_until = document.getElementById('f-locked-until').value;
+  currentCompany.period_start_date = document.getElementById('f-period-start').value;
   await api(`/api/companies/${currentCompany.id}/settings`, {
     method: 'PUT',
     body: JSON.stringify({
       defaultCreditAccount: currentCompany.default_credit_account,
       aiApiKey: currentCompany.ai_api_key,
-      lockedUntil: currentCompany.locked_until
+      lockedUntil: currentCompany.locked_until,
+      periodStartDate: currentCompany.period_start_date
     })
   });
 }
@@ -537,19 +556,49 @@ function normalizeDesc(s) { return s.trim().toLowerCase(); }
 // ---------- per-company state, loaded from server ----------
 let transactions = [];
 let presets = {};
-let accountTypeOverrides = {};
-
+let chartAccounts = [];      // [{id, code, name, type}]
+let openingBalances = [];    // [{id, account, accountType, amount, side, asOfDate}]
 let bankLines = [];
+
+function findAccount(name) {
+  const key = (name || '').toLowerCase();
+  return chartAccounts.find(a => a.name.toLowerCase() === key);
+}
+
+function getAccountType(name) {
+  const acc = findAccount(name);
+  return acc ? acc.type : 'expense'; // shouldn't happen — every account is server-resolved on write
+}
+
+function populateAccountSelects() {
+  const sorted = [...chartAccounts].sort((a, b) => a.name.localeCompare(b.name));
+  const optionsHtml = sorted.map(a => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)} (${a.code})</option>`).join('');
+  ['f-debit', 'f-credit', 'f-default-credit', 'brec-account', 'fa-account'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const prev = el.value;
+    el.innerHTML = '<option value=""></option>' + optionsHtml;
+    if (sorted.some(a => a.name === prev)) el.value = prev;
+  });
+  document.getElementById('f-default-credit').value = currentCompany.default_credit_account || '';
+  if (!document.getElementById('brec-account').value) {
+    const cashAcc = sorted.find(a => a.type === 'cash');
+    if (cashAcc) document.getElementById('brec-account').value = cashAcc.name;
+  }
+  document.getElementById('account-list').innerHTML = sorted.map(a => `<option value="${escapeHtml(a.name)}">`).join('');
+}
 
 async function refreshAll() {
   const cid = currentCompany.id;
-  [transactions, presets, accountTypeOverrides, bankLines, fixedAssets] = await Promise.all([
+  [transactions, presets, chartAccounts, bankLines, fixedAssets, openingBalances] = await Promise.all([
     api(`/api/companies/${cid}/transactions`),
     api(`/api/companies/${cid}/presets`),
-    api(`/api/companies/${cid}/account-types`),
+    api(`/api/companies/${cid}/accounts`),
     api(`/api/companies/${cid}/bank-lines`),
-    api(`/api/companies/${cid}/fixed-assets`)
+    api(`/api/companies/${cid}/fixed-assets`),
+    api(`/api/companies/${cid}/opening-balances`)
   ]);
+  populateAccountSelects();
   render();
   loadAuditLog();
 }
@@ -658,6 +707,12 @@ async function clearAll() {
 function buildAccounts() {
   const accounts = {};
   function ensure(name) { if (!accounts[name]) accounts[name] = { debits: [], credits: [] }; return accounts[name]; }
+
+  for (const ob of openingBalances) {
+    const entry = { date: ob.asOfDate, desc: 'Opening balance', amount: ob.amount, debit: ob.side === 'debit' ? ob.account : '(opening balance)', credit: ob.side === 'credit' ? ob.account : '(opening balance)', _isOpeningBalance: true };
+    ensure(ob.account)[ob.side === 'debit' ? 'debits' : 'credits'].push(entry);
+  }
+
   const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
   for (const t of sorted) {
     for (const line of expandTransactionLines(t)) {
@@ -709,12 +764,6 @@ function renderJournal() {
   document.getElementById('tx-count').textContent = `${transactions.length} transaction${transactions.length === 1 ? '' : 's'}`;
 }
 
-function renderAccountList() {
-  const accounts = new Set();
-  transactions.forEach(t => { accounts.add(t.debit); accounts.add(t.credit); });
-  document.getElementById('account-list').innerHTML = [...accounts].sort().map(a => `<option value="${escapeHtml(a)}">`).join('');
-}
-
 function renderTrialBalance() {
   const accounts = buildAccounts();
   const names = Object.keys(accounts).sort();
@@ -760,8 +809,9 @@ function printCompilation() {
 }
 
 function render() {
-  renderAccounts(); renderJournal(); renderAccountList(); renderTrialBalance();
-  renderAccountTypesTable(); renderFinancialStatements(); renderBrecTable(); renderFixedAssets();
+  renderAccounts(); renderJournal(); renderTrialBalance();
+  renderChartOfAccounts(); renderFinancialStatements(); renderBrecTable(); renderFixedAssets();
+  renderOpeningBalances();
 }
 
 function exportCSV() {
@@ -1185,7 +1235,7 @@ async function postAndMatchBrecLine(lineId) {
   await matchBankLine(lineId, result.id);
 }
 
-// ---------- Account classification + financial statements ----------
+// ---------- Chart of accounts + financial statements ----------
 
 const ACCOUNT_TYPE_LABELS = {
   cash: 'Cash & cash equivalents', revenue: 'Revenue', cogs: 'Cost of sales', expense: 'Expense',
@@ -1195,39 +1245,55 @@ const ACCOUNT_TYPE_LABELS = {
 const DEBIT_NORMAL = { cash: true, cogs: true, expense: true, current_asset: true, noncurrent_asset: true, drawings: true,
   revenue: false, current_liability: false, noncurrent_liability: false, equity: false };
 
-function guessAccountType(name) {
-  const n = name.toLowerCase();
-  if (n === 'cash' || n.includes('bank')) return 'cash';
-  if (n.includes('vat')) return 'current_liability';
-  if (n.includes('drawing')) return 'drawings';
-  if (n === 'capital' || n.includes('capital introduced') || n.includes('share capital') || n.includes('share premium') || n.includes('opening balance equity')) return 'equity';
-  if (n.includes('loan')) return 'noncurrent_liability';
-  if (n.includes('payable')) return 'current_liability';
-  if (n.includes('receivable') || n.includes('recievable')) return 'current_asset';
-  if (n.includes('sale') || n.includes('revenue') || n.includes('income')) return 'revenue';
-  if (n.includes('cost of sale') || n.includes('purchase')) return 'cogs';
-  if (n.includes('accumulated depreciation')) return 'noncurrent_asset'; // contra-asset: only ever credited, so it nets negative within this bucket
-  if (n.includes('depreciation')) return 'expense';
-  if (n.includes('equipment') || n.includes('vehicle') || n.includes('property') || n.includes('premises') || n.includes('fixtures')) return 'noncurrent_asset';
-  return 'expense';
-}
-function getAccountType(name) { return accountTypeOverrides[name] || guessAccountType(name); }
+function renderChartOfAccounts() {
+  const body = document.getElementById('coa-body');
+  const sorted = [...chartAccounts].sort((a, b) => a.code.localeCompare(b.code));
+  body.innerHTML = sorted.length ? sorted.map(a => {
+    const options = Object.entries(ACCOUNT_TYPE_LABELS).map(([val, label]) =>
+      `<option value="${val}" ${val === a.type ? 'selected' : ''}>${label}</option>`).join('');
+    return `<tr>
+      <td>${escapeHtml(a.code)}</td>
+      <td>${escapeHtml(a.name)}</td>
+      <td><select onchange="updateChartAccountType(${a.id}, this.value)">${options}</select></td>
+      <td><button class="btn-danger" onclick="deleteChartAccount(${a.id}, '${a.name.replace(/'/g, "\\'")}')">✕</button></td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="4" class="empty">No accounts yet.</td></tr>`;
 
-async function saveAccountTypeOverride(name, type) {
-  accountTypeOverrides[name] = type;
-  await api(`/api/companies/${currentCompany.id}/account-types`, { method: 'PUT', body: JSON.stringify({ name, type }) });
+  const typeSelect = document.getElementById('coa-new-type');
+  if (!typeSelect.options.length) {
+    typeSelect.innerHTML = Object.entries(ACCOUNT_TYPE_LABELS).map(([val, label]) => `<option value="${val}">${label}</option>`).join('');
+  }
+}
+
+async function addChartAccount() {
+  const name = document.getElementById('coa-new-name').value.trim();
+  const type = document.getElementById('coa-new-type').value;
+  const statusEl = document.getElementById('coa-status');
+  if (!name) { statusEl.textContent = 'Enter an account name.'; return; }
+  try {
+    await api(`/api/companies/${currentCompany.id}/accounts`, { method: 'POST', body: JSON.stringify({ name, type }) });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = '';
+  document.getElementById('coa-new-name').value = '';
+  chartAccounts = await api(`/api/companies/${currentCompany.id}/accounts`);
+  populateAccountSelects();
+  renderChartOfAccounts();
+}
+
+async function updateChartAccountType(accountId, type) {
+  await api(`/api/companies/${currentCompany.id}/accounts/${accountId}`, { method: 'PUT', body: JSON.stringify({ type }) });
+  chartAccounts = await api(`/api/companies/${currentCompany.id}/accounts`);
   renderFinancialStatements();
 }
 
-function renderAccountTypesTable() {
-  const names = Object.keys(buildAccounts()).sort();
-  const body = document.getElementById('account-types-body');
-  if (!names.length) { body.innerHTML = `<tr><td colspan="2" class="empty">No accounts yet.</td></tr>`; return; }
-  body.innerHTML = names.map(name => {
-    const current = getAccountType(name);
-    const options = Object.entries(ACCOUNT_TYPE_LABELS).map(([val, label]) => `<option value="${val}" ${val === current ? 'selected' : ''}>${label}</option>`).join('');
-    return `<tr><td>${escapeHtml(name)}</td><td><select onchange="saveAccountTypeOverride('${name.replace(/'/g,"\\'")}', this.value)">${options}</select></td></tr>`;
-  }).join('');
+async function deleteChartAccount(accountId, name) {
+  if (!confirm(`Delete the account "${name}"? Only possible if no transactions use it.`)) return;
+  try {
+    await api(`/api/companies/${currentCompany.id}/accounts/${accountId}`, { method: 'DELETE' });
+  } catch (e) { alert(e.message); return; }
+  chartAccounts = await api(`/api/companies/${currentCompany.id}/accounts`);
+  populateAccountSelects();
+  renderChartOfAccounts();
 }
 
 function accountNetBalance(acc, type) {
@@ -1336,8 +1402,14 @@ function renderFinancialStatements() {
       breakdown[bucket][line.account] = (breakdown[bucket][line.account] || 0) + sign * line.amount;
     }
   }
+  // ending cash per the ledger (this already includes opening balances, since buildAccounts() injects them)
   const cashBalance = [...cashAccountNames].reduce((s, n) => s + accountNetBalance(accounts[n], 'cash'), 0);
+  // beginning cash is the brought-forward figure from Opening Balances alone (Stage 1: no more hardcoded zero)
+  const beginningCash = openingBalances
+    .filter(ob => cashAccountNames.has(ob.account))
+    .reduce((s, ob) => s + (ob.side === 'debit' ? ob.amount : -ob.amount), 0);
   const netChange = totals.operating + totals.investing + totals.financing;
+  const endingCash = beginningCash + netChange;
 
   let cf = '';
   const section = (title, key) => {
@@ -1350,12 +1422,12 @@ function renderFinancialStatements() {
   cf += section('Investing activities', 'investing');
   cf += section('Financing activities', 'financing');
   cf += lineRow('Net increase / (decrease) in cash and cash equivalents', netChange, { total: true });
-  cf += lineRow('Cash and cash equivalents at beginning of period', 0);
-  cf += lineRow('Cash and cash equivalents at end of period', netChange, { total: true });
+  cf += lineRow('Cash and cash equivalents at beginning of period', beginningCash);
+  cf += lineRow('Cash and cash equivalents at end of period', endingCash, { total: true });
   document.getElementById('cashflow-body').innerHTML = cf;
 
   const checkEl = document.getElementById('cashflow-check');
-  const matches = Math.abs(netChange - cashBalance) < 0.005;
+  const matches = Math.abs(endingCash - cashBalance) < 0.005;
   checkEl.textContent = matches ? 'reconciles to ledger' : `check: ledger cash = ${fmt(cashBalance)}`;
   checkEl.style.color = matches ? 'var(--good)' : 'var(--bad)';
 }
@@ -1529,17 +1601,40 @@ async function runDepreciation() {
 
 let obRowCount = 0;
 
+function accountOptionsHtml() {
+  return '<option value=""></option>' + [...chartAccounts].sort((a, b) => a.name.localeCompare(b.name))
+    .map(a => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)} (${a.code})</option>`).join('');
+}
+
 function addOpeningBalanceRow() {
   obRowCount++;
   const tbody = document.getElementById('ob-rows');
   const tr = document.createElement('tr');
   tr.id = `ob-row-${obRowCount}`;
   tr.innerHTML = `
-    <td><input list="account-list" placeholder="e.g. Cash"></td>
+    <td><select>${accountOptionsHtml()}</select></td>
     <td class="num"><input type="number" step="0.01" min="0" placeholder="0.00" style="text-align:right;"></td>
     <td><select><option value="debit">Debit</option><option value="credit">Credit</option></select></td>
     <td><button class="btn-danger" onclick="document.getElementById('ob-row-${obRowCount}').remove()">✕</button></td>`;
   tbody.appendChild(tr);
+}
+
+function renderOpeningBalances() {
+  const body = document.getElementById('ob-existing-body');
+  if (!openingBalances.length) { body.innerHTML = '<tr><td colspan="5" class="empty">No opening balances set yet.</td></tr>'; return; }
+  body.innerHTML = openingBalances.map(ob => `
+    <tr>
+      <td>${escapeHtml(ob.account)}</td>
+      <td class="num">${fmt(ob.amount)}</td>
+      <td style="color:${ob.side === 'debit' ? 'var(--debit)' : 'var(--credit)'}">${ob.side}</td>
+      <td>${fmtDate(ob.asOfDate)}</td>
+      <td><button class="btn-danger" onclick="deleteOpeningBalance(${ob.id})">✕</button></td>
+    </tr>`).join('');
+}
+
+async function deleteOpeningBalance(id) {
+  await api(`/api/companies/${currentCompany.id}/opening-balances/${id}`, { method: 'DELETE' });
+  await refreshAll();
 }
 
 async function postOpeningBalances() {
@@ -1550,22 +1645,21 @@ async function postOpeningBalances() {
   const rows = [...document.getElementById('ob-rows').querySelectorAll('tr')];
   const items = [];
   for (const row of rows) {
-    const [accountInput, amountInput, sideSelect] = row.querySelectorAll('input, select');
-    const account = accountInput.value.trim();
+    const [accountSelect, amountInput, sideSelect] = row.querySelectorAll('select, input');
+    const account = accountSelect.value;
     const amount = parseFloat(amountInput.value);
     const side = sideSelect.value;
     if (!account || !amount || amount <= 0) continue;
-    const debit = side === 'debit' ? account : 'Opening Balance Equity';
-    const credit = side === 'debit' ? 'Opening Balance Equity' : account;
-    items.push({ date, desc: `Opening balance — ${account}`, amount, debit, credit, taxYear: '' });
+    items.push({ account, amount, side, asOfDate: date });
   }
   if (!items.length) { statusEl.textContent = 'Add at least one account with a positive amount.'; return; }
 
-  const result = await api(`/api/companies/${currentCompany.id}/transactions/bulk`, { method: 'POST', body: JSON.stringify(items) });
-  statusEl.textContent = `Posted ${result.inserted} opening balance(s).` + (result.skippedLocked ? ` ${result.skippedLocked} fell in a locked period.` : '');
+  const result = await api(`/api/companies/${currentCompany.id}/opening-balances/bulk`, { method: 'POST', body: JSON.stringify(items) });
+  statusEl.textContent = `Saved ${result.saved} opening balance(s).`;
   document.getElementById('ob-rows').innerHTML = '';
   obRowCount = 0;
   await refreshAll();
+  addOpeningBalanceRow();
 }
 
 // ---------- Audit log ----------
