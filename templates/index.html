@@ -2164,8 +2164,29 @@ async function renderAttachmentsModal() {
     <tr>
       <td><a href="/api/companies/${currentCompany.id}/attachments/${a.id}/download" target="_blank" style="color:var(--accent);">${escapeHtml(a.filename)}</a></td>
       <td style="color:var(--muted); font-size:11px;">${escapeHtml(a.uploadedBy)}</td>
-      <td><button class="btn-danger" onclick="deleteAttachmentItem(${a.id})">✕</button></td>
+      <td>
+        <button class="btn-secondary" onclick="extractAttachment(${a.id})">✨ Read with AI</button>
+        <button class="btn-danger" onclick="deleteAttachmentItem(${a.id})">✕</button>
+      </td>
     </tr>`).join('') : '<tr><td colspan="3" class="empty">No attachments yet.</td></tr>';
+}
+
+async function extractAttachment(attachmentId) {
+  const statusEl = document.getElementById('attachments-modal-status');
+  if (!currentCompany.ai_api_key_set) { statusEl.textContent = 'Add a Claude API key under AI settings (in Movements Inbox) first.'; return; }
+  statusEl.textContent = 'Reading receipt…';
+  let extracted;
+  try {
+    extracted = await api(`/api/companies/${currentCompany.id}/attachments/${attachmentId}/extract`, { method: 'POST' });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  const parts = [];
+  if (extracted.date) parts.push(`date ${extracted.date}`);
+  if (extracted.desc) parts.push(`"${extracted.desc}"`);
+  if (extracted.amount != null) parts.push(fmt(parseFloat(extracted.amount)));
+  statusEl.textContent = parts.length ? `Read: ${parts.join(', ')}. Fill these into the New Transaction form yourself, or paste into the Movements Inbox.` : 'Could not read any fields from this file.';
+  if (extracted.date || extracted.desc || extracted.amount != null) {
+    document.getElementById('movement-text').value += `${extracted.date || ''} ${extracted.amount || ''} ${extracted.desc || ''}\n`;
+  }
 }
 
 async function uploadAttachment() {

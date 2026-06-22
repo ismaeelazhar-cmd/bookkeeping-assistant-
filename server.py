@@ -7,6 +7,7 @@ from functools import wraps
 
 import uuid
 import re
+import base64
 import urllib.request
 import urllib.error
 import mimetypes
@@ -1026,6 +1027,71 @@ def download_attachment(company_id, attachment_id):
         str(UPLOADS_DIR / directory), filename, mimetype=row["mime_type"],
         as_attachment=True, download_name=row["filename"],
     )
+
+
+@app.route("/api/companies/<int:company_id>/attachments/<int:attachment_id>/extract", methods=["POST"])
+@login_required
+@company_required
+def extract_attachment(company_id, attachment_id):
+    """Stage 5 receipt OCR: send the stored file to Claude (vision for images, native
+    document support for PDFs) and ask it to read off date/description/amount/vendor —
+    same server-side-key pattern as ai_categorize, nothing new exposed to the browser."""
+    api_key = g.company["ai_api_key"]
+    if not api_key:
+        return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
+
+    db = get_db()
+    row = db.execute(
+        "SELECT filename, mime_type, stored_path FROM attachments WHERE id = ? AND company_id = ?",
+        (attachment_id, company_id),
+    ).fetchone()
+    if row is None:
+        return jsonify({"error": "Attachment not found."}), 404
+
+    file_path = UPLOADS_DIR / row["stored_path"]
+    if not file_path.exists():
+        return jsonify({"error": "Stored file is missing."}), 404
+    with open(file_path, "rb") as f:
+        file_b64 = base64.b64encode(f.read()).decode("ascii")
+
+    block_type = "document" if row["mime_type"] == "application/pdf" else "image"
+    prompt_text = (
+        "This is a receipt or invoice. Read off the date (YYYY-MM-DD), a short description "
+        "(vendor/item), and the total amount paid (a positive number, the gross/final total). "
+        'Return ONLY JSON, no prose: {"date":"YYYY-MM-DD","desc":"...","amount":0.00}. '
+        'If you genuinely cannot read a field, use null for it.'
+    )
+    payload = json.dumps({
+        "model": "claude-sonnet-4-6", "max_tokens": 1024,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": block_type, "source": {"type": "base64", "media_type": row["mime_type"], "data": file_b64}},
+                {"type": "text", "text": prompt_text},
+            ],
+        }],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=payload, method="POST",
+        headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
+    except urllib.error.URLError as e:
+        return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
+
+    raw_text = "".join(block.get("text", "") for block in body.get("content", []))
+    match = re.search(r"\{[\s\S]*\}", raw_text)
+    if not match:
+        return jsonify({"error": "Claude did not return a parseable result."}), 502
+    try:
+        extracted = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return jsonify({"error": "Claude's response wasn't valid JSON."}), 502
+    return jsonify(extracted)
 
 
 @app.route("/api/companies/<int:company_id>/attachments/<int:attachment_id>", methods=["DELETE"])
