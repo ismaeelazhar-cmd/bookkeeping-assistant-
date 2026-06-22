@@ -750,6 +750,12 @@
       <table class="trial" id="comparative-table" style="margin-top:10px;"></table>
     </div>
 
+    <div class="panel" style="margin-top:20px;">
+      <h2>Cash Flow Forecast</h2>
+      <div class="sub" style="margin-bottom:12px;">Projected cash position: current cash, plus outstanding receivables/payables and recurring journal commitments due within each window. Not a guarantee — customers and suppliers don't always pay on the due date.</div>
+      <div id="forecast-bars"></div>
+    </div>
+
     <div class="panel" id="fund-accounting-panels" style="margin-top:20px; display:none;">
       <h2>Funds</h2>
       <div class="sub" style="margin-bottom:12px;">Restricted/designated funds need a deliberate type — they don't auto-create from typing like accounts do.</div>
@@ -1461,6 +1467,8 @@ async function refreshAll() {
   await loadClarificationQueue();
   await loadBudgets();
   await loadReconciliationHistory();
+  await loadRecurringJournals();
+  renderCashFlowForecast();
 }
 
 function suggestFromDescription() {
@@ -2335,6 +2343,11 @@ function ledgerLinesForCashAccount(account) {
 // ---------- Reconciliation history ----------
 
 let reconciliations = [];
+let recurringJournals = [];
+
+async function loadRecurringJournals() {
+  recurringJournals = await api(`/api/companies/${currentCompany.id}/recurring-journals`);
+}
 
 async function loadReconciliationHistory() {
   reconciliations = await api(`/api/companies/${currentCompany.id}/reconciliations`);
@@ -2639,6 +2652,57 @@ function shiftDateOneYearBack(dateStr) {
   const year = y - 1;
   const daysInMonth = new Date(year, m, 0).getDate(); // handles 29 Feb -> 28 Feb in a non-leap year
   return `${year}-${String(m).padStart(2, '0')}-${String(Math.min(d, daysInMonth)).padStart(2, '0')}`;
+}
+
+function renderCashFlowForecast() {
+  const el = document.getElementById('forecast-bars');
+  if (!el) return;
+  const accounts = buildAccounts();
+  const cashNames = Object.keys(accounts).filter(n => getAccountType(n) === 'cash');
+  const currentCash = cashNames.reduce((s, n) => s + accountNetBalance(accounts[n], 'cash'), 0);
+
+  const today = new Date().toISOString().slice(0, 10);
+  const addDays = n => { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+  const windows = [30, 60, 90];
+
+  // Recurring journals: a cash inflow if the debit side is a cash account, an outflow if the
+  // credit side is — anything that doesn't touch cash on either side has no place in a cash
+  // forecast and is skipped.
+  const recurringCashEffect = rj => {
+    if (cashNames.includes(rj.debit)) return rj.amount;
+    if (cashNames.includes(rj.credit)) return -rj.amount;
+    return 0;
+  };
+
+  const rows = windows.map(days => {
+    const horizon = addDays(days);
+    const receivables = invoicesBills
+      .filter(d => d.kind === 'invoice' && d.status === 'sent' && d.dueDate >= today && d.dueDate <= horizon)
+      .reduce((s, d) => s + d.amount, 0);
+    const payables = invoicesBills
+      .filter(d => d.kind === 'bill' && d.status === 'sent' && d.dueDate >= today && d.dueDate <= horizon)
+      .reduce((s, d) => s + d.amount, 0);
+    const recurring = recurringJournals
+      .filter(rj => rj.nextDue >= today && rj.nextDue <= horizon)
+      .reduce((s, rj) => s + recurringCashEffect(rj), 0);
+    const projected = currentCash + receivables - payables + recurring;
+    return { days, receivables, payables, recurring, projected };
+  });
+
+  const maxAbs = Math.max(Math.abs(currentCash), ...rows.map(r => Math.abs(r.projected)), 1);
+  const barWidth = v => `${Math.min(100, Math.abs(v) / maxAbs * 100)}%`;
+  const barRow = (label, value) => `
+    <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+      <div style="width:90px; font-size:12px; color:var(--muted);">${label}</div>
+      <div style="flex:1; background:var(--panel-soft); border-radius:4px; height:20px; position:relative;">
+        <div style="height:100%; border-radius:4px; width:${barWidth(value)}; background:${value >= 0 ? 'var(--good)' : 'var(--bad)'};"></div>
+      </div>
+      <div style="width:90px; text-align:right; font-family:var(--font-mono); font-size:13px;">${fmt(value)}</div>
+    </div>`;
+
+  el.innerHTML = barRow('Today', currentCash) + rows.map(r => barRow(`${r.days} days`, r.projected)).join('') +
+    `<div class="sub" style="margin-top:6px;">Receivables/payables/recurring-journal commitments due within each window: ` +
+    rows.map(r => `${r.days}d → +${fmt(r.receivables)} / -${fmt(r.payables)} / ${r.recurring >= 0 ? '+' : ''}${fmt(r.recurring)} recurring`).join(' · ') + `</div>`;
 }
 
 function renderComparativePeriod() {
