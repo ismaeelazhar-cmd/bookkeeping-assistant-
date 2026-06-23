@@ -944,6 +944,73 @@ def login():
     return jsonify({"id": user["id"], "email": user["email"]})
 
 
+DEMO_TRANSACTIONS = [
+    # (days ago, desc, amount, debit, credit) — a fictional plumbing business's typical month:
+    # a few invoiced jobs, materials, van/fuel, insurance, phone, and a monthly rent/wage run.
+    # Repeated once per month for 6 months below, with the day offset varied per iteration.
+    (2, "Boiler service — Hartley residence", 280.00, "Cash", "Sales"),
+    (5, "Bathroom refit — Thompson Ltd", 1850.00, "Trade Receivables", "Sales"),
+    (6, "Materials — Plumbing World", 340.00, "Materials & Supplies", "Cash"),
+    (9, "Emergency callout — Davis", 150.00, "Cash", "Sales"),
+    (11, "Van fuel", 95.00, "Vehicle & Fuel", "Cash"),
+    (14, "Pipe fitting job — Clark Properties", 620.00, "Cash", "Sales"),
+    (16, "Public liability insurance", 65.00, "Insurance", "Cash"),
+    (18, "Materials — City Plumb Supplies", 210.00, "Materials & Supplies", "Cash"),
+    (20, "Mobile phone bill", 38.00, "Phone & Internet", "Cash"),
+    (22, "Kitchen plumbing — White Contractors", 940.00, "Trade Receivables", "Sales"),
+    (25, "Van service & MOT", 180.00, "Vehicle & Fuel", "Cash"),
+    (27, "Office rent", 450.00, "Rent", "Cash"),
+    (28, "Owner drawings", 1200.00, "Drawings", "Cash"),
+]
+
+
+def seed_demo_data(db, company_id):
+    """Backfills ~6 months of realistic plumbing-business transactions for demo mode — varied
+    enough (invoiced jobs, materials, van costs, rent, drawings) to make the dashboard, reports,
+    and reconciliation pages all show something rather than being empty on first look."""
+    today = datetime.date.today()
+    opening_date = today - datetime.timedelta(days=6 * 30)
+    try:
+        post_ledger_transaction(db, company_id, opening_date.isoformat(), "Capital introduced", 8000.00, "Cash", "Capital Introduced")
+    except LedgerError:
+        pass
+    for month_offset in range(6, 0, -1):
+        for days_ago, desc, amount, debit, credit in DEMO_TRANSACTIONS:
+            date = today - datetime.timedelta(days=month_offset * 30 - days_ago)
+            try:
+                post_ledger_transaction(db, company_id, date.isoformat(), desc, amount, debit, credit)
+            except LedgerError:
+                continue
+
+
+@app.route("/api/demo", methods=["POST"])
+@rate_limit(max_attempts=20, window_seconds=3600)
+def start_demo():
+    """One-click demo: spins up a throwaway account + a 'Riverside Plumbing & Heating' company
+    pre-loaded with 6 months of sample transactions, and logs the browser straight into it — no
+    signup form. The account is a real row (so the session/permission model needs nothing
+    special) but uses a randomly generated, never-displayed email+password so it can't collide
+    with or be guessed into a real user's account."""
+    db = get_db()
+    demo_email = f"demo-{uuid.uuid4().hex}@demo.local"
+    password_hash = generate_password_hash(secrets.token_urlsafe(24), method="pbkdf2:sha256")
+    cur = db.execute("INSERT INTO users (email, password_hash) VALUES (?, ?)", (demo_email, password_hash))
+    user_id = cur.lastrowid
+
+    company_cur = db.execute(
+        "INSERT INTO companies (user_id, name) VALUES (?, ?)", (user_id, "Riverside Plumbing & Heating (Demo)")
+    )
+    company_id = company_cur.lastrowid
+    seed_default_chart(db, company_id, "service")
+    g.company = db.execute("SELECT * FROM companies WHERE id = ?", (company_id,)).fetchone()
+    seed_demo_data(db, company_id)
+    db.commit()
+
+    session["user_id"] = user_id
+    session["email"] = demo_email
+    return jsonify({"id": company_id, "email": demo_email})
+
+
 @app.route("/api/login/2fa", methods=["POST"])
 @rate_limit(max_attempts=10, window_seconds=300)
 def login_2fa():

@@ -153,6 +153,9 @@
       <span id="auth-toggle-text">Don't have an account?</span>
       <a href="#" id="auth-toggle-link" onclick="toggleAuthMode(event)" style="color:var(--accent);">Sign up</a>
     </div>
+    <div class="sub" style="margin-top:10px; margin-bottom:0; text-align:center; padding-top:10px; border-top:1px solid var(--border);">
+      <a href="#" onclick="startDemo(event)" style="color:var(--accent); font-weight:600;">Try the demo — no signup required</a>
+    </div>
   </div>
   <div class="panel auth-card" id="auth-card-2fa" style="display:none;">
     <h1>Two-factor code</h1>
@@ -1260,6 +1263,20 @@ async function submitAuth() {
     errEl.textContent = '';
     await loadCompanies();
     show('company-screen');
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
+}
+
+async function startDemo(event) {
+  if (event) event.preventDefault();
+  const errEl = document.getElementById('auth-error');
+  errEl.textContent = '';
+  try {
+    const data = await api('/api/demo', { method: 'POST' });
+    currentUser = { email: data.email };
+    await loadCompanies();
+    await openCompany(data.id);
   } catch (e) {
     errEl.textContent = e.message;
   }
