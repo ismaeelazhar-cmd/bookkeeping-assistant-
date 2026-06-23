@@ -1970,11 +1970,44 @@ def create_transaction(company_id):
 @company_required
 @write_required
 def bulk_create_transactions(company_id):
-    items = request.get_json(force=True) or []
+    payload = request.get_json(force=True) or []
+    # Back-compat: callers that already worked send a bare array. CSV import sends an object with
+    # reviewUnsure=true, which opts into routing incomplete/placeholder rows to the clarification
+    # queue instead of silently posting them against an "Unknown"/"Uncategorized" account.
+    if isinstance(payload, dict):
+        items = payload.get("items") or []
+        review_unsure = bool(payload.get("reviewUnsure"))
+    else:
+        items, review_unsure = payload, False
+
+    PLACEHOLDER_ACCOUNTS = {"", "unknown", "uncategorized", "uncategorised"}
+
+    def is_unsure(it):
+        if not it.get("date") or not it.get("desc"):
+            return True
+        for side in (it.get("debit"), it.get("credit")):
+            if (side or "").strip().lower() in PLACEHOLDER_ACCOUNTS:
+                return True
+        return False
+
     db = get_db()
     inserted = 0
     skipped_locked = 0
+    queued = 0
     for it in items:
+        if review_unsure and is_unsure(it):
+            db.execute(
+                "INSERT INTO clarification_queue (company_id, source, raw_line_json, suggested_debit, "
+                "suggested_credit, suggested_amount_pence, confidence, reason) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    company_id, "csv", json.dumps({"date": it.get("date"), "desc": it.get("desc"), "amount": it.get("amount")}),
+                    it.get("debit") or "", it.get("credit") or "",
+                    to_pence(it.get("amount") or 0), 0.2,
+                    "Imported CSV row with a missing field or an uncategorised debit/credit account.",
+                ),
+            )
+            queued += 1
+            continue
         try:
             fund_id = resolve_fund_id(db, company_id, it.get("fund"))
             post_ledger_transaction(
@@ -1989,7 +2022,7 @@ def bulk_create_transactions(company_id):
             continue
         inserted += 1
     db.commit()
-    return jsonify({"inserted": inserted, "skippedLocked": skipped_locked})
+    return jsonify({"inserted": inserted, "skippedLocked": skipped_locked, "queued": queued})
 
 
 @app.route("/api/companies/<int:company_id>/transactions/<int:tx_id>", methods=["DELETE"])
@@ -3771,8 +3804,32 @@ def period_close(company_id):
         (company_id, today),
     ).fetchall()
 
-    posted, skipped = [], []
+    posted, skipped, queued = [], [], []
     for rj in due:
+        # A recurring journal stores its debit/credit by account NAME. If one of those accounts
+        # has been renamed or deleted since the template was set up, post_ledger_transaction's
+        # resolve_account() would silently re-create it — masking a real problem. So we check
+        # first: if either side no longer exists, route the due posting to the clarification
+        # queue for the user to confirm/fix instead of guessing, and DON'T advance next_due
+        # (so it's still pending once they sort it out).
+        missing = [
+            name for name in (rj["debit"], rj["credit"])
+            if get_account_by_name(db, company_id, name) is None
+        ]
+        if missing:
+            db.execute(
+                "INSERT INTO clarification_queue (company_id, source, raw_line_json, suggested_debit, "
+                "suggested_credit, suggested_amount_pence, confidence, reason) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    company_id, "recurring",
+                    json.dumps({"date": rj["next_due"], "desc": rj["label"], "amount": from_pence(rj["amount_pence"])}),
+                    rj["debit"], rj["credit"], rj["amount_pence"], 0.0,
+                    f"Recurring journal \"{rj['label']}\" is due, but its account(s) no longer exist: "
+                    f"{', '.join(missing)}. Renamed or deleted since the template was set up — confirm before posting.",
+                ),
+            )
+            queued.append({"recurringJournalId": rj["id"], "missing": missing})
+            continue
         try:
             tx_id = post_ledger_transaction(
                 db, company_id, rj["next_due"], rj["label"], from_pence(rj["amount_pence"]),
@@ -3786,7 +3843,7 @@ def period_close(company_id):
         db.execute("UPDATE recurring_journals SET next_due = ? WHERE id = ?", (next_due, rj["id"]))
 
     db.commit()
-    return jsonify({"posted": posted, "skipped": skipped})
+    return jsonify({"posted": posted, "skipped": skipped, "queued": queued})
 
 
 # ---------- payroll journal wizard ----------

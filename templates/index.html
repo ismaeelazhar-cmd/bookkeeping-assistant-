@@ -2096,9 +2096,10 @@ async function importCSV(event) {
         taxYear: iTaxYear >= 0 ? (r[iTaxYear] || '') : ''
       });
     }
-    const result = await api(`/api/companies/${currentCompany.id}/transactions/bulk`, { method: 'POST', body: JSON.stringify(items) });
+    const result = await api(`/api/companies/${currentCompany.id}/transactions/bulk`, { method: 'POST', body: JSON.stringify({ items, reviewUnsure: true }) });
     await refreshAll();
-    alert(`Imported ${result.inserted} transactions.`);
+    const queuedMsg = result.queued ? ` ${result.queued} row(s) had a missing field or uncategorised account and were sent to the Clarification Queue (Bank page) for review.` : '';
+    alert(`Imported ${result.inserted} transactions.${queuedMsg}`);
   };
   reader.readAsText(file);
   event.target.value = '';
