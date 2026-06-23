@@ -225,6 +225,7 @@
         <a href="#page-transactions" data-page="transactions">Transactions</a>
         <a href="#page-bank" data-page="bank">Bank <span id="bank-nav-badge" class="badge badge-overdue" style="display:none; margin-left:4px;"></span></a>
         <a href="#page-accounts" data-page="accounts">Accounts</a>
+        <a href="#page-ledgers" data-page="ledgers">Ledgers</a>
         <a href="#page-invoices" data-page="invoices">Invoices</a>
         <a href="#page-reports" data-page="reports">Reports</a>
         <a href="#page-settings" data-page="settings">Settings</a>
@@ -791,6 +792,15 @@
         </div>
       </div>
       <div id="stock-action-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
+  </div>
+
+  <div class="page" data-page="ledgers" style="display:none;">
+    <div class="panel">
+      <h2>All Ledgers <span class="pill" id="ledgers-count"></span></h2>
+      <div class="sub" style="margin-bottom:12px;">Every account's full T-account in one place — every debit, every credit, running balance. Search to narrow it down, or click any entry's account name elsewhere in the app to jump straight to its drill-down.</div>
+      <input type="text" id="ledgers-filter" placeholder="Search accounts…" oninput="renderLedgersPage()" style="margin-bottom:14px;">
+      <div id="ledgers-grid" class="accounts-grid"></div>
     </div>
   </div>
 
@@ -2147,7 +2157,7 @@ function showToast(message, kind) {
 // ---------- page router (this app is one HTML file with client-side "pages", not separate
 // server routes — each top-level section is shown/hidden by data-page, driven by the URL hash) ----------
 
-const PAGE_NAMES = ['dashboard', 'transactions', 'bank', 'accounts', 'invoices', 'reports', 'settings', 'audit'];
+const PAGE_NAMES = ['dashboard', 'transactions', 'bank', 'accounts', 'ledgers', 'invoices', 'reports', 'settings', 'audit'];
 
 function showPage(name) {
   if (!PAGE_NAMES.includes(name)) name = 'dashboard';
@@ -2544,6 +2554,40 @@ function renderAccounts() {
   }).join('');
 }
 
+// ---------- All Ledgers page — every account's full T-account in one place, searchable ----------
+function renderLedgersPage() {
+  const container = document.getElementById('ledgers-grid');
+  if (!container) return;
+  const filterEl = document.getElementById('ledgers-filter');
+  const filterText = (filterEl ? filterEl.value : '').trim().toLowerCase();
+  const accounts = buildAccounts();
+  let names = Object.keys(accounts).sort();
+  if (filterText) names = names.filter(n => n.toLowerCase().includes(filterText));
+  document.getElementById('ledgers-count').textContent = `${names.length} of ${Object.keys(accounts).length} accounts`;
+  if (!names.length) { container.innerHTML = '<div class="empty">No accounts match.</div>'; return; }
+  container.innerHTML = names.map(name => {
+    const acc = accounts[name];
+    const debitTotal = acc.debits.reduce((s, t) => s + t.amount, 0);
+    const creditTotal = acc.credits.reduce((s, t) => s + t.amount, 0);
+    const bal = debitTotal - creditTotal;
+    const balLabel = bal === 0 ? 'balanced' : (bal > 0 ? `Dr ${fmt(bal)}` : `Cr ${fmt(-bal)}`);
+    const vatTag = t => t._isVatLine ? ' (VAT)' : '';
+    const debitLines = acc.debits.map(t => `<div class="tline"><span class="desc" title="${escapeHtml(t.desc)}${vatTag(t)} (vs ${escapeHtml(t.credit)})">${fmtDate(t.date)} — ${escapeHtml(t.desc)}${vatTag(t)}</span><span class="amt debit">${fmt(t.amount)}</span></div>`).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
+    const creditLines = acc.credits.map(t => `<div class="tline"><span class="desc" title="${escapeHtml(t.desc)}${vatTag(t)} (vs ${escapeHtml(t.debit)})">${fmtDate(t.date)} — ${escapeHtml(t.desc)}${vatTag(t)}</span><span class="amt credit">${fmt(t.amount)}</span></div>`).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
+    return `
+      <div class="taccount">
+        <div class="taccount-title" style="cursor:pointer;" onclick="drillDownAccount('${name.replace(/'/g, "\\'")}')">
+          <span>${accountTypeDot(name)}${escapeHtml(name)}</span><span class="bal">${balLabel}</span>
+        </div>
+        <div class="tbody">
+          <div class="tside debit"><div class="tside-label">Debit</div>${debitLines}</div>
+          <div class="tside credit"><div class="tside-label">Credit</div>${creditLines}</div>
+        </div>
+        <div class="tfoot"><div class="debit">${fmt(debitTotal)}</div><div class="credit">${fmt(creditTotal)}</div></div>
+      </div>`;
+  }).join('');
+}
+
 function clearJournalFilters() {
   ['jf-text', 'jf-min-amount', 'jf-from', 'jf-to'].forEach(id => document.getElementById(id).value = '');
   renderJournal();
@@ -2687,6 +2731,7 @@ function render() {
   renderOpeningBalances(); renderContacts(); renderInvoicesBills(); renderAgingReport();
   renderDashboard(); renderAnomalies(); renderPurchaseOrders(); renderBudgetVsActual(); renderDeptPnl(); renderRatios(); renderPettyCash(); renderCisReturn();
   renderCisStatements();
+  renderLedgersPage();
 }
 
 function renderAnomalies() {
