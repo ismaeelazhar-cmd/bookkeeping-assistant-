@@ -337,6 +337,20 @@ def init_db():
             uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- #8: a record of what was actually submitted to HMRC and when — the MTD submit
+        -- endpoint itself was already built, but without this there was no way to see past
+        -- filings, only file new ones blind.
+        CREATE TABLE IF NOT EXISTS vat_filings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            period_key TEXT NOT NULL,
+            net_vat_due_pence INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            hmrc_response_json TEXT NOT NULL,
+            submitted_by TEXT NOT NULL,
+            submitted_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- #17: mileage log for sole traders/directors using their own vehicle for business
         -- trips — HMRC's Approved Mileage Allowance Payments (AMAP) scheme, claimed instead of
         -- tracking actual fuel/running costs.
@@ -4595,7 +4609,37 @@ def hmrc_submit_vat_return(company_id):
         result = call_hmrc(g.company, "POST", f"/organisations/vat/{vrn}/returns", data=payload)
     except HmrcError as e:
         return jsonify({"error": e.message}), e.status
+
+    db = get_db()
+    db.execute(
+        "INSERT INTO vat_filings (company_id, period_key, net_vat_due_pence, payload_json, hmrc_response_json, submitted_by) "
+        "VALUES (?,?,?,?,?,?)",
+        (company_id, payload["periodKey"], to_pence(payload["netVatDue"]), json.dumps(payload), json.dumps(result),
+         session.get("email", "unknown")),
+    )
+    db.commit()
     return jsonify(result)
+
+
+@app.route("/api/companies/<int:company_id>/vat-filings", methods=["GET"])
+@login_required
+@company_required
+def list_vat_filings(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, period_key as periodKey, net_vat_due_pence as netVatDuePence, payload_json as payloadJson, "
+        "hmrc_response_json as hmrcResponseJson, submitted_by as submittedBy, submitted_at as submittedAt "
+        "FROM vat_filings WHERE company_id = ? ORDER BY submitted_at DESC",
+        (company_id,),
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["netVatDue"] = from_pence(d.pop("netVatDuePence"))
+        d["payload"] = json.loads(d.pop("payloadJson"))
+        d["hmrcResponse"] = json.loads(d.pop("hmrcResponseJson"))
+        out.append(d)
+    return jsonify(out)
 
 
 init_db()  # runs on import too, not just `python3 server.py` directly — gunicorn imports this module without executing __main__

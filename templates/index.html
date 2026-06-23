@@ -1015,6 +1015,10 @@
       <button class="btn-secondary" onclick="submitVatReturnToHmrc()">Submit to HMRC (MTD)</button>
       <table class="trial" style="margin-top:14px;"><tbody id="vat-return-body"></tbody></table>
       <div id="vat-reconciliation" style="margin-top:10px;"></div>
+
+      <h2 style="margin-top:24px;">VAT Filing History</h2>
+      <div class="sub" style="margin-bottom:10px;">What's actually been submitted to HMRC, when, and the figures filed — separate from the working calculation above, which can be recalculated and changed before you submit.</div>
+      <table class="inbox"><thead><tr><th>Period</th><th class="num">Net VAT due</th><th>Submitted</th><th>By</th><th>Receipt</th></tr></thead><tbody id="vat-filings-body"></tbody></table>
     </div>
 
     <div class="panel" style="margin-top:20px;">
@@ -1890,6 +1894,7 @@ async function refreshAll() {
   renderMonthlyPnL();
   await loadStockItems();
   await loadMileageLog();
+  await loadVatFilings();
 }
 
 function suggestFromDescription() {
@@ -3838,7 +3843,23 @@ async function submitVatReturnToHmrc() {
       })
     });
     showToast(`Submitted to HMRC — receipt: ${result.formBundleNumber || result.processingDate || 'see response'}.`, 'success');
+    await loadVatFilings();
   } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ---------- VAT filing history (#8) ----------
+async function loadVatFilings() {
+  const filings = await api(`/api/companies/${currentCompany.id}/vat-filings`);
+  const body = document.getElementById('vat-filings-body');
+  if (!body) return;
+  body.innerHTML = filings.length ? filings.map(f => `
+    <tr>
+      <td>${escapeHtml(f.periodKey)}</td>
+      <td class="num">${fmt(f.netVatDue)}</td>
+      <td>${fmtDate(f.submittedAt.slice(0,10))} ${f.submittedAt.slice(11,16)}</td>
+      <td>${escapeHtml(f.submittedBy)}</td>
+      <td>${escapeHtml(f.hmrcResponse.formBundleNumber || f.hmrcResponse.processingDate || '—')}</td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">No filings submitted yet.</td></tr>';
 }
 
 function renderVatReconciliation(from, to, netVatDueFromBoxes) {
