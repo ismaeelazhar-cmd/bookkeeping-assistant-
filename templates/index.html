@@ -798,8 +798,17 @@
   <div class="page" data-page="ledgers" style="display:none;">
     <div class="panel">
       <h2>All Ledgers <span class="pill" id="ledgers-count"></span></h2>
-      <div class="sub" style="margin-bottom:12px;">Every account's full T-account in one place — every debit, every credit, running balance. Search to narrow it down, or click any entry's account name elsewhere in the app to jump straight to its drill-down.</div>
-      <input type="text" id="ledgers-filter" placeholder="Search accounts…" oninput="renderLedgersPage()" style="margin-bottom:14px;">
+      <div class="sub" style="margin-bottom:12px;">Every account's full T-account in one place — every debit, every credit, running balance. Each entry's 🔗 (when present) traces it back to the invoice, bank import, or mileage entry it came from. Search to narrow it down, or click an account's title for its full drill-down.</div>
+      <div class="row2" style="margin-bottom:14px;">
+        <input type="text" id="ledgers-filter" placeholder="Search accounts…" oninput="renderLedgersPage()">
+        <select id="ledgers-type-filter" onchange="renderLedgersPage()">
+          <option value="">All account types</option>
+        </select>
+      </div>
+      <div class="toolbar" style="margin-bottom:14px;">
+        <button class="btn-secondary" onclick="exportLedgersCSV()">Export CSV (Excel)</button>
+        <button class="btn-secondary" onclick="exportLedgersPDF()">Export PDF</button>
+      </div>
       <div id="ledgers-grid" class="accounts-grid"></div>
     </div>
   </div>
@@ -1310,6 +1319,14 @@
     </div>
   </div>
 </dialog>
+
+<div id="source-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:50; align-items:center; justify-content:center;" onclick="if(event.target===this) closeSourceModal()">
+  <div class="panel" style="width:440px; max-height:80vh; overflow:auto;">
+    <h2>Where this came from</h2>
+    <div id="source-modal-body"></div>
+    <button class="btn-secondary" style="width:100%; margin-top:14px;" onclick="closeSourceModal()">Close</button>
+  </div>
+</div>
 
 <div id="attachments-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:50; align-items:center; justify-content:center;">
   <div class="panel" style="width:420px; max-height:80vh; overflow:auto;">
@@ -2527,31 +2544,42 @@ function buildAccountsFromTx(txList, includeOpeningBalances) {
 // period-bounded view, built separately in renderFinancialStatements() below.
 function buildAccounts() { return buildAccountsFromTx(transactions, true); }
 
+// Shared by both the Transactions page's T-Accounts panel and the All Ledgers page — each
+// line carries a 🔗 if it traces back to an invoice/bill, bank import, or mileage entry
+// (findTransactionSources), so "phone expenses" etc. aren't a dead end.
+function tlineHtml(t, otherSideField) {
+  const vatTag = t._isVatLine ? ' (VAT)' : '';
+  const hasSource = t.id != null && findTransactionSources(t.id).length > 0;
+  const link = hasSource ? ` <a href="#" onclick="event.preventDefault(); showSourceModal(${t.id});" title="Where this came from" style="text-decoration:none;">🔗</a>` : '';
+  return `<div class="tline"><span class="desc" title="${escapeHtml(t.desc)}${vatTag} (vs ${escapeHtml(t[otherSideField])})">${fmtDate(t.date)} — ${escapeHtml(t.desc)}${vatTag}${link}</span><span class="amt ${otherSideField === 'credit' ? 'debit' : 'credit'}">${fmt(t.amount)}</span></div>`;
+}
+
+function taccountCardHtml(name, acc, clickableTitle) {
+  const debitTotal = acc.debits.reduce((s, t) => s + t.amount, 0);
+  const creditTotal = acc.credits.reduce((s, t) => s + t.amount, 0);
+  const bal = debitTotal - creditTotal;
+  const balLabel = bal === 0 ? 'balanced' : (bal > 0 ? `Dr ${fmt(bal)}` : `Cr ${fmt(-bal)}`);
+  const debitLines = acc.debits.map(t => tlineHtml(t, 'credit')).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
+  const creditLines = acc.credits.map(t => tlineHtml(t, 'debit')).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
+  const titleAttrs = clickableTitle ? ` style="cursor:pointer;" onclick="drillDownAccount('${name.replace(/'/g, "\\'")}')"` : '';
+  return `
+    <div class="taccount">
+      <div class="taccount-title"${titleAttrs}><span>${accountTypeDot(name)}${escapeHtml(name)}</span><span class="bal">${balLabel}</span></div>
+      <div class="tbody">
+        <div class="tside debit"><div class="tside-label">Debit</div>${debitLines}</div>
+        <div class="tside credit"><div class="tside-label">Credit</div>${creditLines}</div>
+      </div>
+      <div class="tfoot"><div class="debit">${fmt(debitTotal)}</div><div class="credit">${fmt(creditTotal)}</div></div>
+    </div>`;
+}
+
 function renderAccounts() {
   document.getElementById('tx-count').textContent = `${transactions.length} transaction${transactions.length === 1 ? '' : 's'}`;
   const container = document.getElementById('accounts');
   const accounts = buildAccounts();
   const names = Object.keys(accounts).sort();
   if (!names.length) { container.innerHTML = '<div class="empty">No transactions yet — post one on the left.</div>'; return; }
-  container.innerHTML = names.map(name => {
-    const acc = accounts[name];
-    const debitTotal = acc.debits.reduce((s, t) => s + t.amount, 0);
-    const creditTotal = acc.credits.reduce((s, t) => s + t.amount, 0);
-    const bal = debitTotal - creditTotal;
-    const balLabel = bal === 0 ? 'balanced' : (bal > 0 ? `Dr ${fmt(bal)}` : `Cr ${fmt(-bal)}`);
-    const vatTag = t => t._isVatLine ? ' (VAT)' : '';
-    const debitLines = acc.debits.map(t => `<div class="tline"><span class="desc" title="${escapeHtml(t.desc)}${vatTag(t)} (vs ${escapeHtml(t.credit)})">${fmtDate(t.date)} — ${escapeHtml(t.desc)}${vatTag(t)}</span><span class="amt debit">${fmt(t.amount)}</span></div>`).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
-    const creditLines = acc.credits.map(t => `<div class="tline"><span class="desc" title="${escapeHtml(t.desc)}${vatTag(t)} (vs ${escapeHtml(t.debit)})">${fmtDate(t.date)} — ${escapeHtml(t.desc)}${vatTag(t)}</span><span class="amt credit">${fmt(t.amount)}</span></div>`).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
-    return `
-      <div class="taccount">
-        <div class="taccount-title"><span>${accountTypeDot(name)}${escapeHtml(name)}</span><span class="bal">${balLabel}</span></div>
-        <div class="tbody">
-          <div class="tside debit"><div class="tside-label">Debit</div>${debitLines}</div>
-          <div class="tside credit"><div class="tside-label">Credit</div>${creditLines}</div>
-        </div>
-        <div class="tfoot"><div class="debit">${fmt(debitTotal)}</div><div class="credit">${fmt(creditTotal)}</div></div>
-      </div>`;
-  }).join('');
+  container.innerHTML = names.map(name => taccountCardHtml(name, accounts[name], false)).join('');
 }
 
 // ---------- All Ledgers page — every account's full T-account in one place, searchable ----------
@@ -2560,32 +2588,54 @@ function renderLedgersPage() {
   if (!container) return;
   const filterEl = document.getElementById('ledgers-filter');
   const filterText = (filterEl ? filterEl.value : '').trim().toLowerCase();
+  const typeEl = document.getElementById('ledgers-type-filter');
+  if (typeEl && typeEl.options.length <= 1) {
+    typeEl.innerHTML = '<option value="">All account types</option>' +
+      Object.entries(ACCOUNT_TYPE_LABELS).map(([val, label]) => `<option value="${val}">${label}</option>`).join('');
+  }
+  const typeFilter = typeEl ? typeEl.value : '';
   const accounts = buildAccounts();
   let names = Object.keys(accounts).sort();
   if (filterText) names = names.filter(n => n.toLowerCase().includes(filterText));
+  if (typeFilter) names = names.filter(n => getAccountType(n) === typeFilter);
   document.getElementById('ledgers-count').textContent = `${names.length} of ${Object.keys(accounts).length} accounts`;
   if (!names.length) { container.innerHTML = '<div class="empty">No accounts match.</div>'; return; }
-  container.innerHTML = names.map(name => {
+  container.innerHTML = names.map(name => taccountCardHtml(name, accounts[name], true)).join('');
+}
+
+function exportLedgersCSV() {
+  const accounts = buildAccounts();
+  const rows = [['Account', 'Date', 'Description', 'Debit', 'Credit']];
+  for (const name of Object.keys(accounts).sort()) {
     const acc = accounts[name];
-    const debitTotal = acc.debits.reduce((s, t) => s + t.amount, 0);
-    const creditTotal = acc.credits.reduce((s, t) => s + t.amount, 0);
-    const bal = debitTotal - creditTotal;
-    const balLabel = bal === 0 ? 'balanced' : (bal > 0 ? `Dr ${fmt(bal)}` : `Cr ${fmt(-bal)}`);
-    const vatTag = t => t._isVatLine ? ' (VAT)' : '';
-    const debitLines = acc.debits.map(t => `<div class="tline"><span class="desc" title="${escapeHtml(t.desc)}${vatTag(t)} (vs ${escapeHtml(t.credit)})">${fmtDate(t.date)} — ${escapeHtml(t.desc)}${vatTag(t)}</span><span class="amt debit">${fmt(t.amount)}</span></div>`).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
-    const creditLines = acc.credits.map(t => `<div class="tline"><span class="desc" title="${escapeHtml(t.desc)}${vatTag(t)} (vs ${escapeHtml(t.debit)})">${fmtDate(t.date)} — ${escapeHtml(t.desc)}${vatTag(t)}</span><span class="amt credit">${fmt(t.amount)}</span></div>`).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
-    return `
-      <div class="taccount">
-        <div class="taccount-title" style="cursor:pointer;" onclick="drillDownAccount('${name.replace(/'/g, "\\'")}')">
-          <span>${accountTypeDot(name)}${escapeHtml(name)}</span><span class="bal">${balLabel}</span>
-        </div>
-        <div class="tbody">
-          <div class="tside debit"><div class="tside-label">Debit</div>${debitLines}</div>
-          <div class="tside credit"><div class="tside-label">Credit</div>${creditLines}</div>
-        </div>
-        <div class="tfoot"><div class="debit">${fmt(debitTotal)}</div><div class="credit">${fmt(creditTotal)}</div></div>
-      </div>`;
-  }).join('');
+    for (const t of acc.debits) rows.push([name, fmtDate(t.date), t.desc, t.amount.toFixed(2), '']);
+    for (const t of acc.credits) rows.push([name, fmtDate(t.date), t.desc, '', t.amount.toFixed(2)]);
+  }
+  const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = `${currentCompany.name.replace(/\s+/g,'_')}_all_ledgers.csv`; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportLedgersPDF() {
+  const names = Object.keys(buildAccounts()).sort();
+  if (!names.length) { showToast('No accounts to export yet.', 'error'); return; }
+  const html = document.getElementById('ledgers-grid').innerHTML;
+  const win = window.open('', '_blank');
+  win.document.write(`<html><head><title>All Ledgers — ${escapeHtml(currentCompany.name)}</title><style>
+    body{font-family:-apple-system,sans-serif;padding:24px;color:#111;} h1{font-size:18px;}
+    .accounts-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;}
+    .taccount{border:1px solid #ccc;border-radius:8px;overflow:hidden;}
+    .taccount-title{padding:8px 12px;font-weight:700;border-bottom:2px solid #ccc;display:flex;justify-content:space-between;}
+    .tbody{display:grid;grid-template-columns:1fr 1fr;} .tside{padding:6px;min-height:30px;} .tside.debit{border-right:1px solid #ccc;}
+    .tside-label{font-size:10px;color:#666;padding:0 6px 4px;} .tline{display:flex;justify-content:space-between;font-size:11.5px;padding:2px 6px;}
+    .tfoot{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid #ccc;font-weight:700;font-size:11.5px;} .tfoot div{padding:5px 8px;} .tfoot .debit{border-right:1px solid #ccc;}
+    .bal{font-size:11px;color:#666;font-weight:500;} .amt.debit,.amt.credit{font-weight:600;} a{color:inherit;text-decoration:none;}
+    </style></head><body><h1>All Ledgers — ${escapeHtml(currentCompany.name)}</h1>
+    <div class="accounts-grid">${html}</div>
+    </body></html>`);
+  win.document.close(); win.focus(); setTimeout(() => win.print(), 300);
 }
 
 function clearJournalFilters() {
@@ -2620,6 +2670,7 @@ function renderJournal() {
           : `<button class="btn-secondary" onclick="reviewTransaction(${t.id})">Mark reviewed</button>`}
         <button class="btn-secondary" onclick="openAttachmentsModal(${t.id}, '${t.desc.replace(/'/g, "\\'")}')">📎${t.attachmentCount ? ' ' + t.attachmentCount : ''}</button>
         <button class="btn-secondary" onclick="openCommentsModal(${t.id}, '${t.desc.replace(/'/g, "\\'")}')">💬${t.commentCount ? ' ' + t.commentCount : ''}</button>
+        ${findTransactionSources(t.id).length ? `<button class="btn-secondary" onclick="showSourceModal(${t.id})" title="Where this came from">🔗 Source</button>` : ''}
         <button class="btn-danger" onclick="deleteTransaction(${t.id})">Delete</button>
       </td>
     </tr>`).join('') : '<tr><td colspan="7" class="empty">No transactions match these filters.</td></tr>';
@@ -5346,6 +5397,46 @@ async function deleteMileageEntry(id) {
   await api(`/api/companies/${currentCompany.id}/mileage-log/${id}`, { method: 'DELETE' });
   await refreshAll();
 }
+
+// ---------- "Where this came from" — traces a transaction back to the invoice/bill, bank
+// statement line, or mileage-log entry that created it, entirely from data already loaded
+// client-side (invoicesBills/bankLines/mileageLog) — no extra round trip needed. ----------
+function findTransactionSources(txId) {
+  const sources = [];
+  for (const d of invoicesBills) {
+    if (d.transactionId === txId) {
+      const kindLabel = { invoice: 'Invoice', bill: 'Bill', credit_note: 'Credit note' }[d.kind] || d.kind;
+      sources.push({ type: 'doc', label: `${kindLabel} #${d.id.toString().padStart(4, '0')} — sent`, detail: `${d.contactName} · ${d.desc} · ${fmt(d.amount)} · due ${fmtDate(d.dueDate)}`, page: 'invoices' });
+    }
+    if (d.paymentTransactionId === txId) {
+      const kindLabel = { invoice: 'Invoice', bill: 'Bill', credit_note: 'Credit note' }[d.kind] || d.kind;
+      sources.push({ type: 'doc', label: `${kindLabel} #${d.id.toString().padStart(4, '0')} — payment`, detail: `${d.contactName} · ${d.desc} · ${fmt(d.amount)} · status: ${d.status}`, page: 'invoices' });
+    }
+  }
+  const bankLine = bankLines.find(b => b.matchedTransactionId === txId);
+  if (bankLine) {
+    sources.push({ type: 'bank', label: `Bank statement line — ${escapeHtml(bankLine.cashAccount || '')}`, detail: `${fmtDate(bankLine.date)} · ${escapeHtml(bankLine.desc)} · ${fmt(bankLine.amount)}`, page: 'bank' });
+  }
+  const mileage = mileageLog.find(m => m.transactionId === txId);
+  if (mileage) {
+    sources.push({ type: 'mileage', label: 'Mileage log entry', detail: `${mileage.fromLocation} → ${mileage.toLocation} · ${mileage.miles} miles · ${mileage.purpose}`, page: 'transactions' });
+  }
+  return sources;
+}
+
+function showSourceModal(txId) {
+  const sources = findTransactionSources(txId);
+  const body = document.getElementById('source-modal-body');
+  body.innerHTML = sources.length ? sources.map(s => `
+    <div class="panel" style="background:var(--panel-soft); box-shadow:none; margin-top:10px;">
+      <div style="font-weight:600; font-size:13px;">${s.label}</div>
+      <div class="sub" style="margin:4px 0 8px;">${s.detail}</div>
+      <button class="btn-secondary" onclick="closeSourceModal(); showPage('${s.page}');">Go to ${s.page === 'invoices' ? 'Invoices' : s.page === 'bank' ? 'Bank' : 'Transactions'}</button>
+    </div>`).join('') : '<div class="empty">Posted directly — no invoice, bank import, or mileage entry behind this one.</div>';
+  document.getElementById('source-overlay').style.display = 'flex';
+}
+
+function closeSourceModal() { document.getElementById('source-overlay').style.display = 'none'; }
 
 // ---------- Attachments ----------
 
