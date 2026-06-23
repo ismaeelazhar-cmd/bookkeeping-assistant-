@@ -613,6 +613,36 @@ DEFAULT_CHART = [
     ("Depreciation Expense", "expense"),
 ]
 
+# Onboarding chart-of-accounts templates, keyed by business type. Each extends DEFAULT_CHART
+# with a handful of accounts a business of that type will need on day one — not exhaustive,
+# just enough that the chart doesn't start completely blank for the most common shapes of
+# small business. "general" is DEFAULT_CHART itself (no extra accounts).
+CHART_TEMPLATES = {
+    "general": [],
+    "retail": [
+        ("Stock / Inventory", "current_asset"),
+        ("Cost of Goods Sold", "cogs"),
+        ("Shop Rent", "expense"),
+        ("Card Processing Fees", "expense"),
+        ("Stock Suppliers", "current_liability"),
+    ],
+    "service": [
+        ("Trade Receivables", "current_asset"),
+        ("Subcontractor Costs", "cogs"),
+        ("Software & Subscriptions", "expense"),
+        ("Professional Fees", "expense"),
+        ("Trade Payables", "current_liability"),
+    ],
+    "construction": [
+        ("Materials", "cogs"),
+        ("Subcontractor Costs", "cogs"),
+        ("CIS Suffered", "current_asset"),
+        ("Plant & Equipment Hire", "expense"),
+        ("Trade Payables", "current_liability"),
+        ("Retentions Held", "current_liability"),
+    ],
+}
+
 
 def guess_account_type(name):
     n = name.lower()
@@ -710,8 +740,10 @@ def resolve_department_id(db, company_id, department_name):
     return row["id"]
 
 
-def seed_default_chart(db, company_id):
+def seed_default_chart(db, company_id, business_type=None):
     for name, account_type in DEFAULT_CHART:
+        resolve_account(db, company_id, name, account_type)
+    for name, account_type in CHART_TEMPLATES.get(business_type or "general", []):
         resolve_account(db, company_id, name, account_type)
 
 
@@ -1038,18 +1070,61 @@ def create_company():
     name = (data.get("name") or "").strip()
     if not name:
         return jsonify({"error": "Company name is required."}), 400
+    business_type = data.get("businessType") or "general"
+    if business_type not in CHART_TEMPLATES:
+        business_type = "general"
     db = get_db()
     cur = db.execute(
         "INSERT INTO companies (user_id, name) VALUES (?, ?)", (session["user_id"], name)
     )
-    seed_default_chart(db, cur.lastrowid)
+    company_id = cur.lastrowid
+    seed_default_chart(db, company_id, business_type)
+
+    # Onboarding opening balances: each {account, amount} debits the named account (it's where
+    # the value already sits — a bank balance, stock on hand, etc.) against Opening Balance
+    # Equity, the same plug account a manual catch-up entry would use. Best-effort: a bad row
+    # (unknown amount, zero) is just skipped rather than failing the whole company creation.
+    opening_balances = data.get("openingBalances") or []
+    g.company = db.execute("SELECT * FROM companies WHERE id = ?", (company_id,)).fetchone()
+    for row in opening_balances:
+        account = (row.get("account") or "").strip()
+        try:
+            amount = float(row.get("amount") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not account or amount <= 0:
+            continue
+        try:
+            post_ledger_transaction(
+                db, company_id, data.get("openingBalancesDate") or datetime.date.today().isoformat(),
+                f"Opening balance — {account}", amount, account, "Opening Balance Equity",
+            )
+        except LedgerError:
+            continue
+
     db.commit()
     return jsonify({
-        "id": cur.lastrowid, "name": name, "default_credit_account": "", "ai_api_key_set": False,
+        "id": company_id, "name": name, "default_credit_account": "", "ai_api_key_set": False,
         "locked_until": "", "period_start_date": "", "fund_accounting_enabled": 0,
         "plaid_client_id": "", "plaid_secret_set": False, "plaid_env": "sandbox", "permission": "owner",
         "confidence_threshold": 0.7, "cost_centres_enabled": 0,
     })
+
+
+@app.route("/api/chart-templates", methods=["GET"])
+@login_required
+def chart_templates():
+    """Lists the onboarding business-type templates so the signup wizard can show what extra
+    accounts each one adds, without hardcoding the list twice (once server-side, once in JS)."""
+    return jsonify([
+        {
+            "id": key,
+            "label": {"general": "General / other", "retail": "Retail", "service": "Service business",
+                       "construction": "Construction & trades"}.get(key, key.title()),
+            "extraAccounts": [name for name, _ in accounts],
+        }
+        for key, accounts in CHART_TEMPLATES.items()
+    ])
 
 
 @app.route("/api/companies/<int:company_id>", methods=["DELETE"])

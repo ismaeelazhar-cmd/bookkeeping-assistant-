@@ -173,8 +173,7 @@
   <div id="company-list" class="company-list"></div>
   <div class="panel" style="margin-top:16px;">
     <h2>Add a company</h2>
-    <input type="text" id="new-company-name" placeholder="e.g. Example Trading Ltd">
-    <button class="btn-primary" onclick="createCompany()">Create company</button>
+    <button class="btn-primary" style="margin-top:0;" onclick="openOnboarding()">+ New company</button>
     <div class="err" id="company-error"></div>
   </div>
 
@@ -1107,6 +1106,40 @@
   </div>
 </div>
 
+<div id="onboarding-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:60; align-items:center; justify-content:center;">
+  <div class="panel" style="width:480px; max-height:84vh; overflow:auto;">
+    <h2 style="margin-bottom:4px;">New company — step <span id="ob-step-num">1</span> of 3</h2>
+
+    <div id="ob-step-1">
+      <div class="sub">Set up the basics. We'll pick a starter chart of accounts that fits your business.</div>
+      <label>Company name</label>
+      <input type="text" id="ob-company-name" placeholder="e.g. Example Trading Ltd">
+      <label>What kind of business is this?</label>
+      <div id="ob-business-types" style="display:flex; flex-direction:column; gap:6px; margin-top:4px;"></div>
+    </div>
+
+    <div id="ob-step-2" style="display:none;">
+      <div class="sub">Add opening balances if you're switching from another system or spreadsheet — what's already in each account today. Skip this if you're starting completely fresh.</div>
+      <table class="inbox"><thead><tr><th>Account</th><th class="num">Balance</th><th></th></tr></thead><tbody id="ob-balance-rows"></tbody></table>
+      <button class="btn-secondary" style="margin-top:8px;" onclick="addOnboardingBalanceRow()">+ Add account</button>
+    </div>
+
+    <div id="ob-step-3" style="display:none;">
+      <div class="sub" style="margin-bottom:0;">Ready to go. We'll create <strong id="ob-summary-name"></strong> with the <span id="ob-summary-type"></span> starter chart<span id="ob-summary-balances"></span>.</div>
+      <div class="sub">Once it's created, head to Transactions and post your first entry — even just today's bank balance is a good start.</div>
+    </div>
+
+    <div class="err" id="ob-error"></div>
+    <div class="toolbar" style="margin-top:14px; justify-content:space-between;">
+      <button class="btn-secondary" onclick="closeOnboarding()">Cancel</button>
+      <div style="display:flex; gap:8px;">
+        <button class="btn-secondary" id="ob-back-btn" style="display:none;" onclick="onboardingBack()">Back</button>
+        <button class="btn-primary" id="ob-next-btn" style="margin-top:0;" onclick="onboardingNext()">Next</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="drilldown-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:50; align-items:center; justify-content:center;">
   <div class="panel" style="width:580px; max-height:80vh; overflow:auto;">
     <h2 id="drilldown-title">Account</h2>
@@ -1369,15 +1402,84 @@ function renderCompanyList() {
     </div>`).join('');
 }
 
-async function createCompany() {
-  const name = document.getElementById('new-company-name').value.trim();
-  const errEl = document.getElementById('company-error');
-  if (!name) { errEl.textContent = 'Enter a company name.'; return; }
+// ---------- onboarding wizard (business type -> opening balances -> create) ----------
+let obStep = 1;
+let obTemplates = [];
+let obBusinessType = 'general';
+
+async function openOnboarding() {
+  obStep = 1;
+  obBusinessType = 'general';
+  document.getElementById('ob-company-name').value = '';
+  document.getElementById('ob-balance-rows').innerHTML = '';
+  document.getElementById('ob-error').textContent = '';
+  if (!obTemplates.length) {
+    try { obTemplates = await api('/api/chart-templates'); } catch (e) { obTemplates = [{ id: 'general', label: 'General / other', extraAccounts: [] }]; }
+  }
+  const typesEl = document.getElementById('ob-business-types');
+  typesEl.innerHTML = obTemplates.map(t => `
+    <label style="display:flex; align-items:flex-start; gap:8px; padding:10px; border:1px solid var(--border); border-radius:8px; cursor:pointer; font-weight:400; margin:0;">
+      <input type="radio" name="ob-type" value="${t.id}" style="width:auto; margin-top:2px;" ${t.id === 'general' ? 'checked' : ''} onchange="obBusinessType=this.value">
+      <span><strong style="display:block; font-size:13px; color:var(--text);">${escapeHtml(t.label)}</strong>${t.extraAccounts.length ? `<span style="font-size:12px; color:var(--muted);">Adds: ${t.extraAccounts.map(escapeHtml).join(', ')}</span>` : ''}</span>
+    </label>`).join('');
+  showOnboardingStep();
+  document.getElementById('onboarding-overlay').style.display = 'flex';
+}
+
+function closeOnboarding() { document.getElementById('onboarding-overlay').style.display = 'none'; }
+
+function addOnboardingBalanceRow() {
+  const tbody = document.getElementById('ob-balance-rows');
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td><input type="text" list="account-list-onboarding" placeholder="e.g. Cash"></td>
+    <td class="num"><input type="number" step="0.01" min="0" placeholder="0.00" style="text-align:right;"></td>
+    <td><button class="btn-danger" onclick="this.closest('tr').remove()">✕</button></td>`;
+  tbody.appendChild(tr);
+}
+
+function showOnboardingStep() {
+  document.getElementById('ob-step-num').textContent = obStep;
+  document.getElementById('ob-step-1').style.display = obStep === 1 ? 'block' : 'none';
+  document.getElementById('ob-step-2').style.display = obStep === 2 ? 'block' : 'none';
+  document.getElementById('ob-step-3').style.display = obStep === 3 ? 'block' : 'none';
+  document.getElementById('ob-back-btn').style.display = obStep > 1 ? 'inline-block' : 'none';
+  document.getElementById('ob-next-btn').textContent = obStep === 3 ? 'Create company' : 'Next';
+  if (obStep === 3) {
+    const t = obTemplates.find(x => x.id === obBusinessType);
+    const rows = onboardingBalanceRows();
+    document.getElementById('ob-summary-name').textContent = document.getElementById('ob-company-name').value.trim() || '(unnamed)';
+    document.getElementById('ob-summary-type').textContent = t ? t.label : 'general';
+    document.getElementById('ob-summary-balances').textContent = rows.length ? ` and ${rows.length} opening balance${rows.length === 1 ? '' : 's'}` : '';
+  }
+}
+
+function onboardingBalanceRows() {
+  return Array.from(document.querySelectorAll('#ob-balance-rows tr')).map(tr => {
+    const inputs = tr.querySelectorAll('input');
+    return { account: inputs[0].value.trim(), amount: inputs[1].value };
+  }).filter(r => r.account && parseFloat(r.amount) > 0);
+}
+
+function onboardingBack() { if (obStep > 1) { obStep--; showOnboardingStep(); } }
+
+async function onboardingNext() {
+  const errEl = document.getElementById('ob-error');
+  errEl.textContent = '';
+  if (obStep === 1) {
+    if (!document.getElementById('ob-company-name').value.trim()) { errEl.textContent = 'Enter a company name.'; return; }
+    obStep = 2; showOnboardingStep(); return;
+  }
+  if (obStep === 2) { obStep = 3; showOnboardingStep(); return; }
+  // Step 3: actually create the company.
+  const name = document.getElementById('ob-company-name').value.trim();
   try {
-    await api('/api/companies', { method: 'POST', body: JSON.stringify({ name }) });
-    document.getElementById('new-company-name').value = '';
-    errEl.textContent = '';
+    const company = await api('/api/companies', {
+      method: 'POST',
+      body: JSON.stringify({ name, businessType: obBusinessType, openingBalances: onboardingBalanceRows() }),
+    });
+    closeOnboarding();
     await loadCompanies();
+    await openCompany(company.id);
   } catch (e) { errEl.textContent = e.message; }
 }
 
