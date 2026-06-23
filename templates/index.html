@@ -1172,6 +1172,62 @@
     </div>
 
     <div class="panel" style="margin-top:20px;">
+      <h2>Branding</h2>
+      <div class="sub" style="margin-bottom:10px;">Applied to invoice/bill PDFs and the customer payment portal — useful as-is, and essential if you're an accountant invoicing under your firm's own name rather than each client's.</div>
+      <label>Logo (PNG or JPEG)</label>
+      <input type="file" id="brand-logo-file" accept=".png,.jpg,.jpeg" onchange="uploadBrandLogo(event)">
+      <div id="brand-logo-preview" style="margin:8px 0;"></div>
+      <div class="row2">
+        <div><label>Display name <span style="color:var(--muted); font-weight:400;">(blank = company name)</span></label><input type="text" id="brand-display-name" oninput="saveSettings()"></div>
+        <div><label>Accent colour</label><input type="color" id="brand-color" oninput="saveSettings()" style="height:38px; padding:4px;"></div>
+      </div>
+      <label>Business address</label>
+      <textarea id="brand-address" rows="2" oninput="saveSettings()"></textarea>
+      <label>Payment terms <span style="color:var(--muted); font-weight:400;">(shown on invoices)</span></label>
+      <textarea id="brand-payment-terms" rows="2" placeholder="e.g. Payment due within 30 days of invoice date." oninput="saveSettings()"></textarea>
+      <label>Bank details <span style="color:var(--muted); font-weight:400;">(shown on invoices)</span></label>
+      <textarea id="brand-bank-details" rows="2" placeholder="e.g. Sort code 12-34-56, Account 12345678" oninput="saveSettings()"></textarea>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Notifications</h2>
+      <div class="sub" style="margin-bottom:10px;">A daily digest email — overdue invoices, a VAT deadline within 7 days (if HMRC is connected), and a nudge if bank reconciliation has gone stale. Checked once a day when the dashboard loads; needs an outbound email server below.</div>
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); margin:0 0 10px;">
+        <input type="checkbox" id="notify-enabled" style="width:auto;" onchange="saveSettings()"> Enable daily digest
+      </label>
+      <label>Send digest to</label>
+      <input type="email" id="notify-email" placeholder="you@example.com" oninput="saveSettings()">
+
+      <h2 style="margin-top:20px; font-size:13px;">Outbound email (SMTP)</h2>
+      <div class="sub" style="margin-bottom:8px;">Works with any provider — Gmail, SendGrid, AWS SES, or your own mail server's SMTP credentials. Also used to email invoice PDFs to customers.</div>
+      <div class="row2">
+        <div><label>SMTP host</label><input type="text" id="smtp-host" placeholder="smtp.gmail.com" oninput="saveSettings()"></div>
+        <div><label>Port</label><input type="number" id="smtp-port" placeholder="587" oninput="saveSettings()"></div>
+      </div>
+      <div class="row2">
+        <div><label>Username</label><input type="text" id="smtp-username" oninput="saveSettings()"></div>
+        <div><label>Password <span id="smtp-password-status" style="color:var(--muted); font-weight:400;"></span></label><input type="password" id="smtp-password" placeholder="enter to set/replace" oninput="saveSettings()"></div>
+      </div>
+      <label>From address <span style="color:var(--muted); font-weight:400;">(blank = username)</span></label>
+      <input type="email" id="smtp-from-email" oninput="saveSettings()">
+      <button class="btn-secondary" onclick="sendTestEmail()">Send test email</button>
+      <div id="notify-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Online Payments (Stripe)</h2>
+      <div class="sub" style="margin-bottom:10px;">Lets customers pay an invoice online via the portal link emailed to them. Needs your own Stripe account — create one at stripe.com, then paste your API keys here. Until set, the portal link still works as a read-only invoice view, just without a "Pay now" button.</div>
+      <div class="row2">
+        <div><label>Publishable key</label><input type="text" id="stripe-publishable-key" placeholder="pk_live_… or pk_test_…" oninput="saveSettings()"></div>
+        <div><label>Secret key <span id="stripe-secret-status" style="color:var(--muted); font-weight:400;"></span></label><input type="password" id="stripe-secret-key" placeholder="sk_live_… or sk_test_…" oninput="saveSettings()"></div>
+      </div>
+      <label>Webhook signing secret <span id="stripe-webhook-status" style="color:var(--muted); font-weight:400;"></span> <span style="color:var(--muted); font-weight:400;">(from the webhook endpoint you add in Stripe, pointing at this app's /webhooks/stripe)</span></label>
+      <input type="password" id="stripe-webhook-secret" placeholder="whsec_…" oninput="saveSettings()">
+      <label>Account to credit when a payment lands <span style="color:var(--muted); font-weight:400;">(net of Stripe's fee — set up a separate "Stripe" bank account if you want the fee visible)</span></label>
+      <input type="text" id="stripe-payment-account" list="account-list" value="Cash" oninput="saveSettings()">
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
       <h2>Team</h2>
       <div class="sub" style="margin-bottom:12px;">Invite an accountant or colleague to this company. They need an existing account on this app first — invite by the email they signed up with. "View" can read everything; "post" can also enter/edit transactions and everything else; only the owner can manage the team or delete the company.</div>
       <table class="inbox"><thead><tr><th>Email</th><th>Permission</th><th></th></tr></thead><tbody id="team-body"></tbody></table>
@@ -1703,6 +1759,26 @@ async function openCompany(id) {
   document.getElementById('hmrc-client-secret').value = '';
   document.getElementById('hmrc-secret-status').textContent = currentCompany.hmrc_client_secret_set ? '(set)' : '(not set)';
   renderHmrcConnectionStatus();
+  document.getElementById('brand-display-name').value = currentCompany.brand_display_name || '';
+  document.getElementById('brand-color').value = currentCompany.brand_color || '#0A7EA4';
+  document.getElementById('brand-address').value = currentCompany.brand_address || '';
+  document.getElementById('brand-payment-terms').value = currentCompany.brand_payment_terms || '';
+  document.getElementById('brand-bank-details').value = currentCompany.brand_bank_details || '';
+  renderBrandLogoPreview();
+  document.getElementById('notify-enabled').checked = !!currentCompany.notifications_enabled;
+  document.getElementById('notify-email').value = currentCompany.notify_email || '';
+  document.getElementById('smtp-host').value = currentCompany.smtp_host || '';
+  document.getElementById('smtp-port').value = currentCompany.smtp_port || 587;
+  document.getElementById('smtp-username').value = currentCompany.smtp_username || '';
+  document.getElementById('smtp-password').value = '';
+  document.getElementById('smtp-password-status').textContent = currentCompany.smtp_password_set ? '(set)' : '(not set)';
+  document.getElementById('smtp-from-email').value = currentCompany.smtp_from_email || '';
+  document.getElementById('stripe-publishable-key').value = currentCompany.stripe_publishable_key || '';
+  document.getElementById('stripe-secret-key').value = '';
+  document.getElementById('stripe-secret-status').textContent = currentCompany.stripe_secret_key_set ? '(set)' : '(not set)';
+  document.getElementById('stripe-webhook-secret').value = '';
+  document.getElementById('stripe-webhook-status').textContent = currentCompany.stripe_webhook_secret_set ? '(set)' : '(not set)';
+  document.getElementById('stripe-payment-account').value = currentCompany.stripe_payment_account || 'Cash';
   document.getElementById('ob-rows').innerHTML = ''; obRowCount = 0;
   document.getElementById('cj-rows').innerHTML = ''; cjRowCount = 0;
   document.getElementById('cj-date').valueAsDate = new Date();
@@ -1736,6 +1812,19 @@ function buildSettingsPayload(extra) {
     hmrcClientId: document.getElementById('hmrc-client-id').value.trim(),
     hmrcEnv: document.getElementById('hmrc-env').value,
     hmrcVrn: document.getElementById('hmrc-vrn').value.trim(),
+    brandDisplayName: document.getElementById('brand-display-name').value.trim(),
+    brandColor: document.getElementById('brand-color').value,
+    brandAddress: document.getElementById('brand-address').value,
+    brandPaymentTerms: document.getElementById('brand-payment-terms').value,
+    brandBankDetails: document.getElementById('brand-bank-details').value,
+    notificationsEnabled: document.getElementById('notify-enabled').checked,
+    notifyEmail: document.getElementById('notify-email').value.trim(),
+    smtpHost: document.getElementById('smtp-host').value.trim(),
+    smtpPort: parseInt(document.getElementById('smtp-port').value, 10) || 587,
+    smtpUsername: document.getElementById('smtp-username').value.trim(),
+    smtpFromEmail: document.getElementById('smtp-from-email').value.trim(),
+    stripePublishableKey: document.getElementById('stripe-publishable-key').value.trim(),
+    stripePaymentAccount: document.getElementById('stripe-payment-account').value.trim() || 'Cash',
   }, extra || {});
 }
 
@@ -1756,13 +1845,52 @@ async function saveSettings() {
   currentCompany.cost_centres_enabled = document.getElementById('f-cost-centres').checked;
   currentCompany.confidence_threshold = parseFloat(document.getElementById('f-confidence-threshold').value);
   const newKey = document.getElementById('ai-api-key').value.trim();
+  const smtpPassword = document.getElementById('smtp-password').value;
+  const stripeSecretKey = document.getElementById('stripe-secret-key').value.trim();
+  const stripeWebhookSecret = document.getElementById('stripe-webhook-secret').value.trim();
   await api(`/api/companies/${currentCompany.id}/settings`, {
-    method: 'PUT', body: JSON.stringify(buildSettingsPayload({ aiApiKey: newKey }))
+    method: 'PUT', body: JSON.stringify(buildSettingsPayload({ aiApiKey: newKey, smtpPassword, stripeSecretKey, stripeWebhookSecret }))
   });
   if (newKey) {
     currentCompany.ai_api_key_set = true;
     document.getElementById('ai-api-key').value = '';
     document.getElementById('ai-key-status').textContent = 'A key is set.';
+  }
+  if (smtpPassword) { currentCompany.smtp_password_set = true; document.getElementById('smtp-password').value = ''; document.getElementById('smtp-password-status').textContent = '(set)'; }
+  if (stripeSecretKey) { currentCompany.stripe_secret_key_set = true; document.getElementById('stripe-secret-key').value = ''; document.getElementById('stripe-secret-status').textContent = '(set)'; }
+  if (stripeWebhookSecret) { currentCompany.stripe_webhook_secret_set = true; document.getElementById('stripe-webhook-secret').value = ''; document.getElementById('stripe-webhook-status').textContent = '(set)'; }
+}
+
+async function uploadBrandLogo(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`/api/companies/${currentCompany.id}/branding/logo`, { method: 'POST', body: formData, credentials: 'same-origin' });
+  const result = await res.json();
+  if (!res.ok) { showToast(result.error || 'Could not upload logo.', 'error'); return; }
+  currentCompany.brand_logo_path = result.logoPath;
+  renderBrandLogoPreview();
+  showToast('Logo uploaded.', 'success');
+}
+
+function renderBrandLogoPreview() {
+  const el = document.getElementById('brand-logo-preview');
+  el.innerHTML = currentCompany.brand_logo_path
+    ? `<img src="/api/companies/${currentCompany.id}/branding/logo?v=${Date.now()}" style="max-height:48px; border:1px solid var(--border); border-radius:6px; padding:4px;">`
+    : '<span class="sub" style="margin:0;">No logo uploaded yet.</span>';
+}
+
+async function sendTestEmail() {
+  const statusEl = document.getElementById('notify-status');
+  statusEl.textContent = 'Sending…';
+  try {
+    await api(`/api/companies/${currentCompany.id}/test-email`, { method: 'POST', body: JSON.stringify({}) });
+    statusEl.textContent = 'Sent — check your inbox.';
+    showToast('Test email sent.', 'success');
+  } catch (e) {
+    statusEl.textContent = e.message;
+    showToast(e.message, 'error');
   }
 }
 
@@ -1944,6 +2072,16 @@ async function refreshAll() {
   await loadStockItems();
   await loadMileageLog();
   await loadVatFilings();
+  runNotificationsCheckQuietly();
+}
+
+// ---------- daily notifications digest (#9) — fires once per dashboard session; the backend
+// itself throttles to once per calendar day per company, so this is safe to call on every load. ----------
+async function runNotificationsCheckQuietly() {
+  try {
+    const result = await api(`/api/companies/${currentCompany.id}/run-notifications-check`, { method: 'POST', body: JSON.stringify({}) });
+    if (result.sent) showToast('Daily notification digest sent.', 'success');
+  } catch (e) { /* silent — notifications are a courtesy, not a critical path */ }
 }
 
 function suggestFromDescription() {
@@ -4564,6 +4702,11 @@ function renderInvoicesBills() {
     const actions = [];
     if (d.status === 'draft') actions.push(`<button class="btn-secondary" onclick="sendInvoiceBill(${d.id})">Send</button>`);
     if (d.status === 'sent') actions.push(`<button class="btn-secondary" onclick="payInvoiceBill(${d.id})">Mark paid</button>`);
+    if (d.status !== 'draft') {
+      actions.push(`<a href="/api/companies/${currentCompany.id}/invoices-bills/${d.id}/pdf" target="_blank" class="btn-secondary" style="display:inline-block; text-decoration:none;">PDF</a>`);
+      actions.push(`<button class="btn-secondary" onclick="emailInvoiceBill(${d.id})">Email</button>`);
+      if (d.kind === 'invoice') actions.push(`<button class="btn-secondary" onclick="copyPortalLink(${d.id})">Copy link</button>`);
+    }
     actions.push(`<button class="btn-danger" onclick="deleteInvoiceBill(${d.id})">✕</button>`);
     const kindLabel = { invoice: 'Invoice', bill: 'Bill', credit_note: 'Credit note' }[d.kind] || d.kind;
     return `<tr>
@@ -4626,6 +4769,23 @@ async function sendInvoiceBill(id) {
     await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/send`, { method: 'POST' });
   } catch (e) { alert(e.message); return; }
   await refreshAll();
+}
+
+async function emailInvoiceBill(id) {
+  try {
+    const result = await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/email`, { method: 'POST' });
+    showToast(`Emailed to ${result.sentTo}.`, 'success');
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+function copyPortalLink(id) {
+  const doc = invoicesBills.find(d => d.id === id);
+  if (!doc || !doc.portalToken) { showToast('No portal link yet — send the invoice first.', 'error'); return; }
+  const url = `${location.origin}/portal/${doc.portalToken}`;
+  navigator.clipboard.writeText(url).then(
+    () => showToast('Portal link copied to clipboard.', 'success'),
+    () => showToast(url, 'success')
+  );
 }
 
 async function payInvoiceBill(id) {

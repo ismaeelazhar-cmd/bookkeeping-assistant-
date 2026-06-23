@@ -18,11 +18,14 @@ import hashlib
 import urllib.request
 import urllib.error
 import mimetypes
+import smtplib
+from email.message import EmailMessage
 
 from flask import Flask, request, jsonify, session, send_from_directory, g
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from cryptography.fernet import Fernet, InvalidToken
+from fpdf import FPDF
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -85,6 +88,39 @@ def decrypt_secret(ciphertext):
 
 _fernet = Fernet(load_or_create_encryption_key())
 
+
+class EmailNotConfigured(Exception):
+    pass
+
+
+def send_email(company_row, to_email, subject, body_text, attachment_bytes=None, attachment_filename=None):
+    """#6/#9: outbound email over plain SMTP — works with any provider (Gmail, SendGrid SMTP
+    relay, AWS SES SMTP, a real mail server) once the user fills in their own credentials in
+    Settings, rather than hardcoding a specific email API. Raises EmailNotConfigured rather than
+    silently no-op'ing so callers can surface a clear "set up email in Settings" message instead
+    of a payment/reminder quietly never going out."""
+    host = company_row["smtp_host"] or ""
+    if not host:
+        raise EmailNotConfigured("No SMTP server configured for this company — add one in Settings → Notifications.")
+    port = company_row["smtp_port"] or 587
+    username = company_row["smtp_username"] or ""
+    password = decrypt_secret(company_row["smtp_password"])
+    from_email = company_row["smtp_from_email"] or username
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = from_email
+    msg["To"] = to_email
+    msg.set_content(body_text)
+    if attachment_bytes is not None:
+        msg.add_attachment(attachment_bytes, maintype="application", subtype="pdf", filename=attachment_filename or "document.pdf")
+
+    with smtplib.SMTP(host, port, timeout=15) as smtp:
+        smtp.starttls()
+        if username:
+            smtp.login(username, password)
+        smtp.send_message(msg)
+
 app = Flask(__name__, static_folder=str(BASE_DIR / "static"))
 app.secret_key = load_or_create_secret_key()
 app.config["MAX_CONTENT_LENGTH"] = MAX_ATTACHMENT_BYTES
@@ -124,7 +160,7 @@ def check_csrf_origin():
         return jsonify({"error": "Cross-origin request blocked."}), 403
 
 
-SCHEMA_VERSION = 4  # bumped for #18: invoices_bills.cis_deduction_pence/cis_rate
+SCHEMA_VERSION = 5  # bumped for #6/#7/#9/#20: SMTP, branding, Stripe, portal tokens
 
 
 def init_db():
@@ -354,6 +390,17 @@ def init_db():
         -- #17: mileage log for sole traders/directors using their own vehicle for business
         -- trips — HMRC's Approved Mileage Allowance Payments (AMAP) scheme, claimed instead of
         -- tracking actual fuel/running costs.
+        -- #9: dedupe key so the notification check (run on dashboard load, throttled to once a
+        -- day per company) never emails the same overdue invoice / VAT deadline / bank-rec nudge
+        -- twice. event_key is e.g. "overdue_invoice:42" or "vat_due:2026-07-31".
+        CREATE TABLE IF NOT EXISTS notification_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            event_key TEXT NOT NULL,
+            sent_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(company_id, event_key)
+        );
+
         CREATE TABLE IF NOT EXISTS mileage_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -630,6 +677,44 @@ def init_db():
         # made/suffered without re-deriving it from transaction descriptions.
         db.execute("ALTER TABLE invoices_bills ADD COLUMN cis_deduction_pence INTEGER DEFAULT 0")
         db.execute("ALTER TABLE invoices_bills ADD COLUMN cis_rate REAL DEFAULT NULL")
+    if "portal_token" not in ib_cols:
+        # #7: an unguessable per-document token for the public read-only customer/supplier
+        # portal link — never the document's own (sequential, guessable) id.
+        db.execute("ALTER TABLE invoices_bills ADD COLUMN portal_token TEXT DEFAULT NULL")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_bills_portal_token ON invoices_bills(portal_token) WHERE portal_token IS NOT NULL")
+    if "smtp_host" not in company_cols:
+        # #9/#6: outbound email — SMTP rather than a specific provider's API, so it works with
+        # any provider (Gmail, SendGrid, SES, a real mail server) the user already has. Password
+        # is encrypted at rest and write-only from the client, same pattern as the AI/Plaid/HMRC
+        # secrets above.
+        db.execute("ALTER TABLE companies ADD COLUMN smtp_host TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN smtp_port INTEGER DEFAULT 587")
+        db.execute("ALTER TABLE companies ADD COLUMN smtp_username TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN smtp_password TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN smtp_from_email TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN notifications_enabled INTEGER DEFAULT 0")
+        db.execute("ALTER TABLE companies ADD COLUMN notify_email TEXT DEFAULT ''")
+    if "brand_logo_path" not in company_cols:
+        # #20/#6: white-label branding applied to customer-facing documents (invoice PDFs, the
+        # payment portal) — a logo, an accent colour, and a display name that can differ from
+        # the internal company name (e.g. an accountant's firm name on a client's invoices).
+        db.execute("ALTER TABLE companies ADD COLUMN brand_logo_path TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN brand_color TEXT DEFAULT '#0A7EA4'")
+        db.execute("ALTER TABLE companies ADD COLUMN brand_display_name TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN brand_address TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN brand_payment_terms TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN brand_bank_details TEXT DEFAULT ''")
+    if "stripe_secret_key" not in company_cols:
+        # #7: Stripe Checkout, called directly via its REST API (urllib, no SDK dependency) —
+        # encrypted at rest like every other API credential here. Needs the user's own Stripe
+        # account/keys to actually take a payment; until set, the portal page just shows the
+        # invoice read-only with no "Pay now" button.
+        db.execute("ALTER TABLE companies ADD COLUMN stripe_secret_key TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN stripe_publishable_key TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN stripe_webhook_secret TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN stripe_payment_account TEXT DEFAULT 'Cash'")
+    if "last_notification_run" not in company_cols:
+        db.execute("ALTER TABLE companies ADD COLUMN last_notification_run TEXT DEFAULT ''")
     db.execute("DELETE FROM schema_meta")
     db.execute("INSERT INTO schema_meta (version) VALUES (?)", (SCHEMA_VERSION,))
     db.commit()
@@ -1168,12 +1253,18 @@ def list_companies():
         "SELECT id, name, default_credit_account, ai_api_key, locked_until, period_start_date, "
         "fund_accounting_enabled, plaid_client_id, plaid_secret, plaid_env, confidence_threshold, cost_centres_enabled, "
         "hmrc_client_id, hmrc_client_secret, hmrc_env, hmrc_vrn, hmrc_access_token, "
+        "smtp_host, smtp_port, smtp_username, smtp_password, smtp_from_email, notifications_enabled, notify_email, "
+        "brand_logo_path, brand_color, brand_display_name, brand_address, brand_payment_terms, brand_bank_details, "
+        "stripe_secret_key, stripe_publishable_key, stripe_webhook_secret, stripe_payment_account, "
         "'owner' as permission "
         "FROM companies WHERE user_id = ? "
         "UNION ALL "
         "SELECT c.id, c.name, c.default_credit_account, c.ai_api_key, c.locked_until, c.period_start_date, "
         "c.fund_accounting_enabled, c.plaid_client_id, c.plaid_secret, c.plaid_env, c.confidence_threshold, c.cost_centres_enabled, "
         "c.hmrc_client_id, c.hmrc_client_secret, c.hmrc_env, c.hmrc_vrn, c.hmrc_access_token, "
+        "c.smtp_host, c.smtp_port, c.smtp_username, c.smtp_password, c.smtp_from_email, c.notifications_enabled, c.notify_email, "
+        "c.brand_logo_path, c.brand_color, c.brand_display_name, c.brand_address, c.brand_payment_terms, c.brand_bank_details, "
+        "c.stripe_secret_key, c.stripe_publishable_key, c.stripe_webhook_secret, c.stripe_payment_account, "
         "cm.permission "
         "FROM companies c JOIN company_members cm ON cm.company_id = c.id "
         "WHERE cm.user_id = ? "
@@ -1187,6 +1278,9 @@ def list_companies():
         d["plaid_secret_set"] = bool(d.pop("plaid_secret"))  # same write-only treatment
         d["hmrc_client_secret_set"] = bool(d.pop("hmrc_client_secret"))
         d["hmrc_connected"] = bool(d.pop("hmrc_access_token"))
+        d["smtp_password_set"] = bool(d.pop("smtp_password"))
+        d["stripe_secret_key_set"] = bool(d.pop("stripe_secret_key"))
+        d["stripe_webhook_secret_set"] = bool(d.pop("stripe_webhook_secret"))
         result.append(d)
     return jsonify(result)
 
@@ -1278,13 +1372,24 @@ def update_settings(company_id):
     db.execute(
         "UPDATE companies SET default_credit_account = ?, locked_until = ?, period_start_date = ?, "
         "fund_accounting_enabled = ?, plaid_client_id = ?, plaid_env = ?, confidence_threshold = ?, "
-        "cost_centres_enabled = ?, hmrc_client_id = ?, hmrc_env = ?, hmrc_vrn = ? WHERE id = ?",
+        "cost_centres_enabled = ?, hmrc_client_id = ?, hmrc_env = ?, hmrc_vrn = ?, "
+        "smtp_host = ?, smtp_port = ?, smtp_username = ?, smtp_from_email = ?, "
+        "notifications_enabled = ?, notify_email = ?, "
+        "brand_color = ?, brand_display_name = ?, brand_address = ?, brand_payment_terms = ?, brand_bank_details = ?, "
+        "stripe_payment_account = ? "
+        "WHERE id = ?",
         (
             data.get("defaultCreditAccount", ""), data.get("lockedUntil", ""), data.get("periodStartDate", ""),
             1 if data.get("fundAccountingEnabled") else 0,
             data.get("plaidClientId", ""), data.get("plaidEnv") or "sandbox", confidence_threshold,
             1 if data.get("costCentresEnabled") else 0,
-            data.get("hmrcClientId", ""), data.get("hmrcEnv") or "sandbox", data.get("hmrcVrn", ""), company_id,
+            data.get("hmrcClientId", ""), data.get("hmrcEnv") or "sandbox", data.get("hmrcVrn", ""),
+            data.get("smtpHost", ""), int(data.get("smtpPort") or 587), data.get("smtpUsername", ""), data.get("smtpFromEmail", ""),
+            1 if data.get("notificationsEnabled") else 0, data.get("notifyEmail", ""),
+            data.get("brandColor") or "#0A7EA4", data.get("brandDisplayName", ""), data.get("brandAddress", ""),
+            data.get("brandPaymentTerms", ""), data.get("brandBankDetails", ""),
+            data.get("stripePaymentAccount") or "Cash",
+            company_id,
         ),
     )
     # The AI key and Plaid secret are write-only from the client's perspective: a blank field
@@ -1302,8 +1407,72 @@ def update_settings(company_id):
         db.execute("UPDATE companies SET hmrc_client_secret = ? WHERE id = ?", (encrypt_secret(data["hmrcClientSecret"]), company_id))
     elif data.get("clearHmrcClientSecret"):
         db.execute("UPDATE companies SET hmrc_client_secret = '', hmrc_access_token = '', hmrc_refresh_token = '' WHERE id = ?", (company_id,))
+    if data.get("smtpPassword"):
+        db.execute("UPDATE companies SET smtp_password = ? WHERE id = ?", (encrypt_secret(data["smtpPassword"]), company_id))
+    elif data.get("clearSmtpPassword"):
+        db.execute("UPDATE companies SET smtp_password = '' WHERE id = ?", (company_id,))
+    if data.get("stripeSecretKey"):
+        db.execute("UPDATE companies SET stripe_secret_key = ?, stripe_publishable_key = ? WHERE id = ?",
+                   (encrypt_secret(data["stripeSecretKey"]), data.get("stripePublishableKey", ""), company_id))
+    elif data.get("clearStripeKeys"):
+        db.execute("UPDATE companies SET stripe_secret_key = '', stripe_publishable_key = '' WHERE id = ?", (company_id,))
+    if data.get("stripeWebhookSecret"):
+        db.execute("UPDATE companies SET stripe_webhook_secret = ? WHERE id = ?", (encrypt_secret(data["stripeWebhookSecret"]), company_id))
+    elif data.get("clearStripeWebhookSecret"):
+        db.execute("UPDATE companies SET stripe_webhook_secret = '' WHERE id = ?", (company_id,))
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/test-email", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def send_test_email(company_id):
+    to_email = (request.get_json(force=True) or {}).get("to") or g.company["notify_email"] or session.get("email")
+    if not to_email:
+        return jsonify({"error": "No recipient email — enter one or set a notification email in Settings."}), 400
+    try:
+        send_email(g.company, to_email, f"Test email from {g.company['name']}",
+                   "If you're reading this, your SMTP settings are working — notifications and emailed invoices will go out from this address.")
+    except EmailNotConfigured as e:
+        return jsonify({"error": str(e)}), 400
+    except (smtplib.SMTPException, OSError) as e:
+        return jsonify({"error": f"Could not send: {e}"}), 502
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/branding/logo", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def upload_brand_logo(company_id):
+    file = request.files.get("file")
+    if file is None or not file.filename:
+        return jsonify({"error": "No file uploaded."}), 400
+    mime_type = file.mimetype or mimetypes.guess_type(file.filename)[0] or ""
+    if mime_type not in ("image/png", "image/jpeg"):
+        return jsonify({"error": "Logo must be a PNG or JPEG."}), 400
+    company_dir = UPLOADS_DIR / str(company_id)
+    company_dir.mkdir(exist_ok=True)
+    ext = "png" if mime_type == "image/png" else "jpg"
+    stored_name = f"logo.{ext}"
+    file.save(str(company_dir / stored_name))
+    rel_path = f"{company_id}/{stored_name}"
+    db = get_db()
+    db.execute("UPDATE companies SET brand_logo_path = ? WHERE id = ?", (rel_path, company_id))
+    db.commit()
+    return jsonify({"ok": True, "logoPath": rel_path})
+
+
+@app.route("/api/companies/<int:company_id>/branding/logo", methods=["GET"])
+@login_required
+@company_required
+def get_brand_logo(company_id):
+    if not g.company["brand_logo_path"]:
+        return jsonify({"error": "No logo set."}), 404
+    directory, filename = g.company["brand_logo_path"].rsplit("/", 1)
+    return send_from_directory(str(UPLOADS_DIR / directory), filename)
 
 
 @app.route("/api/companies/<int:company_id>/period-lock", methods=["PUT"])
@@ -3019,6 +3188,83 @@ def delete_contact(company_id, contact_id):
 
 # ---------- invoices & bills ----------
 
+def generate_invoice_pdf(company_row, doc_row, contact_row):
+    """#6: a real, customer-facing invoice/bill PDF — logo, business address, line item,
+    payment terms, and bank details, all pulled from the company's branding settings rather
+    than hardcoded. fpdf2 is pure-Python (no system libs like wkhtmltopdf/Cairo needed), so this
+    runs the same in any deployment without extra setup."""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=20)
+
+    logo_path = company_row["brand_logo_path"]
+    if logo_path:
+        full_path = UPLOADS_DIR / logo_path
+        if full_path.exists():
+            pdf.image(str(full_path), x=10, y=10, w=35)
+            pdf.set_xy(10, 45)
+
+    display_name = company_row["brand_display_name"] or company_row["name"]
+    pdf.set_font("Helvetica", "B", 18)
+    label = {"invoice": "INVOICE", "bill": "BILL", "credit_note": "CREDIT NOTE"}.get(doc_row["kind"], "DOCUMENT")
+    pdf.cell(0, 10, f"{label} #{doc_row['id']:04d}", ln=True, align="R")
+
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, display_name, ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    if company_row["brand_address"]:
+        for line in company_row["brand_address"].splitlines():
+            pdf.cell(0, 5, line, ln=True)
+    pdf.ln(6)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 6, "Bill to:" if doc_row["kind"] != "bill" else "From:", ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 5, contact_row["name"], ln=True)
+    for line in [contact_row["address_line1"], contact_row["address_city"], contact_row["address_postcode"], contact_row["address_country"]]:
+        if line:
+            pdf.cell(0, 5, line, ln=True)
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(95, 6, f"Date: {doc_row['date']}")
+    pdf.cell(95, 6, f"Due: {doc_row['due_date']}", ln=True)
+    pdf.ln(4)
+
+    pdf.set_fill_color(10, 126, 164)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(140, 8, "Description", border=0, fill=True)
+    pdf.cell(50, 8, "Amount", border=0, fill=True, align="R", ln=True)
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font("Helvetica", "", 10)
+    amount = from_pence(doc_row["amount_pence"])
+    pdf.cell(140, 8, doc_row["desc"], border="B")
+    pdf.cell(50, 8, f"{amount:,.2f}", border="B", align="R", ln=True)
+    if doc_row["vat_rate"]:
+        vat_amount = round(amount * doc_row["vat_rate"] / (100 + doc_row["vat_rate"]), 2)
+        pdf.cell(140, 8, f"Includes VAT @ {doc_row['vat_rate']:g}%", border="B")
+        pdf.cell(50, 8, f"{vat_amount:,.2f}", border="B", align="R", ln=True)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(140, 9, "Total")
+    pdf.cell(50, 9, f"{amount:,.2f}", align="R", ln=True)
+    pdf.ln(8)
+
+    if company_row["brand_payment_terms"]:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(0, 6, "Payment terms", ln=True)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.multi_cell(0, 5, company_row["brand_payment_terms"])
+        pdf.ln(2)
+    if company_row["brand_bank_details"]:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(0, 6, "Bank details", ln=True)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.multi_cell(0, 5, company_row["brand_bank_details"])
+
+    return bytes(pdf.output())
+
+
 def _serialize_invoice_bill(row, today):
     d = dict(row)
     d["amount"] = from_pence(d.pop("amountPence"))
@@ -3039,7 +3285,7 @@ def list_invoices_bills(company_id):
         "SELECT ib.id, ib.kind, ib.contact_id as contactId, c.name as contactName, ib.date, "
         "ib.due_date as dueDate, ib.desc, ib.amount_pence as amountPence, ib.account, ib.vat_rate as vatRate, "
         "ib.status, ib.transaction_id as transactionId, ib.payment_transaction_id as paymentTransactionId, "
-        "ib.linked_doc_id as linkedDocId "
+        "ib.linked_doc_id as linkedDocId, ib.portal_token as portalToken "
         "FROM invoices_bills ib JOIN contacts c ON c.id = ib.contact_id "
         "WHERE ib.company_id = ? ORDER BY ib.due_date",
         (company_id,),
@@ -3133,8 +3379,10 @@ def send_invoice_bill(company_id, doc_id):
     # status rather than 'sent' (which would otherwise make it show up as outstanding in the
     # Aging Report and as payable via the /pay endpoint, neither of which is correct for it).
     new_status = "applied" if doc["kind"] == "credit_note" else "sent"
+    portal_token = doc["portal_token"] or (secrets.token_urlsafe(24) if doc["kind"] == "invoice" else None)
     db.execute(
-        "UPDATE invoices_bills SET status = ?, transaction_id = ? WHERE id = ?", (new_status, tx_id, doc_id)
+        "UPDATE invoices_bills SET status = ?, transaction_id = ?, portal_token = COALESCE(portal_token, ?) WHERE id = ?",
+        (new_status, tx_id, portal_token, doc_id),
     )
     db.commit()
     return jsonify({"ok": True, "transactionId": tx_id})
@@ -3255,6 +3503,71 @@ def delete_invoice_bill(company_id, doc_id):
     db.execute("DELETE FROM invoices_bills WHERE id = ?", (doc_id,))
     db.commit()
     return jsonify({"ok": True})
+
+
+def _load_doc_and_contact(db, company_id, doc_id):
+    doc = db.execute("SELECT * FROM invoices_bills WHERE id = ? AND company_id = ?", (doc_id, company_id)).fetchone()
+    if doc is None:
+        return None, None
+    contact = db.execute("SELECT * FROM contacts WHERE id = ?", (doc["contact_id"],)).fetchone()
+    return doc, contact
+
+
+@app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>/pdf", methods=["GET"])
+@login_required
+@company_required
+def download_invoice_pdf(company_id, doc_id):
+    db = get_db()
+    doc, contact = _load_doc_and_contact(db, company_id, doc_id)
+    if doc is None or contact is None:
+        return jsonify({"error": "Not found."}), 404
+    pdf_bytes = generate_invoice_pdf(g.company, doc, contact)
+    from flask import Response
+    return Response(pdf_bytes, mimetype="application/pdf", headers={
+        "Content-Disposition": f"attachment; filename={doc['kind']}-{doc_id:04d}.pdf"
+    })
+
+
+@app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>/email", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def email_invoice_pdf(company_id, doc_id):
+    db = get_db()
+    doc, contact = _load_doc_and_contact(db, company_id, doc_id)
+    if doc is None or contact is None:
+        return jsonify({"error": "Not found."}), 404
+    if not contact["email"]:
+        return jsonify({"error": f'"{contact["name"]}" has no email address on file — add one in Contacts first.'}), 400
+
+    pdf_bytes = generate_invoice_pdf(g.company, doc, contact)
+    label = {"invoice": "Invoice", "bill": "Bill", "credit_note": "Credit note"}.get(doc["kind"], "Document")
+    amount = from_pence(doc["amount_pence"])
+    display_name = g.company["brand_display_name"] or g.company["name"]
+
+    portal_link_line = ""
+    if doc["kind"] == "invoice":
+        if not doc["portal_token"]:
+            token = secrets.token_urlsafe(24)
+            db.execute("UPDATE invoices_bills SET portal_token = ? WHERE id = ?", (token, doc_id))
+            db.commit()
+            doc = db.execute("SELECT * FROM invoices_bills WHERE id = ?", (doc_id,)).fetchone()
+        portal_url = f"{request.url_root.rstrip('/')}/portal/{doc['portal_token']}"
+        portal_link_line = f"\n\nView and pay online: {portal_url}"
+
+    body = (
+        f"{label} #{doc_id:04d} from {display_name}\n\n"
+        f"Amount due: {amount:,.2f}\nDue date: {doc['due_date']}\n\n"
+        f"{doc['desc']}{portal_link_line}\n\nA PDF copy is attached."
+    )
+    try:
+        send_email(g.company, contact["email"], f"{label} #{doc_id:04d} from {display_name}", body,
+                   attachment_bytes=pdf_bytes, attachment_filename=f"{doc['kind']}-{doc_id:04d}.pdf")
+    except EmailNotConfigured as e:
+        return jsonify({"error": str(e)}), 400
+    except (smtplib.SMTPException, OSError) as e:
+        return jsonify({"error": f"Could not send: {e}"}), 502
+    return jsonify({"ok": True, "sentTo": contact["email"]})
 
 
 # ---------- purchase orders ----------
@@ -3415,6 +3728,92 @@ def delete_budget(company_id, budget_id):
     db.execute("DELETE FROM budgets WHERE id = ? AND company_id = ?", (budget_id, company_id))
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/run-notifications-check", methods=["POST"])
+@login_required
+@company_required
+def run_notifications_check(company_id):
+    """#9: an in-app cron substitute — called from the dashboard on load, throttled to once a
+    day per company via companies.last_notification_run, rather than requiring real
+    infrastructure (a scheduler/cron) this app doesn't have. For a production deployment, the
+    same endpoint should also be hit by an actual cron job so companies get notified even on
+    days nobody opens the app — that's a deployment-config addition, not a code change.
+
+    Sends ONE digest email (not one per item) covering: invoices that went overdue, a VAT
+    deadline within 7 days (only if HMRC is connected — otherwise this line is skipped, not
+    guessed at), and a nudge if no bank reconciliation has closed in 35+ days. Deduped per
+    calendar day via notification_log so re-running (or reloading the dashboard repeatedly)
+    never double-sends."""
+    db = get_db()
+    today = datetime.date.today().isoformat()
+    force = (request.get_json(silent=True) or {}).get("force", False)
+
+    if not g.company["notifications_enabled"]:
+        return jsonify({"sent": False, "reason": "Notifications are turned off in Settings."})
+    if not force and g.company["last_notification_run"] == today:
+        return jsonify({"sent": False, "reason": "Already checked today."})
+
+    to_email = g.company["notify_email"] or session.get("email")
+    lines = []
+
+    overdue = db.execute(
+        "SELECT id, desc, due_date, amount_pence FROM invoices_bills "
+        "WHERE company_id = ? AND kind = 'invoice' AND status = 'sent' AND due_date < ?",
+        (company_id, today),
+    ).fetchall()
+    if overdue:
+        total = sum(from_pence(r["amount_pence"]) for r in overdue)
+        lines.append(f"{len(overdue)} invoice(s) overdue, totalling {total:,.2f}:")
+        for r in overdue[:10]:
+            lines.append(f"  - #{r['id']:04d} {r['desc']} — due {r['due_date']}, {from_pence(r['amount_pence']):,.2f}")
+
+    if (g.company["hmrc_vrn"] or "").strip() and decrypt_secret(g.company["hmrc_access_token"]):
+        try:
+            obligations = call_hmrc(g.company, "GET", f"/organisations/vat/{g.company['hmrc_vrn'].strip()}/obligations?status=O")
+            for ob in obligations.get("obligations", []):
+                due = ob.get("due")
+                if due and due <= (datetime.date.today() + datetime.timedelta(days=7)).isoformat():
+                    lines.append(f"VAT return due {due} (period {ob.get('start')} to {ob.get('end')}).")
+        except HmrcError:
+            pass  # don't let an HMRC API hiccup block the rest of the digest
+
+    last_reconciled = db.execute(
+        "SELECT MAX(statement_date) as d FROM bank_reconciliations WHERE company_id = ? AND status = 'closed'", (company_id,)
+    ).fetchone()["d"]
+    stale_cutoff = (datetime.date.today() - datetime.timedelta(days=35)).isoformat()
+    if not last_reconciled or last_reconciled < stale_cutoff:
+        lines.append(f"Bank reconciliation hasn't been closed since {last_reconciled or 'ever'} — over a month ago.")
+
+    db.execute("UPDATE companies SET last_notification_run = ? WHERE id = ?", (today, company_id))
+    db.commit()
+
+    if not lines:
+        return jsonify({"sent": False, "reason": "Nothing to report today."})
+    if not to_email:
+        return jsonify({"sent": False, "reason": "No notification email set in Settings."})
+
+    event_key = f"daily_digest:{today}"
+    already_sent = db.execute(
+        "SELECT 1 FROM notification_log WHERE company_id = ? AND event_key = ?", (company_id, event_key)
+    ).fetchone()
+    if already_sent and not force:
+        return jsonify({"sent": False, "reason": "Already sent today."})
+
+    body = f"Daily summary for {g.company['name']}:\n\n" + "\n".join(lines)
+    try:
+        send_email(g.company, to_email, f"{g.company['name']} — daily summary", body)
+    except EmailNotConfigured as e:
+        return jsonify({"sent": False, "reason": str(e)})
+    except (smtplib.SMTPException, OSError) as e:
+        return jsonify({"sent": False, "reason": f"Could not send: {e}"})
+
+    db.execute(
+        "INSERT INTO notification_log (company_id, event_key) VALUES (?, ?) ON CONFLICT(company_id, event_key) DO NOTHING",
+        (company_id, event_key),
+    )
+    db.commit()
+    return jsonify({"sent": True, "summary": lines})
 
 
 @app.route("/api/companies/<int:company_id>/cis-statements", methods=["GET"])
@@ -4558,6 +4957,78 @@ def hmrc_host(company):
     return HMRC_HOSTS.get(company["hmrc_env"] or "sandbox", HMRC_HOSTS["sandbox"])
 
 
+# ---------- Stripe (#7) — called directly via REST, no SDK dependency ----------
+
+class StripeError(Exception):
+    def __init__(self, message, status=502):
+        self.message = message
+        self.status = status
+
+
+def create_stripe_checkout_session(company_row, doc_row, contact_row, success_url, cancel_url):
+    """Creates a Stripe Checkout Session for one invoice and returns its hosted payment page
+    URL. Card details never touch this server — Stripe hosts the whole payment form."""
+    secret_key = decrypt_secret(company_row["stripe_secret_key"])
+    if not secret_key:
+        raise StripeError("Online payment isn't set up for this company yet.", 400)
+    amount = from_pence(doc_row["amount_pence"])
+    currency = (company_row["currency"] or "GBP").lower()
+    form = {
+        "mode": "payment",
+        "success_url": success_url,
+        "cancel_url": cancel_url,
+        "customer_email": contact_row["email"] or "",
+        "line_items[0][price_data][currency]": currency,
+        "line_items[0][price_data][product_data][name]": f"Invoice #{doc_row['id']:04d} — {doc_row['desc']}"[:250],
+        "line_items[0][price_data][unit_amount]": str(doc_row["amount_pence"]),
+        "line_items[0][quantity]": "1",
+        "metadata[invoice_id]": str(doc_row["id"]),
+        "metadata[company_id]": str(doc_row["company_id"]),
+    }
+    body = urllib.parse.urlencode(form).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.stripe.com/v1/checkout/sessions", data=body, method="POST",
+        headers={
+            "Authorization": "Basic " + base64.b64encode(f"{secret_key}:".encode()).decode(),
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", "replace")
+        try:
+            msg = json.loads(err_body).get("error", {}).get("message", err_body)
+        except json.JSONDecodeError:
+            msg = err_body
+        raise StripeError(f"Stripe error: {msg}", 502)
+    except urllib.error.URLError as e:
+        raise StripeError(f"Could not reach Stripe: {e.reason}", 502)
+
+
+def verify_stripe_webhook_signature(payload_bytes, sig_header, webhook_secret, tolerance_seconds=300):
+    """Stripe's documented signature scheme: the header is `t=<timestamp>,v1=<hex hmac>` (and
+    possibly older v1 signatures from key rotation) — the signed payload is "{t}.{body}", HMAC-
+    SHA256 with the webhook secret. Verified with stdlib hmac, no SDK needed. Returns True/False
+    rather than raising, since an invalid signature is an expected case (anyone can POST here),
+    not an exceptional one."""
+    if not sig_header or not webhook_secret:
+        return False
+    parts = dict(p.split("=", 1) for p in sig_header.split(",") if "=" in p)
+    timestamp, sig = parts.get("t"), parts.get("v1")
+    if not timestamp or not sig:
+        return False
+    try:
+        if abs(time.time() - int(timestamp)) > tolerance_seconds:
+            return False
+    except ValueError:
+        return False
+    signed_payload = f"{timestamp}.".encode() + payload_bytes
+    expected = hmac.new(webhook_secret.encode(), signed_payload, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, sig)
+
+
 def call_hmrc(company, method, path, headers=None, data=None, form=False):
     access_token = decrypt_secret(company["hmrc_access_token"])
     if not access_token:
@@ -4722,6 +5193,122 @@ def list_vat_filings(company_id):
         d["hmrcResponse"] = json.loads(d.pop("hmrcResponseJson"))
         out.append(d)
     return jsonify(out)
+
+
+# ---------- public customer portal (#7) — no login, gated by an unguessable token instead ----------
+
+def _portal_doc(db, token):
+    doc = db.execute("SELECT * FROM invoices_bills WHERE portal_token = ?", (token,)).fetchone()
+    if doc is None:
+        return None, None, None
+    contact = db.execute("SELECT * FROM contacts WHERE id = ?", (doc["contact_id"],)).fetchone()
+    company = db.execute("SELECT * FROM companies WHERE id = ?", (doc["company_id"],)).fetchone()
+    return doc, contact, company
+
+
+@app.route("/portal/<token>", methods=["GET"])
+def customer_portal(token):
+    db = get_db()
+    doc, contact, company = _portal_doc(db, token)
+    if doc is None:
+        return "This link isn't valid — the invoice may have been deleted, or the link was mistyped.", 404
+
+    amount = from_pence(doc["amount_pence"])
+    display_name = company["brand_display_name"] or company["name"]
+    is_paid = doc["status"] == "paid"
+    can_pay = not is_paid and doc["kind"] == "invoice" and bool(decrypt_secret(company["stripe_secret_key"]))
+    brand_color = company["brand_color"] or "#0A7EA4"
+    logo_html = f'<img src="/portal/{token}/logo" style="max-height:48px; margin-bottom:16px;">' if company["brand_logo_path"] else ""
+    pay_button = (
+        f'<form method="POST" action="/portal/{token}/checkout">'
+        f'<button type="submit" style="background:{brand_color}; color:#fff; border:none; border-radius:8px; padding:12px 24px; font-size:15px; font-weight:600; cursor:pointer; margin-top:16px;">Pay {amount:,.2f} now</button>'
+        f'</form>'
+    ) if can_pay else (
+        '<div style="margin-top:16px; color:#1A7A4E; font-weight:600;">✓ Paid</div>' if is_paid else ""
+    )
+    return f"""<html><head><title>Invoice #{doc['id']:04d} — {display_name}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>body{{font-family:-apple-system,sans-serif; max-width:520px; margin:60px auto; padding:0 20px; color:#1A1B2E;}}
+    .card{{background:#fff; border:1px solid #E4E2DA; border-radius:12px; padding:28px;}}
+    .row{{display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid #F4F3EF;}}
+    .muted{{color:#8B8EA3; font-size:13px;}}</style></head><body>
+    {logo_html}
+    <div class="card">
+      <div class="muted">Invoice from</div>
+      <h2 style="margin:2px 0 20px;">{display_name}</h2>
+      <div class="row"><span class="muted">Invoice</span><span>#{doc['id']:04d}</span></div>
+      <div class="row"><span class="muted">Date</span><span>{doc['date']}</span></div>
+      <div class="row"><span class="muted">Due</span><span>{doc['due_date']}</span></div>
+      <div class="row"><span class="muted">Description</span><span>{doc['desc']}</span></div>
+      <div class="row" style="font-weight:700; font-size:18px;"><span>Amount due</span><span>{amount:,.2f}</span></div>
+      {pay_button}
+    </div>
+    </body></html>"""
+
+
+@app.route("/portal/<token>/logo", methods=["GET"])
+def customer_portal_logo(token):
+    db = get_db()
+    doc, contact, company = _portal_doc(db, token)
+    if doc is None or not company["brand_logo_path"]:
+        return "", 404
+    directory, filename = company["brand_logo_path"].rsplit("/", 1)
+    return send_from_directory(str(UPLOADS_DIR / directory), filename)
+
+
+@app.route("/portal/<token>/checkout", methods=["POST"])
+def customer_portal_checkout(token):
+    db = get_db()
+    doc, contact, company = _portal_doc(db, token)
+    if doc is None:
+        return "This link isn't valid.", 404
+    if doc["status"] == "paid":
+        return f'<script>location.href="/portal/{token}";</script>'
+    base = request.url_root.rstrip("/")
+    try:
+        session_obj = create_stripe_checkout_session(
+            company, doc, contact,
+            success_url=f"{base}/portal/{token}?paid=1", cancel_url=f"{base}/portal/{token}",
+        )
+    except StripeError as e:
+        return f"<p>{e.message}</p>", e.status
+    return f'<script>location.href="{session_obj["url"]}";</script>'
+
+
+@app.route("/webhooks/stripe", methods=["POST"])
+def stripe_webhook():
+    """Marks the invoice paid automatically when Stripe confirms the Checkout session
+    completed — the autonomous-AR half of the payment-link feature; without this, a customer
+    paying via the portal wouldn't actually settle the invoice on this end."""
+    payload = request.get_data()
+    sig_header = request.headers.get("Stripe-Signature", "")
+    event = json.loads(payload)
+    company_id = (event.get("data", {}).get("object", {}).get("metadata") or {}).get("company_id")
+    db = get_db()
+    company = db.execute("SELECT * FROM companies WHERE id = ?", (company_id,)).fetchone() if company_id else None
+    if company is None:
+        return jsonify({"error": "Unknown company."}), 400
+    webhook_secret = decrypt_secret(company["stripe_webhook_secret"])
+    if not verify_stripe_webhook_signature(payload, sig_header, webhook_secret):
+        return jsonify({"error": "Invalid signature."}), 400
+
+    if event.get("type") == "checkout.session.completed":
+        invoice_id = (event["data"]["object"].get("metadata") or {}).get("invoice_id")
+        doc = db.execute("SELECT * FROM invoices_bills WHERE id = ? AND company_id = ?", (invoice_id, company_id)).fetchone()
+        if doc is not None and doc["status"] == "sent":
+            g.company = company  # post_ledger_transaction reads g.company for the period-lock check; no @company_required ran on this public route
+            debtors_account = resolve_account(db, company_id, "Trade Receivables", "current_asset")
+            payment_account = company["stripe_payment_account"] or "Cash"
+            try:
+                tx_id = post_ledger_transaction(
+                    db, company_id, datetime.date.today().isoformat(), f'Stripe payment: {doc["desc"]}',
+                    from_pence(doc["amount_pence"]), payment_account, debtors_account,
+                )
+                db.execute("UPDATE invoices_bills SET status = 'paid', payment_transaction_id = ? WHERE id = ?", (tx_id, doc["id"]))
+                db.commit()
+            except LedgerError:
+                pass  # period locked or similar — the payment still succeeded at Stripe; leave the invoice as-is for manual reconciliation
+    return jsonify({"received": True})
 
 
 init_db()  # runs on import too, not just `python3 server.py` directly — gunicorn imports this module without executing __main__

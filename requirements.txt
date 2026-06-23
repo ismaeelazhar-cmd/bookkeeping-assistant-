@@ -1,3 +1,4 @@
 flask
 werkzeug
 cryptography
+fpdf2
