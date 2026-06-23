@@ -2573,20 +2573,27 @@ function renderBrecTable() {
       const options = ['<option value="">— none —</option>'].concat(
         candidates.map(c => `<option value="${c.transactionId}" ${l.matchedTransactionId === c.transactionId ? 'selected' : ''}>${fmtDate(c.date)} — ${escapeHtml(c.desc)} (${fmt(c.amount)})</option>`)
       ).join('');
-      let reason;
+      let reason, statusLabel, statusClass;
+      const ambiguous = !isMatched && candidates.length > 1;
       if (isMatched) {
         const matchedTx = ledgerLines.find(tl => tl.transactionId === l.matchedTransactionId);
         reason = matchedTx ? `Matched to "${matchedTx.desc}" on ${fmtDate(matchedTx.date)}.` : 'Matched to a ledger transaction.';
+        statusLabel = 'matched'; statusClass = 'high';
+      } else if (ambiguous) {
+        reason = `Ambiguous match: ${candidates.length} ledger transactions at exactly ${fmt(l.amount)} could be this line — check dates/descriptions carefully before picking one.`;
+        statusLabel = 'ambiguous ⚠'; statusClass = 'low';
       } else if (candidates.length) {
-        reason = `${candidates.length} ledger transaction(s) at exactly ${fmt(l.amount)} are available to pick from the dropdown — none chosen yet.`;
+        reason = `1 ledger transaction at exactly ${fmt(l.amount)} is available to pick from the dropdown — not chosen yet.`;
+        statusLabel = 'unmatched'; statusClass = 'low';
       } else {
         reason = `No ledger transaction for this account is posted at exactly ${fmt(l.amount)} — either post one with "Post & match", or check for a typo/rounding difference.`;
+        statusLabel = 'unmatched'; statusClass = 'low';
       }
       return `<tr>
         <td>${fmtDate(l.date)}</td>
         <td>${escapeHtml(l.desc)}</td>
         <td class="num" style="color:${l.amount >= 0 ? 'var(--good)' : 'var(--bad)'}">${fmt(l.amount)}</td>
-        <td><span class="confidence ${isMatched ? 'high' : 'low'}" title="${escapeHtml(reason)}">${isMatched ? 'matched' : 'unmatched'} ⓘ</span></td>
+        <td><span class="confidence ${statusClass}" title="${escapeHtml(reason)}">${statusLabel} ⓘ</span></td>
         <td><select onchange="matchBankLine(${l.id}, this.value)">${options}</select></td>
         <td>
           ${!isMatched ? `<button class="btn-secondary" onclick="postAndMatchBrecLine(${l.id})">Post &amp; match</button>` : ''}
