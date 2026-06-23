@@ -935,6 +935,17 @@
       <h2>Cash Flow Forecast</h2>
       <div class="sub" style="margin-bottom:12px;">Projected cash position: current cash, plus outstanding receivables/payables and recurring journal commitments due within each window. Not a guarantee — customers and suppliers don't always pay on the due date.</div>
       <div id="forecast-bars"></div>
+
+      <h2 style="margin-top:20px;">What-If Scenarios</h2>
+      <div class="sub" style="margin-bottom:10px;">Overlay a hypothetical event on the forecast above — e.g. "if I land this £20k invoice in 30 days" — without it touching your real ledger. Cleared on reload.</div>
+      <div class="row2">
+        <div><label>Amount <span style="color:var(--muted); font-weight:400;">(+in, -out)</span></label><input type="number" id="whatif-amount" step="0.01" placeholder="e.g. 20000 or -5000"></div>
+        <div><label>Days from today</label><input type="number" id="whatif-days" min="0" placeholder="e.g. 30"></div>
+      </div>
+      <label>Label</label>
+      <input type="text" id="whatif-label" placeholder="e.g. Hartley invoice lands">
+      <button class="btn-secondary" onclick="addWhatIfScenario()">Add to scenario</button>
+      <div id="whatif-list" style="margin-top:10px;"></div>
     </div>
 
     <div class="panel" style="margin-top:20px;">
@@ -3463,6 +3474,28 @@ function renderMonthlyPnL() {
   table.innerHTML = html;
 }
 
+// ---------- cashflow what-if scenarios (#19) — client-side only, never touches the ledger ----------
+let whatIfScenarios = [];
+
+function addWhatIfScenario() {
+  const amount = parseFloat(document.getElementById('whatif-amount').value);
+  const days = parseInt(document.getElementById('whatif-days').value, 10);
+  const label = document.getElementById('whatif-label').value.trim();
+  if (isNaN(amount) || amount === 0 || isNaN(days) || days < 0 || !label) {
+    showToast('Enter a non-zero amount, a day count (0 or more), and a label.', 'error'); return;
+  }
+  whatIfScenarios.push({ amount, days, label });
+  document.getElementById('whatif-amount').value = '';
+  document.getElementById('whatif-days').value = '';
+  document.getElementById('whatif-label').value = '';
+  renderCashFlowForecast();
+}
+
+function removeWhatIfScenario(index) {
+  whatIfScenarios.splice(index, 1);
+  renderCashFlowForecast();
+}
+
 function renderCashFlowForecast() {
   const el = document.getElementById('forecast-bars');
   if (!el) return;
@@ -3473,6 +3506,15 @@ function renderCashFlowForecast() {
   const today = new Date().toISOString().slice(0, 10);
   const addDays = n => { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
   const windows = [30, 60, 90];
+
+  const listEl = document.getElementById('whatif-list');
+  if (listEl) {
+    listEl.innerHTML = whatIfScenarios.length ? whatIfScenarios.map((s, i) => `
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0; ${i ? 'border-top:1px solid var(--border);' : ''}">
+        <span style="font-size:13px;">${escapeHtml(s.label)} — <span style="color:${s.amount >= 0 ? 'var(--good)' : 'var(--bad)'}; font-weight:600;">${s.amount >= 0 ? '+' : ''}${fmt(s.amount)}</span> in ${s.days} day${s.days === 1 ? '' : 's'}</span>
+        <button class="btn-danger" onclick="removeWhatIfScenario(${i})">✕</button>
+      </div>`).join('') : '<div class="empty">No what-if scenarios added.</div>';
+  }
 
   // Recurring journals: a cash inflow if the debit side is a cash account, an outflow if the
   // credit side is — anything that doesn't touch cash on either side has no place in a cash
@@ -3494,22 +3536,27 @@ function renderCashFlowForecast() {
     const recurring = recurringJournals
       .filter(rj => rj.nextDue >= today && rj.nextDue <= horizon)
       .reduce((s, rj) => s + recurringCashEffect(rj), 0);
+    const scenarioEffect = whatIfScenarios.filter(s => s.days <= days).reduce((s, sc) => s + sc.amount, 0);
     const projected = currentCash + receivables - payables + recurring;
-    return { days, receivables, payables, recurring, projected };
+    const projectedWithScenario = projected + scenarioEffect;
+    return { days, receivables, payables, recurring, projected, projectedWithScenario, scenarioEffect };
   });
 
-  const maxAbs = Math.max(Math.abs(currentCash), ...rows.map(r => Math.abs(r.projected)), 1);
+  const maxAbs = Math.max(Math.abs(currentCash), ...rows.map(r => Math.max(Math.abs(r.projected), Math.abs(r.projectedWithScenario))), 1);
   const barWidth = v => `${Math.min(100, Math.abs(v) / maxAbs * 100)}%`;
-  const barRow = (label, value) => `
+  const barRow = (label, value, color) => `
     <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
       <div style="width:90px; font-size:12px; color:var(--muted);">${label}</div>
       <div style="flex:1; background:var(--panel-soft); border-radius:4px; height:20px; position:relative;">
-        <div style="height:100%; border-radius:4px; width:${barWidth(value)}; background:${value >= 0 ? 'var(--good)' : 'var(--bad)'};"></div>
+        <div style="height:100%; border-radius:4px; width:${barWidth(value)}; background:${color || (value >= 0 ? 'var(--good)' : 'var(--bad)')};"></div>
       </div>
       <div style="width:90px; text-align:right; font-family:var(--font-mono); font-size:13px;">${fmt(value)}</div>
     </div>`;
 
-  el.innerHTML = barRow('Today', currentCash) + rows.map(r => barRow(`${r.days} days`, r.projected)).join('') +
+  const hasScenario = whatIfScenarios.length > 0;
+  el.innerHTML = barRow('Today', currentCash) + rows.map(r =>
+    barRow(`${r.days} days`, r.projected) + (hasScenario ? barRow(`+ scenario`, r.projectedWithScenario, 'var(--accent)') : '')
+  ).join('') +
     `<div class="sub" style="margin-top:6px;">Receivables/payables/recurring-journal commitments due within each window: ` +
     rows.map(r => `${r.days}d → +${fmt(r.receivables)} / -${fmt(r.payables)} / ${r.recurring >= 0 ? '+' : ''}${fmt(r.recurring)} recurring`).join(' · ') + `</div>`;
 }
