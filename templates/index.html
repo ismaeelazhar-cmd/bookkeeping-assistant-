@@ -1062,7 +1062,8 @@
       <h2>Period Lock</h2>
       <div class="sub" style="margin-bottom:8px;">Once you've filed a VAT return or finalized accounts up to a date, lock it — transactions on or before that date can no longer be added, edited, or deleted by anyone.</div>
       <label>Locked up to and including</label>
-      <input type="date" id="f-locked-until" oninput="saveSettings()">
+      <input type="date" id="f-locked-until" oninput="savePeriodLock()">
+      <div class="sub" style="margin:4px 0 0;">Invited accountants (Comment permission or above) can set this without needing full settings access.</div>
 
       <h2 style="margin-top:24px;">Books Start Date</h2>
       <div class="sub" style="margin-bottom:8px;">The date your Opening Balances are "as of" — shown as the brought-forward point on the Cash Flow Statement.</div>
@@ -1140,7 +1141,11 @@
       <table class="inbox"><thead><tr><th>Email</th><th>Permission</th><th></th></tr></thead><tbody id="team-body"></tbody></table>
       <div id="team-owner-controls" class="row2" style="margin-top:12px;">
         <div><label>Invite by email</label><input type="email" id="team-invite-email" placeholder="colleague@example.com"></div>
-        <div><label>Permission</label><select id="team-invite-permission"><option value="view">View</option><option value="comment">Comment</option><option value="post">Post (full access)</option></select></div>
+        <div><label>Permission</label><select id="team-invite-permission">
+          <option value="view">View only</option>
+          <option value="comment">Accountant — leave comments &amp; lock periods, can't post/delete</option>
+          <option value="post">Post (full access)</option>
+        </select></div>
       </div>
       <button class="btn-primary" id="team-invite-btn" onclick="inviteMember()">Invite</button>
       <div id="team-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
@@ -1696,6 +1701,14 @@ function buildSettingsPayload(extra) {
     hmrcEnv: document.getElementById('hmrc-env').value,
     hmrcVrn: document.getElementById('hmrc-vrn').value.trim(),
   }, extra || {});
+}
+
+async function savePeriodLock() {
+  if (!currentCompany) return;
+  const lockedUntil = document.getElementById('f-locked-until').value;
+  await api(`/api/companies/${currentCompany.id}/period-lock`, { method: 'PUT', body: JSON.stringify({ lockedUntil }) });
+  currentCompany.locked_until = lockedUntil;
+  showToast(lockedUntil ? `Locked up to and including ${fmtDate(lockedUntil)}.` : 'Period lock cleared.', 'success');
 }
 
 async function saveSettings() {

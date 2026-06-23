@@ -923,6 +923,18 @@ def write_required(fn):
     return wrapper
 
 
+def comment_required(fn):
+    """#16: a step below write_required — 'comment'-permission members (the accountant-
+    collaboration tier: can leave notes and lock periods, but can't post or delete
+    transactions) pass this gate too. Apply AFTER @company_required."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if g.company_permission not in ("owner", "post", "comment"):
+            return jsonify({"error": "You have view-only access to this company."}), 403
+        return fn(*args, **kwargs)
+    return wrapper
+
+
 def owner_required(fn):
     """For company deletion and member management — stricter than write_required, only the actual owner."""
     @wraps(fn)
@@ -1287,6 +1299,24 @@ def update_settings(company_id):
         db.execute("UPDATE companies SET hmrc_client_secret = '', hmrc_access_token = '', hmrc_refresh_token = '' WHERE id = ?", (company_id,))
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/period-lock", methods=["PUT"])
+@login_required
+@company_required
+@comment_required
+def update_period_lock(company_id):
+    """#16: locking a period (after a VAT return or month-end close) is the one settings change
+    an invited accountant needs to make routinely, separate from the full settings form which
+    also touches integrations/AI keys — comment-permission is enough to lock dates, but still
+    can't post or delete a single transaction."""
+    locked_until = (request.get_json(force=True) or {}).get("lockedUntil", "")
+    db = get_db()
+    db.execute("UPDATE companies SET locked_until = ? WHERE id = ?", (locked_until, company_id))
+    db.commit()
+    log_audit(db, company_id, "lock_period", "company", company_id, after={"lockedUntil": locked_until})
+    db.commit()
+    return jsonify({"ok": True, "lockedUntil": locked_until})
 
 
 VALID_PERMISSIONS = ("view", "comment", "post")
@@ -2884,7 +2914,7 @@ def list_transaction_comments(company_id, tx_id):
 @app.route("/api/companies/<int:company_id>/transactions/<int:tx_id>/comments", methods=["POST"])
 @login_required
 @company_required
-@write_required
+@comment_required
 def add_transaction_comment(company_id, tx_id):
     db = get_db()
     tx = db.execute("SELECT id FROM transactions WHERE id = ? AND company_id = ?", (tx_id, company_id)).fetchone()
@@ -2907,9 +2937,14 @@ def add_transaction_comment(company_id, tx_id):
 @app.route("/api/companies/<int:company_id>/comments/<int:comment_id>", methods=["DELETE"])
 @login_required
 @company_required
-@write_required
+@comment_required
 def delete_transaction_comment(company_id, comment_id):
+    """Owners can clear up any comment; everyone else (post/comment-permission members,
+    including an invited accountant) can only delete their own."""
     db = get_db()
+    row = db.execute("SELECT author FROM transaction_comments WHERE id = ? AND company_id = ?", (comment_id, company_id)).fetchone()
+    if row is not None and g.company_permission != "owner" and row["author"] != session.get("email"):
+        return jsonify({"error": "You can only delete your own comments."}), 403
     db.execute("DELETE FROM transaction_comments WHERE id = ? AND company_id = ?", (comment_id, company_id))
     db.commit()
     return jsonify({"ok": True})
