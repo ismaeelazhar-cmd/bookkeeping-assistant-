@@ -4,30 +4,37 @@
 <meta charset="UTF-8">
 <title>Bookkeeping — T-Account Ledger</title>
 <link rel="stylesheet" href="/static/css/tokens.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
 <style>
   :root {
-    /* Claude-style warm, editorial palette */
-    --bg: #F5F2EA;            /* warm cream page background */
+    /* MyAccountingPal palette — navy sidebar + teal accent */
+    --bg: #F2F1ED;            /* page background */
     --panel: #FFFFFF;         /* card surfaces */
-    --panel-soft: #FAF7F0;    /* subtle alt surface (hovers, table stripes) */
-    --border: #E4DECF;        /* warm hairline border */
-    --text: #2B2825;          /* warm near-black */
-    --muted: #8C8273;         /* warm grey for secondary text */
-    --accent: #C2682F;        /* Claude terracotta */
-    --accent-hover: #A8551F;
-    --accent-soft: #F1E2D4;   /* terracotta tint for pills/badges */
-    --debit: #5B7A99;         /* muted slate blue */
-    --credit: #C2682F;        /* terracotta, matches accent */
-    --good: #4B7B5C;          /* muted sage green */
-    --bad: #B14A3B;           /* muted brick red */
-    --bad-soft: #F4E3DF;
+    --panel-soft: #F4F3EF;    /* subtle alt surface (hovers, table stripes) */
+    --border: #E4E2DA;        /* hairline border */
+    --text: #1A1B2E;          /* near-black navy */
+    --muted: #8B8EA3;         /* secondary text */
+    --accent: #0A7EA4;        /* teal */
+    --accent-hover: #086E8C;
+    --accent-soft: #DDEEF5;   /* teal tint for pills/badges */
+    --debit: #5B7A99;
+    --credit: #0A7EA4;
+    --good: #1A7A4E;
+    --bad: #C53030;
+    --bad-soft: #FEE2E2;
+    --sidebar-bg: #1B2538;
+    --sidebar-text: rgba(255,255,255,0.52);
+    --sidebar-text-active: #FFFFFF;
+    --sidebar-active-bg: rgba(10,126,164,0.22);
   }
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     background: var(--bg);
     color: var(--text);
     padding: 28px;
@@ -37,34 +44,42 @@
      unless something overrode it locally; h1/h2 previously forced Georgia, which clashed with
      the sans-serif body and any element that didn't set a font-family at all. */
   h1, h2, h3, table, input, select, textarea, button { font-family: inherit; }
-  h1, h2 { font-weight: 600; }
+  h1, h2 { font-weight: 700; letter-spacing: -0.01em; }
   h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
   .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
   .layout { display: grid; grid-template-columns: 380px 1fr; gap: 20px; align-items: start; }
 
+  .app-shell { display: flex; gap: 0; margin: -28px; min-height: 100vh; }
+  .sidebar {
+    width: 232px; flex: 0 0 232px; background: var(--sidebar-bg); padding: 20px 14px;
+    display: flex; flex-direction: column; min-height: 100vh;
+  }
+  .sidebar .brand { color: #fff; font-weight: 800; font-size: 15px; letter-spacing: -0.02em; padding: 6px 10px 18px; }
+  .main-area { flex: 1; min-width: 0; padding: 28px; }
+
   nav.page-tabs {
-    position: sticky; top: 0; z-index: 10; background: var(--bg);
-    padding: 10px 0; margin-bottom: 16px; border-bottom: 1px solid var(--border);
-    display: flex; gap: 4px; flex-wrap: wrap; font-size: 13px;
+    background: transparent; padding: 0; margin-bottom: 0; border-bottom: none;
+    display: flex; flex-direction: column; gap: 2px; font-size: 13px;
   }
   nav.page-tabs a {
-    color: var(--text); text-decoration: none; padding: 8px 14px; border-radius: 7px;
-    font-weight: 600; transition: background .12s ease;
+    color: var(--sidebar-text); text-decoration: none; padding: 8px 10px; border-radius: 8px;
+    font-weight: 500; transition: all .12s ease; display: flex; align-items: center; gap: 9px;
+    letter-spacing: -0.1px;
   }
-  nav.page-tabs a:hover { background: var(--panel-soft); }
-  nav.page-tabs a.nav-active { background: var(--accent-soft); color: var(--accent-hover); }
+  nav.page-tabs a:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.85); }
+  nav.page-tabs a.nav-active { background: var(--sidebar-active-bg); color: var(--sidebar-text-active); font-weight: 700; }
   .kpi-card { transition: box-shadow .12s ease; }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; box-shadow: 0 1px 2px rgba(43,40,37,0.03); }
-  .panel h2 { font-size: 13px; margin: 0 0 12px; color: var(--accent); text-transform: uppercase; letter-spacing: .07em; font-weight: 700; }
-  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+  .panel h2 { font-size: 11px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; font-weight: 700; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; font-family: inherit; }
   input, select {
-    width: 100%; background: var(--panel-soft); border: 1px solid var(--border); color: var(--text);
-    padding: 8px 10px; border-radius: 7px; font-size: 14px; font-family: inherit;
+    width: 100%; background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    padding: 8px 10px; border-radius: 8px; font-size: 14px; font-family: inherit;
   }
   input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  button { cursor: pointer; border: none; border-radius: 7px; padding: 9px 16px; font-size: 13px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; transition: background .12s ease, opacity .12s ease; }
+  button { cursor: pointer; border: none; border-radius: 8px; padding: 9px 16px; font-size: 13px; font-weight: 600; font-family: inherit; transition: background .12s ease, opacity .12s ease; }
   .btn-primary { background: var(--accent); color: #fff; width: 100%; margin-top: 16px; }
   .btn-primary:hover { background: var(--accent-hover); }
   .btn-secondary { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
@@ -74,8 +89,8 @@
   .toolbar { display: flex; gap: 8px; margin-bottom: 16px; }
   .accounts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
   .taccount { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
-  .taccount-title { padding: 10px 14px; font-weight: 700; font-size: 14px; border-bottom: 2px solid var(--border); display: flex; justify-content: space-between; align-items: baseline; background: var(--panel-soft); font-family: Georgia, serif; }
-  .taccount-title .bal { font-size: 12px; color: var(--muted); font-weight: 500; font-family: -apple-system, sans-serif; }
+  .taccount-title { padding: 10px 14px; font-weight: 700; font-size: 14px; border-bottom: 2px solid var(--border); display: flex; justify-content: space-between; align-items: baseline; background: var(--panel-soft); font-family: inherit; }
+  .taccount-title .bal { font-size: 12px; color: var(--muted); font-weight: 500; font-family: inherit; }
   .tbody { display: grid; grid-template-columns: 1fr 1fr; }
   .tside { padding: 8px; min-height: 40px; }
   .tside.debit { border-right: 1px solid var(--border); }
@@ -114,10 +129,10 @@
 
   .center-screen { min-height: 70vh; display: flex; align-items: center; justify-content: center; }
   .auth-card { width: 360px; }
-  .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-  .topbar .who { font-size: 13px; color: var(--muted); font-family: -apple-system, sans-serif; }
+  .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+  .topbar .who { font-size: 13px; color: var(--muted); font-family: inherit; }
   .company-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: border-color .12s ease; }
-  .company-card:hover { border-color: var(--accent); box-shadow: 0 1px 4px rgba(43,40,37,0.06); }
+  .company-card:hover { border-color: var(--accent); box-shadow: 0 1px 4px rgba(0,0,0,0.05); }
   .company-list { max-width: 480px; margin: 0 auto; }
   .err { color: var(--bad); font-size: 12px; margin-top: 8px; min-height: 14px; }
 </style>
@@ -199,6 +214,21 @@
 </div>
 
 <div id="app-screen" style="display:none;">
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">MyAccountingPal</div>
+      <nav class="page-tabs">
+        <a href="#page-dashboard" data-page="dashboard">Dashboard</a>
+        <a href="#page-transactions" data-page="transactions">Transactions</a>
+        <a href="#page-bank" data-page="bank">Bank <span id="bank-nav-badge" class="badge badge-overdue" style="display:none; margin-left:4px;"></span></a>
+        <a href="#page-accounts" data-page="accounts">Accounts</a>
+        <a href="#page-invoices" data-page="invoices">Invoices</a>
+        <a href="#page-reports" data-page="reports">Reports</a>
+        <a href="#page-settings" data-page="settings">Settings</a>
+        <a href="#page-audit" data-page="audit">Audit</a>
+      </nav>
+    </aside>
+    <div class="main-area">
   <div class="topbar">
     <div>
       <h1 id="company-name-header">Bookkeeping — Double Entry Ledger</h1>
@@ -215,17 +245,6 @@
   </div>
   <div id="global-search-results" style="display:none; margin-bottom:16px;"></div>
   <div id="toast-container" style="position:fixed; top:16px; right:16px; z-index:200; display:flex; flex-direction:column; gap:8px; max-width:340px;"></div>
-
-  <nav class="page-tabs">
-    <a href="#page-dashboard" data-page="dashboard">Dashboard</a>
-    <a href="#page-transactions" data-page="transactions">Transactions</a>
-    <a href="#page-bank" data-page="bank">Bank <span id="bank-nav-badge" class="badge badge-overdue" style="display:none; margin-left:4px;"></span></a>
-    <a href="#page-accounts" data-page="accounts">Accounts</a>
-    <a href="#page-invoices" data-page="invoices">Invoices</a>
-    <a href="#page-reports" data-page="reports">Reports</a>
-    <a href="#page-settings" data-page="settings">Settings</a>
-    <a href="#page-audit" data-page="audit">Audit</a>
-  </nav>
 
   <div class="page" data-page="dashboard">
     <div id="dashboard" class="row2" style="grid-template-columns: repeat(4, 1fr); margin-bottom:16px;">
@@ -1060,6 +1079,8 @@
         <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Transaction</th><th>Details</th></tr></thead>
         <tbody id="audit-log-body"></tbody>
       </table>
+    </div>
+  </div>
     </div>
   </div>
 </div>

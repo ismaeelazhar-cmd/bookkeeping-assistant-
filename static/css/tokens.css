@@ -1,19 +1,17 @@
-/* Design tokens. Named --color-* per the design system spec, but the actual values are aliased
-   onto this app's existing warm-cream palette (defined inline in templates/index.html's :root)
-   rather than the spec's literal forest-green/gray values — swapping in an unrelated palette
-   would clash with the app's established visual identity. Anything reaching for --color-* gets
-   a token; the existing --bg/--text/--accent/etc. names in index.html remain the source of truth
-   and these are kept in sync with them. */
+/* Design tokens. Named --color-* per the design system spec, aliased onto this app's
+   navy/teal palette (defined inline in templates/index.html's :root) — the existing
+   --bg/--text/--accent/etc. names in index.html remain the source of truth and these
+   are kept in sync with them. */
 :root {
-  --color-primary: #2B2825;     /* = --text: warm near-black, used for primary text/headings */
-  --color-accent: #C2682F;      /* = --accent: Claude terracotta */
-  --color-bg: #F5F2EA;          /* = --bg: warm cream page background */
+  --color-primary: #1A1B2E;     /* = --text */
+  --color-accent: #0A7EA4;      /* = --accent: teal */
+  --color-bg: #F2F1ED;          /* = --bg */
   --color-surface: #FFFFFF;
-  --color-danger: #B14A3B;      /* = --bad: muted brick red */
-  --color-text: #2B2825;        /* = --text */
-  --color-muted: #8C8273;       /* = --muted: warm grey for secondary text */
-  --color-border: #E4DECF;      /* = --border: warm hairline border */
-  --color-success: #4B7B5C;     /* = --good: muted sage green */
+  --color-danger: #C53030;      /* = --bad */
+  --color-text: #1A1B2E;        /* = --text */
+  --color-muted: #8B8EA3;       /* = --muted */
+  --color-border: #E4E2DA;      /* = --border */
+  --color-success: #1A7A4E;     /* = --good */
   --font-mono: 'JetBrains Mono', 'Courier New', monospace;
 }
 
@@ -55,8 +53,8 @@
 
 /* Scroll-spy active nav link — this app is a single static page with anchor-link sections
    rather than separate routes, so "current route" is whichever section is in view. */
-nav a.nav-active {
-  color: var(--color-accent) !important;
+nav.page-tabs a.nav-active {
+  color: #FFFFFF !important;
   font-weight: 700;
 }
 
