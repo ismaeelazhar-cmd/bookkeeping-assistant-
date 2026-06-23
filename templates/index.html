@@ -286,6 +286,17 @@
       </div>
     </div>
 
+    <div class="row2" style="margin-bottom:16px; align-items:start;">
+      <div class="panel" style="margin:0;">
+        <h2>Needs Your Attention</h2>
+        <div id="dash-attention-list"><div class="empty">Nothing urgent right now.</div></div>
+      </div>
+      <div class="panel" style="margin:0;">
+        <h2>Last 30 Days — Spending by Category</h2>
+        <div id="dash-spend-chart"><div class="empty">No spending in the last 30 days.</div></div>
+      </div>
+    </div>
+
     <div class="panel" id="section-ask" style="margin-bottom:16px;">
       <h2>Ask Your Ledger</h2>
       <div class="sub" style="margin-bottom:10px;">Ask a plain-English question — e.g. "how much did I spend on travel last quarter" or "what's my biggest expense this year". Claude reads your actual transactions to answer; needs a Claude API key set under Settings → AI settings.</div>
@@ -2239,6 +2250,67 @@ function renderDashboard() {
   const profitEl = document.getElementById('dash-profit');
   profitEl.textContent = fmt(profit);
   profitEl.style.color = profit >= 0 ? 'var(--good)' : 'var(--bad)';
+
+  renderAttentionList();
+  renderSpendByCategory();
+}
+
+function renderAttentionList() {
+  const today = new Date().toISOString().slice(0, 10);
+  const inDays = n => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+  const items = [];
+
+  const overdueInvoices = invoicesBills.filter(d => d.kind === 'invoice' && d.displayStatus === 'overdue');
+  if (overdueInvoices.length) {
+    const total = overdueInvoices.reduce((s, d) => s + d.amount, 0);
+    items.push({ text: `${overdueInvoices.length} invoice${overdueInvoices.length === 1 ? '' : 's'} overdue (${fmt(total)})`, action: () => showPage('invoices'), tone: 'bad' });
+  }
+  const overdueBills = invoicesBills.filter(d => d.kind === 'bill' && d.displayStatus === 'overdue');
+  if (overdueBills.length) {
+    const total = overdueBills.reduce((s, d) => s + d.amount, 0);
+    items.push({ text: `${overdueBills.length} bill${overdueBills.length === 1 ? '' : 's'} overdue (${fmt(total)})`, action: () => showPage('invoices'), tone: 'bad' });
+  }
+  const dueSoon = invoicesBills.filter(d => d.status === 'sent' && d.dueDate >= today && d.dueDate <= inDays(7));
+  if (dueSoon.length) {
+    items.push({ text: `${dueSoon.length} invoice/bill${dueSoon.length === 1 ? '' : 's'} due within 7 days`, action: () => showPage('invoices'), tone: 'warn' });
+  }
+  if (clarificationQueue.length) {
+    items.push({ text: `${clarificationQueue.length} item${clarificationQueue.length === 1 ? '' : 's'} in the clarification queue`, action: () => showPage('bank'), tone: 'warn' });
+  }
+
+  const listEl = document.getElementById('dash-attention-list');
+  if (!items.length) { listEl.innerHTML = '<div class="empty">Nothing urgent right now.</div>'; return; }
+  const toneColor = { bad: 'var(--bad)', warn: 'var(--accent)' };
+  listEl.innerHTML = items.map((item, i) => `
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; ${i ? 'border-top:1px solid var(--border);' : ''}">
+      <span style="font-size:13px;"><span style="display:inline-block; width:7px; height:7px; border-radius:50%; background:${toneColor[item.tone] || 'var(--muted)'}; margin-right:8px;"></span>${escapeHtml(item.text)}</span>
+      <button class="btn-secondary" style="padding:4px 10px; font-size:11px;" onclick="window.__dashAttentionActions[${i}]()">View</button>
+    </div>`).join('');
+  window.__dashAttentionActions = items.map(item => item.action);
+}
+
+function renderSpendByCategory() {
+  const since = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const totals = {};
+  for (const t of transactions) {
+    if (t.date < since) continue;
+    const type = getAccountType(t.debit);
+    if (type !== 'expense' && type !== 'cogs') continue;
+    totals[t.debit] = (totals[t.debit] || 0) + t.amount;
+  }
+  const rows = Object.entries(totals).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const chartEl = document.getElementById('dash-spend-chart');
+  if (!rows.length) { chartEl.innerHTML = '<div class="empty">No spending in the last 30 days.</div>'; return; }
+  const max = rows[0][1];
+  chartEl.innerHTML = rows.map(([name, amount]) => `
+    <div style="margin-bottom:8px;">
+      <div style="display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:3px;">
+        <span>${escapeHtml(name)}</span><span style="font-family:var(--font-mono);">${fmt(amount)}</span>
+      </div>
+      <div style="background:var(--panel-soft); border-radius:4px; height:7px; overflow:hidden;">
+        <div style="background:var(--accent); height:100%; width:${Math.max(4, (amount / max) * 100)}%;"></div>
+      </div>
+    </div>`).join('');
 }
 
 function exportCSV() {
@@ -2507,6 +2579,7 @@ async function loadClarificationQueue() {
   renderClarificationQueue();
   renderClarificationBadge();
   renderClarificationAlertCard();
+  renderAttentionList();
 }
 
 function renderClarificationBadge() {
