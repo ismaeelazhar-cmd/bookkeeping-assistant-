@@ -560,6 +560,18 @@ def init_db():
         db.execute("ALTER TABLE companies ADD COLUMN currency TEXT NOT NULL DEFAULT 'GBP'")
     if "confidence_threshold" not in company_cols:
         db.execute("ALTER TABLE companies ADD COLUMN confidence_threshold REAL NOT NULL DEFAULT 0.7")
+    if "hmrc_client_id" not in company_cols:
+        # Making Tax Digital (VAT) OAuth credentials, same write-only/encrypted-at-rest treatment
+        # as the Plaid fields above. hmrc_vrn is the VAT registration number HMRC's API is keyed
+        # on; hmrc_access_token/refresh_token are populated after the OAuth consent flow
+        # completes, not entered directly.
+        db.execute("ALTER TABLE companies ADD COLUMN hmrc_client_id TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN hmrc_client_secret TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN hmrc_env TEXT DEFAULT 'sandbox'")
+        db.execute("ALTER TABLE companies ADD COLUMN hmrc_vrn TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN hmrc_access_token TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN hmrc_refresh_token TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN hmrc_token_expires_at TEXT DEFAULT ''")
     contact_cols = {row[1] for row in db.execute("PRAGMA table_info(contacts)").fetchall()}
     if "address_line1" not in contact_cols:
         db.execute("ALTER TABLE contacts ADD COLUMN address_line1 TEXT DEFAULT ''")
@@ -995,11 +1007,13 @@ def list_companies():
     rows = db.execute(
         "SELECT id, name, default_credit_account, ai_api_key, locked_until, period_start_date, "
         "fund_accounting_enabled, plaid_client_id, plaid_secret, plaid_env, confidence_threshold, cost_centres_enabled, "
+        "hmrc_client_id, hmrc_client_secret, hmrc_env, hmrc_vrn, hmrc_access_token, "
         "'owner' as permission "
         "FROM companies WHERE user_id = ? "
         "UNION ALL "
         "SELECT c.id, c.name, c.default_credit_account, c.ai_api_key, c.locked_until, c.period_start_date, "
         "c.fund_accounting_enabled, c.plaid_client_id, c.plaid_secret, c.plaid_env, c.confidence_threshold, c.cost_centres_enabled, "
+        "c.hmrc_client_id, c.hmrc_client_secret, c.hmrc_env, c.hmrc_vrn, c.hmrc_access_token, "
         "cm.permission "
         "FROM companies c JOIN company_members cm ON cm.company_id = c.id "
         "WHERE cm.user_id = ? "
@@ -1011,6 +1025,8 @@ def list_companies():
         d = dict(r)
         d["ai_api_key_set"] = bool(d.pop("ai_api_key"))  # Stage 5: the raw key never leaves the server
         d["plaid_secret_set"] = bool(d.pop("plaid_secret"))  # same write-only treatment
+        d["hmrc_client_secret_set"] = bool(d.pop("hmrc_client_secret"))
+        d["hmrc_connected"] = bool(d.pop("hmrc_access_token"))
         result.append(d)
     return jsonify(result)
 
@@ -1059,12 +1075,13 @@ def update_settings(company_id):
     db.execute(
         "UPDATE companies SET default_credit_account = ?, locked_until = ?, period_start_date = ?, "
         "fund_accounting_enabled = ?, plaid_client_id = ?, plaid_env = ?, confidence_threshold = ?, "
-        "cost_centres_enabled = ? WHERE id = ?",
+        "cost_centres_enabled = ?, hmrc_client_id = ?, hmrc_env = ?, hmrc_vrn = ? WHERE id = ?",
         (
             data.get("defaultCreditAccount", ""), data.get("lockedUntil", ""), data.get("periodStartDate", ""),
             1 if data.get("fundAccountingEnabled") else 0,
             data.get("plaidClientId", ""), data.get("plaidEnv") or "sandbox", confidence_threshold,
-            1 if data.get("costCentresEnabled") else 0, company_id,
+            1 if data.get("costCentresEnabled") else 0,
+            data.get("hmrcClientId", ""), data.get("hmrcEnv") or "sandbox", data.get("hmrcVrn", ""), company_id,
         ),
     )
     # The AI key and Plaid secret are write-only from the client's perspective: a blank field
@@ -1078,6 +1095,10 @@ def update_settings(company_id):
         db.execute("UPDATE companies SET plaid_secret = ? WHERE id = ?", (encrypt_secret(data["plaidSecret"]), company_id))
     elif data.get("clearPlaidSecret"):
         db.execute("UPDATE companies SET plaid_secret = '' WHERE id = ?", (company_id,))
+    if data.get("hmrcClientSecret"):
+        db.execute("UPDATE companies SET hmrc_client_secret = ? WHERE id = ?", (encrypt_secret(data["hmrcClientSecret"]), company_id))
+    elif data.get("clearHmrcClientSecret"):
+        db.execute("UPDATE companies SET hmrc_client_secret = '', hmrc_access_token = '', hmrc_refresh_token = '' WHERE id = ?", (company_id,))
     db.commit()
     return jsonify({"ok": True})
 
@@ -3958,6 +3979,167 @@ def fx_revaluation(company_id):
         return jsonify({"error": e.message}), e.status
     db.commit()
     return jsonify({"ok": True, "transactionId": tx_id, "adjustment": from_pence(diff_pence)})
+
+
+# ---------- Making Tax Digital (VAT) — HMRC OAuth + obligations + submission ----------
+#
+# Structurally complete, mirroring the existing Plaid integration's pattern (encrypted
+# credentials, sandbox/production env switch, the same call/error-wrapping shape) — but this
+# could NOT be exercised against HMRC's real sandbox in development, since that requires a real
+# application registered on HMRC's Developer Hub (https://developer.service.hmrc.gov.uk) with
+# its own client_id/secret and an approved redirect_uri. Anyone deploying this for real needs to
+# register their own app there first and put its credentials into Settings.
+
+HMRC_HOSTS = {
+    "sandbox": "https://test-api.service.hmrc.gov.uk",
+    "production": "https://api.service.hmrc.gov.uk",
+}
+
+
+class HmrcError(Exception):
+    def __init__(self, message, status=502):
+        self.message = message
+        self.status = status
+
+
+def hmrc_host(company):
+    return HMRC_HOSTS.get(company["hmrc_env"] or "sandbox", HMRC_HOSTS["sandbox"])
+
+
+def call_hmrc(company, method, path, headers=None, data=None, form=False):
+    access_token = decrypt_secret(company["hmrc_access_token"])
+    if not access_token:
+        raise HmrcError("Not connected to HMRC for this company yet — connect it in Settings.", 400)
+    req_headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.hmrc.1.0+json"}
+    req_headers.update(headers or {})
+    body = None
+    if data is not None:
+        if form:
+            body = urllib.parse.urlencode(data).encode("utf-8")
+            req_headers["Content-Type"] = "application/x-www-form-urlencoded"
+        else:
+            body = json.dumps(data).encode("utf-8")
+            req_headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(f"{hmrc_host(company)}{path}", data=body, method=method, headers=req_headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8")) if resp.length != 0 else {}
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", "replace")
+        try:
+            err_json = json.loads(err_body)
+            message = err_json.get("message", err_body[:300])
+        except json.JSONDecodeError:
+            message = err_body[:300]
+        raise HmrcError(f"HMRC error {e.code}: {message}", 502)
+    except urllib.error.URLError as e:
+        raise HmrcError(f"Could not reach HMRC: {e.reason}", 502)
+
+
+@app.route("/api/companies/<int:company_id>/hmrc/auth-url", methods=["GET"])
+@login_required
+@company_required
+def hmrc_auth_url(company_id):
+    client_id = (g.company["hmrc_client_id"] or "").strip()
+    if not client_id:
+        return jsonify({"error": "No HMRC Client ID set for this company — add one in Settings first."}), 400
+    redirect_uri = f"{request.host_url.rstrip('/')}/api/hmrc/callback"
+    state = json.dumps({"companyId": company_id, "nonce": uuid.uuid4().hex})
+    params = urllib.parse.urlencode({
+        "response_type": "code", "client_id": client_id, "scope": "write:vat read:vat",
+        "redirect_uri": redirect_uri, "state": state,
+    })
+    return jsonify({"authUrl": f"{hmrc_host(g.company)}/oauth/authorize?{params}", "redirectUri": redirect_uri})
+
+
+@app.route("/api/hmrc/callback", methods=["GET"])
+@login_required
+def hmrc_callback():
+    """HMRC redirects the user's browser here after they approve (or deny) access in their HMRC
+    business tax account. Not under company_required since the company is identified from the
+    `state` param we generated ourselves in hmrc_auth_url, not from the URL path."""
+    code = request.args.get("code")
+    state = request.args.get("state")
+    error = request.args.get("error")
+    if error:
+        return f"<p>HMRC authorization failed: {error}. Close this tab and try again.</p>"
+    try:
+        state_data = json.loads(state or "{}")
+        company_id = int(state_data["companyId"])
+    except (ValueError, KeyError, TypeError):
+        return "<p>Invalid state parameter — close this tab and try again.</p>", 400
+
+    db = get_db()
+    company = db.execute(
+        "SELECT * FROM companies WHERE id = ? AND user_id = ?", (company_id, session["user_id"])
+    ).fetchone()
+    if company is None:
+        return "<p>Company not found.</p>", 404
+    client_id = (company["hmrc_client_id"] or "").strip()
+    client_secret = decrypt_secret(company["hmrc_client_secret"])
+    redirect_uri = f"{request.host_url.rstrip('/')}/api/hmrc/callback"
+
+    body = urllib.parse.urlencode({
+        "grant_type": "authorization_code", "client_id": client_id, "client_secret": client_secret,
+        "redirect_uri": redirect_uri, "code": code,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{hmrc_host(company)}/oauth/token", data=body, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            token_data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        return f"<p>Token exchange with HMRC failed: {e}. Close this tab and try again.</p>", 502
+
+    expires_at = (datetime.datetime.utcnow() + datetime.timedelta(seconds=token_data.get("expires_in", 14400))).isoformat()
+    db.execute(
+        "UPDATE companies SET hmrc_access_token = ?, hmrc_refresh_token = ?, hmrc_token_expires_at = ? WHERE id = ?",
+        (encrypt_secret(token_data["access_token"]), encrypt_secret(token_data.get("refresh_token", "")), expires_at, company_id),
+    )
+    db.commit()
+    return "<p>Connected to HMRC successfully. You can close this tab and return to the app.</p>"
+
+
+@app.route("/api/companies/<int:company_id>/hmrc/obligations", methods=["GET"])
+@login_required
+@company_required
+def hmrc_obligations(company_id):
+    vrn = (g.company["hmrc_vrn"] or "").strip()
+    if not vrn:
+        return jsonify({"error": "No VAT registration number set for this company — add one in Settings."}), 400
+    try:
+        result = call_hmrc(g.company, "GET", f"/organisations/vat/{vrn}/obligations?status=O")
+    except HmrcError as e:
+        return jsonify({"error": e.message}), e.status
+    return jsonify(result)
+
+
+@app.route("/api/companies/<int:company_id>/hmrc/submit-vat-return", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def hmrc_submit_vat_return(company_id):
+    """Body carries the same Box 1-9 figures the existing (review-only) VAT Return already
+    computes client-side — this endpoint just submits them to HMRC rather than recalculating,
+    so what gets filed is exactly what the user saw on screen."""
+    vrn = (g.company["hmrc_vrn"] or "").strip()
+    if not vrn:
+        return jsonify({"error": "No VAT registration number set for this company — add one in Settings."}), 400
+    data = request.get_json(force=True) or {}
+    required = ["periodKey", "vatDueSales", "vatDueAcquisitions", "totalVatDue", "vatReclaimedCurrPeriod",
+                "netVatDue", "totalValueSalesExVAT", "totalValuePurchasesExVAT", "totalValueGoodsSuppliedExVAT",
+                "totalAcquisitionsExVAT"]
+    if any(k not in data for k in required):
+        return jsonify({"error": f"Missing required fields: {', '.join(k for k in required if k not in data)}"}), 400
+    payload = {k: data[k] for k in required}
+    payload["finalised"] = bool(data.get("finalised"))
+    try:
+        result = call_hmrc(g.company, "POST", f"/organisations/vat/{vrn}/returns", data=payload)
+    except HmrcError as e:
+        return jsonify({"error": e.message}), e.status
+    return jsonify(result)
 
 
 init_db()  # runs on import too, not just `python3 server.py` directly — gunicorn imports this module without executing __main__

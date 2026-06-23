@@ -920,6 +920,7 @@
         <div><label>To</label><input type="date" id="vat-to"></div>
       </div>
       <button class="btn-primary" onclick="renderVatReturn()">Calculate VAT Return</button>
+      <button class="btn-secondary" onclick="submitVatReturnToHmrc()">Submit to HMRC (MTD)</button>
       <table class="trial" style="margin-top:14px;"><tbody id="vat-return-body"></tbody></table>
       <div id="vat-reconciliation" style="margin-top:10px;"></div>
     </div>
@@ -1015,6 +1016,26 @@
       </div>
       <label>Secret <span id="plaid-secret-status" style="color:var(--muted); font-weight:400;"></span></label>
       <input type="password" id="plaid-secret" placeholder="enter to set/replace" oninput="savePlaidSettings()">
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Making Tax Digital — HMRC (VAT)</h2>
+      <div class="sub" style="margin:8px 0;">Register an application at <span style="color:var(--text);">developer.service.hmrc.gov.uk</span> first — this needs its own Client ID/Secret and your redirect URI added there before "Connect" will work. Client Secret is write-only, encrypted at rest. Submitting a return needs an active connection (below) and a VAT registration number.</div>
+      <div class="row2">
+        <div><label>Client ID</label><input type="text" id="hmrc-client-id" oninput="saveHmrcSettings()"></div>
+        <div><label>Environment</label>
+          <select id="hmrc-env" onchange="saveHmrcSettings()">
+            <option value="sandbox">Sandbox (test VRNs only)</option>
+            <option value="production">Production (real VAT returns)</option>
+          </select>
+        </div>
+      </div>
+      <label>Client Secret <span id="hmrc-secret-status" style="color:var(--muted); font-weight:400;"></span></label>
+      <input type="password" id="hmrc-client-secret" placeholder="enter to set/replace" oninput="saveHmrcSettings()">
+      <label>VAT registration number (VRN)</label>
+      <input type="text" id="hmrc-vrn" oninput="saveHmrcSettings()">
+      <div class="sub" id="hmrc-connection-status" style="margin:8px 0;"></div>
+      <button class="btn-primary" onclick="connectHmrc()">Connect to HMRC</button>
     </div>
 
     <div class="panel" style="margin-top:20px;">
@@ -1369,6 +1390,12 @@ async function openCompany(id) {
   document.getElementById('plaid-secret').value = '';
   document.getElementById('plaid-secret-status').textContent = currentCompany.plaid_secret_set ? '(set)' : '(not set)';
   document.getElementById('f-confidence-threshold').value = currentCompany.confidence_threshold || 0.7;
+  document.getElementById('hmrc-client-id').value = currentCompany.hmrc_client_id || '';
+  document.getElementById('hmrc-env').value = currentCompany.hmrc_env || 'sandbox';
+  document.getElementById('hmrc-vrn').value = currentCompany.hmrc_vrn || '';
+  document.getElementById('hmrc-client-secret').value = '';
+  document.getElementById('hmrc-secret-status').textContent = currentCompany.hmrc_client_secret_set ? '(set)' : '(not set)';
+  renderHmrcConnectionStatus();
   document.getElementById('ob-rows').innerHTML = ''; obRowCount = 0;
   document.getElementById('cj-rows').innerHTML = ''; cjRowCount = 0;
   document.getElementById('cj-date').valueAsDate = new Date();
@@ -1383,6 +1410,27 @@ async function openCompany(id) {
   addCompoundJournalRow();
 }
 
+// One settings PUT touches every column in the companies row server-side, so every save from
+// the frontend must include every field — otherwise whichever section's onchange fired last
+// silently resets every other section back to its default (this bit us with Plaid vs. Cost
+// Centres/Confidence Threshold before HMRC fields were added; buildSettingsPayload() reads the
+// full current state from the DOM every time so that can't happen again).
+function buildSettingsPayload(extra) {
+  return Object.assign({
+    defaultCreditAccount: document.getElementById('f-default-credit').value.trim(),
+    lockedUntil: document.getElementById('f-locked-until').value,
+    periodStartDate: document.getElementById('f-period-start').value,
+    fundAccountingEnabled: document.getElementById('f-fund-accounting').checked,
+    costCentresEnabled: document.getElementById('f-cost-centres').checked,
+    confidenceThreshold: parseFloat(document.getElementById('f-confidence-threshold').value),
+    plaidClientId: document.getElementById('plaid-client-id').value.trim(),
+    plaidEnv: document.getElementById('plaid-env').value,
+    hmrcClientId: document.getElementById('hmrc-client-id').value.trim(),
+    hmrcEnv: document.getElementById('hmrc-env').value,
+    hmrcVrn: document.getElementById('hmrc-vrn').value.trim(),
+  }, extra || {});
+}
+
 async function saveSettings() {
   if (!currentCompany) return;
   currentCompany.default_credit_account = document.getElementById('f-default-credit').value.trim();
@@ -1393,16 +1441,7 @@ async function saveSettings() {
   currentCompany.confidence_threshold = parseFloat(document.getElementById('f-confidence-threshold').value);
   const newKey = document.getElementById('ai-api-key').value.trim();
   await api(`/api/companies/${currentCompany.id}/settings`, {
-    method: 'PUT',
-    body: JSON.stringify({
-      defaultCreditAccount: currentCompany.default_credit_account,
-      aiApiKey: newKey,
-      lockedUntil: currentCompany.locked_until,
-      periodStartDate: currentCompany.period_start_date,
-      fundAccountingEnabled: currentCompany.fund_accounting_enabled,
-      costCentresEnabled: currentCompany.cost_centres_enabled,
-      confidenceThreshold: currentCompany.confidence_threshold
-    })
+    method: 'PUT', body: JSON.stringify(buildSettingsPayload({ aiApiKey: newKey }))
   });
   if (newKey) {
     currentCompany.ai_api_key_set = true;
@@ -1414,14 +1453,7 @@ async function saveSettings() {
 async function clearAiApiKey() {
   if (!(await confirmAction('Clear the stored Claude API key for this company?'))) return;
   await api(`/api/companies/${currentCompany.id}/settings`, {
-    method: 'PUT',
-    body: JSON.stringify({
-      defaultCreditAccount: currentCompany.default_credit_account,
-      lockedUntil: currentCompany.locked_until,
-      periodStartDate: currentCompany.period_start_date,
-      fundAccountingEnabled: currentCompany.fund_accounting_enabled,
-      clearAiApiKey: true
-    })
+    method: 'PUT', body: JSON.stringify(buildSettingsPayload({ clearAiApiKey: true }))
   });
   currentCompany.ai_api_key_set = false;
   document.getElementById('ai-key-status').textContent = 'No key set yet.';
@@ -3314,6 +3346,42 @@ function renderVatReturn() {
   renderVatReconciliation(from, to, netVatDue);
 }
 
+async function submitVatReturnToHmrc() {
+  const from = document.getElementById('vat-from').value;
+  const to = document.getElementById('vat-to').value;
+  const inRange = t => (!from || t.date >= from) && (!to || t.date <= to);
+  const vatTxns = transactions.filter(t => t.vatDirection && inRange(t));
+  let outputVat = 0, inputVat = 0, netSales = 0, netPurchases = 0;
+  for (const t of vatTxns) {
+    const isVatLeg = t.debit === VAT_ACCOUNT || t.credit === VAT_ACCOUNT;
+    if (t.vatDirection === 'output') { if (isVatLeg) outputVat += t.amount; else netSales += t.amount; }
+    else { if (isVatLeg) inputVat += t.amount; else netPurchases += t.amount; }
+  }
+  const netVatDue = outputVat - inputVat;
+
+  const periodKey = prompt('HMRC period key for this VAT period (find it via the Obligations check in your HMRC account)?');
+  if (!periodKey) return;
+  const ok = await confirmAction(
+    `Submit this VAT return to HMRC for period ${periodKey}? Box 1: ${fmt(outputVat)}, Box 4: ${fmt(inputVat)}, Box 5: ${fmt(Math.abs(netVatDue))}. This cannot be undone once HMRC accepts it.`,
+    'Submit to HMRC'
+  );
+  if (!ok) return;
+
+  try {
+    const result = await api(`/api/companies/${currentCompany.id}/hmrc/submit-vat-return`, {
+      method: 'POST',
+      body: JSON.stringify({
+        periodKey,
+        vatDueSales: outputVat, vatDueAcquisitions: 0, totalVatDue: outputVat,
+        vatReclaimedCurrPeriod: inputVat, netVatDue: Math.abs(netVatDue),
+        totalValueSalesExVAT: Math.round(netSales), totalValuePurchasesExVAT: Math.round(netPurchases),
+        totalValueGoodsSuppliedExVAT: 0, totalAcquisitionsExVAT: 0, finalised: true,
+      })
+    });
+    showToast(`Submitted to HMRC — receipt: ${result.formBundleNumber || result.processingDate || 'see response'}.`, 'success');
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
 function renderVatReconciliation(from, to, netVatDueFromBoxes) {
   const el = document.getElementById('vat-reconciliation');
   if (!el) return;
@@ -4182,22 +4250,44 @@ async function savePlaidSettings() {
   currentCompany.plaid_env = document.getElementById('plaid-env').value;
   const newSecret = document.getElementById('plaid-secret').value.trim();
   await api(`/api/companies/${currentCompany.id}/settings`, {
-    method: 'PUT',
-    body: JSON.stringify({
-      defaultCreditAccount: currentCompany.default_credit_account,
-      lockedUntil: currentCompany.locked_until,
-      periodStartDate: currentCompany.period_start_date,
-      fundAccountingEnabled: currentCompany.fund_accounting_enabled,
-      plaidClientId: currentCompany.plaid_client_id,
-      plaidEnv: currentCompany.plaid_env,
-      plaidSecret: newSecret
-    })
+    method: 'PUT', body: JSON.stringify(buildSettingsPayload({ plaidSecret: newSecret }))
   });
   if (newSecret) {
     currentCompany.plaid_secret_set = true;
     document.getElementById('plaid-secret').value = '';
     document.getElementById('plaid-secret-status').textContent = '(set)';
   }
+}
+
+async function saveHmrcSettings() {
+  if (!currentCompany) return;
+  const newSecret = document.getElementById('hmrc-client-secret').value.trim();
+  await api(`/api/companies/${currentCompany.id}/settings`, {
+    method: 'PUT', body: JSON.stringify(buildSettingsPayload({ hmrcClientSecret: newSecret }))
+  });
+  if (newSecret) {
+    currentCompany.hmrc_client_secret_set = true;
+    document.getElementById('hmrc-client-secret').value = '';
+    document.getElementById('hmrc-secret-status').textContent = '(set)';
+  }
+  renderHmrcConnectionStatus();
+}
+
+function renderHmrcConnectionStatus() {
+  const el = document.getElementById('hmrc-connection-status');
+  if (!el) return;
+  el.textContent = currentCompany.hmrc_connected
+    ? 'Connected to HMRC.'
+    : 'Not connected yet — set the Client ID/Secret above, then Connect.';
+}
+
+async function connectHmrc() {
+  let result;
+  try {
+    result = await api(`/api/companies/${currentCompany.id}/hmrc/auth-url`);
+  } catch (e) { showToast(e.message, 'error'); return; }
+  window.open(result.authUrl, '_blank');
+  showToast('A new tab opened to sign in with HMRC. Come back here once you\'ve approved access.', 'success');
 }
 
 function renderBankConnections() {
