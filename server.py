@@ -337,6 +337,18 @@ def init_db():
             uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- #14: free-text notes on a transaction ("Asked John about this — waiting for receipt"),
+        -- separate from the audit log since these are conversational, not a record of what
+        -- changed in the ledger.
+        CREATE TABLE IF NOT EXISTS transaction_comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+            author TEXT NOT NULL,
+            body TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- Stage 7: collaboration. The company's owner (companies.user_id) always has full
         -- access; this table adds others on top with a capped permission level. "comment" is
         -- accepted as a value now for forward-compatibility but currently behaves like "view"
@@ -1957,7 +1969,8 @@ def list_transactions(company_id):
         f"t.vat_rate as vatRate, t.vat_direction as vatDirection, t.confidence, t.journal_id as journalId, "
         f"t.voided_at as voidedAt, t.voided_by as voidedBy, t.reviewed_by as reviewedBy, t.reviewed_at as reviewedAt, "
         f"f.name as fund, d.name as department, t.currency, t.foreign_amount_pence as foreignAmountPence, t.exchange_rate as exchangeRate, "
-        f"(SELECT COUNT(*) FROM attachments a WHERE a.transaction_id = t.id) as attachmentCount "
+        f"(SELECT COUNT(*) FROM attachments a WHERE a.transaction_id = t.id) as attachmentCount, "
+        f"(SELECT COUNT(*) FROM transaction_comments c WHERE c.transaction_id = t.id) as commentCount "
         f"FROM transactions t LEFT JOIN funds f ON f.id = t.fund_id LEFT JOIN departments d ON d.id = t.department_id "
         f"WHERE t.company_id = ? {voided_clause} ORDER BY t.date",
         (company_id,),
@@ -1979,7 +1992,7 @@ def search(company_id):
             "SELECT t.id, t.date, t.desc, t.amount_pence as amountPence, t.debit, t.credit, t.tax_year as taxYear, "
             "t.vat_rate as vatRate, t.vat_direction as vatDirection, t.confidence, t.journal_id as journalId, "
             "t.voided_at as voidedAt, t.voided_by as voidedBy, t.reviewed_by as reviewedBy, t.reviewed_at as reviewedAt, "
-            "NULL as fund, 0 as attachmentCount "
+            "NULL as fund, 0 as attachmentCount, 0 as commentCount "
             "FROM transactions t WHERE t.company_id = ? AND t.voided_at IS NULL AND t.desc LIKE ? "
             "ORDER BY t.date DESC LIMIT 50",
             (company_id, like),
@@ -2817,6 +2830,55 @@ def delete_attachment(company_id, attachment_id):
     if file_path.exists():
         file_path.unlink()
     db.execute("DELETE FROM attachments WHERE id = ?", (attachment_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------- transaction comments (#14) ----------
+
+@app.route("/api/companies/<int:company_id>/transactions/<int:tx_id>/comments", methods=["GET"])
+@login_required
+@company_required
+def list_transaction_comments(company_id, tx_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, author, body, created_at as createdAt FROM transaction_comments "
+        "WHERE company_id = ? AND transaction_id = ? ORDER BY created_at",
+        (company_id, tx_id),
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/transactions/<int:tx_id>/comments", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def add_transaction_comment(company_id, tx_id):
+    db = get_db()
+    tx = db.execute("SELECT id FROM transactions WHERE id = ? AND company_id = ?", (tx_id, company_id)).fetchone()
+    if tx is None:
+        return jsonify({"error": "Transaction not found."}), 404
+    body = (request.get_json(force=True) or {}).get("body", "").strip()
+    if not body:
+        return jsonify({"error": "Comment can't be empty."}), 400
+    cur = db.execute(
+        "INSERT INTO transaction_comments (company_id, transaction_id, author, body) VALUES (?,?,?,?)",
+        (company_id, tx_id, session.get("email", "unknown"), body),
+    )
+    db.commit()
+    row = db.execute(
+        "SELECT id, author, body, created_at as createdAt FROM transaction_comments WHERE id = ?", (cur.lastrowid,)
+    ).fetchone()
+    return jsonify(dict(row))
+
+
+@app.route("/api/companies/<int:company_id>/comments/<int:comment_id>", methods=["DELETE"])
+@login_required
+@company_required
+@write_required
+def delete_transaction_comment(company_id, comment_id):
+    db = get_db()
+    db.execute("DELETE FROM transaction_comments WHERE id = ? AND company_id = ?", (comment_id, company_id))
     db.commit()
     return jsonify({"ok": True})
 

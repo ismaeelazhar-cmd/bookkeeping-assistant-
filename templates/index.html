@@ -1148,6 +1148,18 @@
   </div>
 </div>
 
+<div id="comments-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:50; align-items:center; justify-content:center;" onclick="if(event.target===this) closeCommentsModal()">
+  <div class="panel" style="width:420px; max-height:80vh; overflow:auto;">
+    <h2>Comments <span class="pill" id="comments-modal-txdesc"></span></h2>
+    <div id="comments-modal-body" style="margin-bottom:10px;"></div>
+    <label>Add a comment</label>
+    <textarea id="comments-modal-text" rows="2" placeholder="e.g. Asked John about this — waiting for receipt."></textarea>
+    <button class="btn-primary" style="margin-top:8px;" onclick="postComment()">Add comment</button>
+    <div id="comments-modal-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    <button class="btn-secondary" style="width:100%; margin-top:14px;" onclick="closeCommentsModal()">Close</button>
+  </div>
+</div>
+
 <div id="onboarding-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:60; align-items:center; justify-content:center;">
   <div class="panel" style="width:480px; max-height:84vh; overflow:auto;">
     <h2 style="margin-bottom:4px;">New company — step <span id="ob-step-num">1</span> of 3</h2>
@@ -2133,6 +2145,7 @@ function renderJournal() {
           ? `<span class="confidence high" title="Reviewed by ${escapeHtml(t.reviewedBy)} on ${fmtDate(t.reviewedAt.slice(0,10))}">reviewed ✓</span> <a href="#" onclick="unreviewTransaction(${t.id}); return false;" style="font-size:11px; color:var(--muted);">undo</a>`
           : `<button class="btn-secondary" onclick="reviewTransaction(${t.id})">Mark reviewed</button>`}
         <button class="btn-secondary" onclick="openAttachmentsModal(${t.id}, '${t.desc.replace(/'/g, "\\'")}')">📎${t.attachmentCount ? ' ' + t.attachmentCount : ''}</button>
+        <button class="btn-secondary" onclick="openCommentsModal(${t.id}, '${t.desc.replace(/'/g, "\\'")}')">💬${t.commentCount ? ' ' + t.commentCount : ''}</button>
         <button class="btn-danger" onclick="deleteTransaction(${t.id})">Delete</button>
       </td>
     </tr>`).join('') : '<tr><td colspan="7" class="empty">No transactions match these filters.</td></tr>';
@@ -4594,6 +4607,56 @@ async function openAttachmentsModal(txId, desc) {
 function closeAttachmentsModal() {
   document.getElementById('attachments-overlay').style.display = 'none';
   attachmentsModalTxId = null;
+}
+
+// ---------- transaction comments (#14) ----------
+let commentsModalTxId = null;
+
+async function openCommentsModal(txId, desc) {
+  commentsModalTxId = txId;
+  document.getElementById('comments-modal-txdesc').textContent = desc;
+  document.getElementById('comments-modal-text').value = '';
+  document.getElementById('comments-modal-status').textContent = '';
+  document.getElementById('comments-overlay').style.display = 'flex';
+  await renderCommentsModal();
+}
+
+function closeCommentsModal() {
+  document.getElementById('comments-overlay').style.display = 'none';
+  commentsModalTxId = null;
+}
+
+async function renderCommentsModal() {
+  const list = await api(`/api/companies/${currentCompany.id}/transactions/${commentsModalTxId}/comments`);
+  const body = document.getElementById('comments-modal-body');
+  body.innerHTML = list.length ? list.map(c => `
+    <div style="padding:8px 0; border-bottom:1px solid var(--border);">
+      <div style="font-size:13px;">${escapeHtml(c.body)}</div>
+      <div style="font-size:11px; color:var(--muted); margin-top:3px;">${escapeHtml(c.author)} — ${fmtDate(c.createdAt.slice(0,10))}
+        <a href="#" onclick="deleteComment(${c.id}); return false;" style="color:var(--bad); margin-left:8px;">delete</a>
+      </div>
+    </div>`).join('') : '<div class="empty">No comments yet.</div>';
+}
+
+async function postComment() {
+  const text = document.getElementById('comments-modal-text').value.trim();
+  const statusEl = document.getElementById('comments-modal-status');
+  if (!text) { statusEl.textContent = 'Write something first.'; return; }
+  try {
+    await api(`/api/companies/${currentCompany.id}/transactions/${commentsModalTxId}/comments`, {
+      method: 'POST', body: JSON.stringify({ body: text }),
+    });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  document.getElementById('comments-modal-text').value = '';
+  statusEl.textContent = '';
+  await renderCommentsModal();
+  await refreshAll();
+}
+
+async function deleteComment(commentId) {
+  await api(`/api/companies/${currentCompany.id}/comments/${commentId}`, { method: 'DELETE' });
+  await renderCommentsModal();
+  await refreshAll();
 }
 
 async function renderAttachmentsModal() {
