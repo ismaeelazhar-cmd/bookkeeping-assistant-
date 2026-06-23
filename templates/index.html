@@ -320,6 +320,17 @@
         </div>
         <div class="sub" id="vat-preview" style="margin:4px 0 0;"></div>
 
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text);">
+          <input type="checkbox" id="f-foreign-currency" style="width:auto;" onchange="toggleForeignCurrencyRow()"> Foreign currency
+        </label>
+        <div id="f-foreign-currency-row" style="display:none;">
+          <div class="row2">
+            <div><label>Currency code</label><input type="text" id="f-currency" placeholder="e.g. USD" maxlength="3" style="text-transform:uppercase;"></div>
+            <div><label>Exchange rate <span style="color:var(--muted); font-weight:400;">(1 unit = ? GBP)</span></label><input type="number" id="f-exchange-rate" step="0.0001" min="0" placeholder="0.0000"></div>
+          </div>
+          <div class="sub" style="margin:0;">Amount above is entered in the foreign currency — it's converted to GBP at this rate for the ledger.</div>
+        </div>
+
         <div id="f-fund-row" style="display:none;">
           <label>Fund <span style="color:var(--muted); font-weight:400;">(optional)</span></label>
           <select id="f-fund"><option value="">— none —</option></select>
@@ -616,6 +627,19 @@
         <div><label>&nbsp;</label><button class="btn-secondary" style="width:100%;" onclick="runDepreciation()">Run Depreciation</button></div>
       </div>
       <div id="fa-run-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>FX Revaluation</h2>
+      <div class="sub" style="margin-bottom:12px;">Revalues an account's foreign-currency transactions at a new rate and posts the GBP difference to Unrealised FX Gain/Loss. Only affects accounts with at least one transaction originally posted as a foreign currency (the "Foreign currency" checkbox on Post Transaction).</div>
+      <div class="row2">
+        <div><label>Account</label><input type="text" id="fx-account" list="account-list"></div>
+        <div><label>New exchange rate <span style="color:var(--muted); font-weight:400;">(1 unit = ? GBP)</span></label><input type="number" id="fx-new-rate" step="0.0001" min="0" placeholder="0.0000"></div>
+      </div>
+      <label>Revaluation date</label>
+      <input type="date" id="fx-date">
+      <button class="btn-secondary" onclick="runFxRevaluation()">Revalue</button>
+      <div id="fx-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
   </div>
 
@@ -1547,11 +1571,17 @@ async function addTransaction() {
   errEl.textContent = '';
   const fund = document.getElementById('f-fund').value;
   const department = document.getElementById('f-department').value;
+  const isForeign = document.getElementById('f-foreign-currency').checked;
+  const currency = isForeign ? document.getElementById('f-currency').value.trim().toUpperCase() : null;
+  const exchangeRate = isForeign ? parseFloat(document.getElementById('f-exchange-rate').value) : null;
+  if (isForeign && (!currency || !exchangeRate || exchangeRate <= 0)) {
+    errEl.textContent = 'Enter a currency code and a positive exchange rate, or untick Foreign currency.'; return;
+  }
 
   let result;
   try {
     result = await api(`/api/companies/${currentCompany.id}/transactions`, {
-      method: 'POST', body: JSON.stringify({ date, desc, amount, debit, credit, vatRate, vatDirection, fund, department })
+      method: 'POST', body: JSON.stringify({ date, desc, amount, debit, credit, vatRate, vatDirection, fund, department, currency, exchangeRate })
     });
   } catch (e) { errEl.textContent = e.message; showToast(e.message, 'error'); return; }
 
@@ -3422,6 +3452,30 @@ async function runDepreciation() {
   await refreshAll();
 }
 
+// ---------- FX revaluation ----------
+
+async function runFxRevaluation() {
+  const account = document.getElementById('fx-account').value.trim();
+  const newRate = parseFloat(document.getElementById('fx-new-rate').value);
+  const date = document.getElementById('fx-date').value || new Date().toISOString().slice(0, 10);
+  const statusEl = document.getElementById('fx-status');
+  if (!account || !newRate || newRate <= 0) { statusEl.textContent = 'Enter an account and a positive new rate.'; return; }
+  let result;
+  try {
+    result = await api(`/api/companies/${currentCompany.id}/fx-revaluation`, {
+      method: 'POST', body: JSON.stringify({ account, newRate, date })
+    });
+  } catch (e) { statusEl.textContent = e.message; showToast(e.message, 'error'); return; }
+  statusEl.textContent = '';
+  if (result.adjustment === 0) {
+    showToast('No adjustment needed — the new rate matches the existing book value.', 'success');
+  } else {
+    showToast(`FX revaluation posted: ${result.adjustment > 0 ? 'gain' : 'loss'} of ${fmt(Math.abs(result.adjustment))}.`, 'success');
+  }
+  document.getElementById('fx-new-rate').value = '';
+  await refreshAll();
+}
+
 // ---------- Opening balances ----------
 
 let obRowCount = 0;
@@ -4120,6 +4174,11 @@ function renderSofaColumnar(data, labels) {
 // ---------- Departments / cost centres (opt-in) ----------
 
 let departments = [];
+
+function toggleForeignCurrencyRow() {
+  document.getElementById('f-foreign-currency-row').style.display =
+    document.getElementById('f-foreign-currency').checked ? '' : 'none';
+}
 
 function toggleCostCentresUI() {
   const on = document.getElementById('f-cost-centres').checked;

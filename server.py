@@ -503,6 +503,14 @@ def init_db():
         db.execute("ALTER TABLE transactions ADD COLUMN fund_id INTEGER DEFAULT NULL REFERENCES funds(id)")
     if "department_id" not in tx_cols:
         db.execute("ALTER TABLE transactions ADD COLUMN department_id INTEGER DEFAULT NULL REFERENCES departments(id)")
+    if "currency" not in tx_cols:
+        # amount_pence is always the GBP (or company base-currency) equivalent — every other
+        # report/balance in this app assumes one currency and stays correct unmodified. A
+        # foreign-currency posting additionally stores the original amount and the rate used, for
+        # display and as the basis for FX revaluation later.
+        db.execute("ALTER TABLE transactions ADD COLUMN currency TEXT DEFAULT NULL")
+        db.execute("ALTER TABLE transactions ADD COLUMN foreign_amount_pence INTEGER DEFAULT NULL")
+        db.execute("ALTER TABLE transactions ADD COLUMN exchange_rate REAL DEFAULT NULL")
     if "cost_centres_enabled" not in company_cols:
         db.execute("ALTER TABLE companies ADD COLUMN cost_centres_enabled INTEGER DEFAULT 0")
     if "currency" not in company_cols:
@@ -1564,6 +1572,8 @@ def _valid_vat_direction(v):
 def _serialize_transaction(row):
     d = dict(row)
     d["amount"] = from_pence(d.pop("amountPence"))
+    if "foreignAmountPence" in d:
+        d["foreignAmount"] = from_pence(d.pop("foreignAmountPence")) if d["foreignAmountPence"] is not None else None
     return d
 
 
@@ -1578,7 +1588,7 @@ def list_transactions(company_id):
         f"SELECT t.id, t.date, t.desc, t.amount_pence as amountPence, t.debit, t.credit, t.tax_year as taxYear, "
         f"t.vat_rate as vatRate, t.vat_direction as vatDirection, t.confidence, t.journal_id as journalId, "
         f"t.voided_at as voidedAt, t.voided_by as voidedBy, t.reviewed_by as reviewedBy, t.reviewed_at as reviewedAt, "
-        f"f.name as fund, d.name as department, "
+        f"f.name as fund, d.name as department, t.currency, t.foreign_amount_pence as foreignAmountPence, t.exchange_rate as exchangeRate, "
         f"(SELECT COUNT(*) FROM attachments a WHERE a.transaction_id = t.id) as attachmentCount "
         f"FROM transactions t LEFT JOIN funds f ON f.id = t.fund_id LEFT JOIN departments d ON d.id = t.department_id "
         f"WHERE t.company_id = ? {voided_clause} ORDER BY t.date",
@@ -1626,7 +1636,7 @@ class LedgerError(Exception):
 
 def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit,
                              vat_rate=0, vat_direction="", confidence="high", journal_id=None, fund_id=None,
-                             department_id=None):
+                             department_id=None, currency=None, exchange_rate=None):
     """Shared insert path for anything that writes to the ledger — manual entries, bulk
     imports, invoice/bill send-and-pay postings, and (Stage 2) compound journal legs — so
     they all get the same account resolution, locking check, preset learning, and audit trail.
@@ -1654,6 +1664,16 @@ def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit,
 
     tax_year = compute_tax_year(date, g.company["period_start_date"])
 
+    # Multi-currency: `amount` is treated as the FOREIGN amount when currency+exchange_rate are
+    # given, converted to the company's base currency here before anything downstream (VAT
+    # split, account resolution, etc.) ever sees it — every other report in this app assumes
+    # amount_pence is already in one currency and stays correct unmodified. foreign_amount_pence
+    # and exchange_rate are stored on the main leg only, as the basis for a later FX revaluation.
+    foreign_pence = None
+    if currency and exchange_rate:
+        foreign_pence = to_pence(amount)
+        amount = amount * float(exchange_rate)
+
     # VAT is posted as a real second ledger row, not client-side display math: a "gross" amount
     # carrying VAT is split here into a net leg (the original debit/credit pair) and a VAT leg
     # against the VAT Control Account, sharing one journal_id. This is what makes consolidation
@@ -1667,9 +1687,9 @@ def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit,
     leg_journal_id = journal_id or (uuid.uuid4().hex if vat_pence else None)
 
     cur = db.execute(
-        "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id, department_id) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (company_id, date, desc, net_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, leg_journal_id, fund_id, department_id),
+        "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id, department_id, currency, foreign_amount_pence, exchange_rate) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (company_id, date, desc, net_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, leg_journal_id, fund_id, department_id, currency, foreign_pence, exchange_rate),
     )
     main_id = cur.lastrowid
 
@@ -1711,6 +1731,7 @@ def create_transaction(company_id):
             data.get("debit"), data.get("credit"),
             float(data.get("vatRate") or 0), data.get("vatDirection") or "",
             data.get("confidence") or "high", fund_id=fund_id, department_id=department_id,
+            currency=data.get("currency") or None, exchange_rate=float(data["exchangeRate"]) if data.get("exchangeRate") else None,
         )
     except LedgerError as e:
         return jsonify({"error": e.message}), e.status
@@ -3626,6 +3647,74 @@ def post_dividend(company_id):
         return jsonify({"error": e.message}), e.status
     db.commit()
     return jsonify({"transactionId": tx_id, "availableReserves": available_reserves})
+
+
+# ---------- multi-currency: FX revaluation ----------
+
+@app.route("/api/companies/<int:company_id>/fx-revaluation", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def fx_revaluation(company_id):
+    """Revalues one account's foreign-currency-denominated transactions at a new exchange rate
+    and posts the GBP difference to Unrealised FX Gain/Loss. Only transactions originally posted
+    with a currency+exchangeRate (so a known foreign_amount_pence) are revalued — purely
+    GBP-denominated postings on the same account are left untouched."""
+    data = request.get_json(force=True) or {}
+    account_name = (data.get("account") or "").strip()
+    new_rate = float(data.get("newRate") or 0)
+    date = data.get("date") or datetime.date.today().isoformat()
+    if not account_name or new_rate <= 0:
+        return jsonify({"error": "Account and a positive new exchange rate are required."}), 400
+
+    db = get_db()
+    account_row = get_account_by_name(db, company_id, account_name)
+    if account_row is None:
+        return jsonify({"error": "Account not found."}), 404
+    debit_normal = account_row["type"] in ("cash", "cogs", "expense", "current_asset", "noncurrent_asset", "drawings")
+
+    rows = db.execute(
+        "SELECT debit, credit, foreign_amount_pence, amount_pence FROM transactions "
+        "WHERE company_id = ? AND (debit = ? OR credit = ?) AND voided_at IS NULL AND foreign_amount_pence IS NOT NULL",
+        (company_id, account_row["name"], account_row["name"]),
+    ).fetchall()
+    if not rows:
+        return jsonify({"error": "No foreign-currency transactions found on this account to revalue."}), 400
+
+    net_foreign_pence = 0
+    net_gbp_pence = 0
+    for r in rows:
+        sign = 1 if r["debit"] == account_row["name"] else -1
+        if not debit_normal:
+            sign = -sign
+        net_foreign_pence += sign * r["foreign_amount_pence"]
+        net_gbp_pence += sign * r["amount_pence"]
+
+    new_gbp_pence = round(net_foreign_pence * new_rate)
+    diff_pence = new_gbp_pence - net_gbp_pence
+    if diff_pence == 0:
+        return jsonify({"ok": True, "adjustment": 0})
+
+    # diff_pence moves the account by exactly that much in ITS OWN normal direction; the
+    # offsetting leg always lands on the revenue-type FX account on the opposite normal side,
+    # which is what makes the P&L effect come out as a gain when an asset's value rises (or a
+    # liability's falls) and a loss the other way round, without needing separate gain/loss logic.
+    fx_account = resolve_account(db, company_id, "Unrealised FX Gain/Loss", "revenue")
+    amount = from_pence(abs(diff_pence))
+    increases_account = diff_pence > 0
+    if debit_normal:
+        debit, credit = (account_row["name"], fx_account) if increases_account else (fx_account, account_row["name"])
+    else:
+        debit, credit = (fx_account, account_row["name"]) if increases_account else (account_row["name"], fx_account)
+
+    try:
+        tx_id = post_ledger_transaction(
+            db, company_id, date, f"FX revaluation — {account_row['name']} @ {new_rate}", amount, debit, credit
+        )
+    except LedgerError as e:
+        return jsonify({"error": e.message}), e.status
+    db.commit()
+    return jsonify({"ok": True, "transactionId": tx_id, "adjustment": from_pence(diff_pence)})
 
 
 init_db()  # runs on import too, not just `python3 server.py` directly — gunicorn imports this module without executing __main__
