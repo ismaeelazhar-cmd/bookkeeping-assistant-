@@ -301,8 +301,20 @@
   <div class="page" data-page="transactions" style="display:none;">
     <div class="layout">
       <div class="panel" onkeydown="handleRapidEntryKeydown(event)">
-        <h2>New Transaction <span style="font-size:10px; color:var(--muted); text-transform:none; font-weight:400;">(Ctrl/Cmd+Enter to post)</span></h2>
+        <div style="display:flex; justify-content:space-between; align-items:baseline;">
+          <h2 style="margin-bottom:4px;">New Transaction <span style="font-size:10px; color:var(--muted); text-transform:none; font-weight:400;">(Ctrl/Cmd+Enter to post)</span></h2>
+          <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); font-weight:500; margin:0; text-transform:none;">
+            <input type="checkbox" id="f-quick-entry" style="width:auto;" onchange="toggleQuickEntry()"> Quick entry
+          </label>
+        </div>
         <div id="undo-bar" style="margin-bottom:8px;"></div>
+
+        <div id="quick-receipt-row" style="display:none; margin-bottom:6px;">
+          <button class="btn-secondary" style="width:100%;" onclick="document.getElementById('quick-receipt-file').click()">📷 Scan a receipt</button>
+          <input type="file" id="quick-receipt-file" accept=".pdf,.png,.jpg,.jpeg,.heic,.webp" style="display:none" onchange="scanReceiptForQuickEntry(event)">
+          <div id="quick-receipt-status" style="font-size:12px; color:var(--muted); margin-top:4px;"></div>
+        </div>
+
         <label>Date</label>
         <input type="date" id="f-date">
         <label>Description</label>
@@ -310,53 +322,56 @@
         <div id="suggest-hint" style="font-size:11px; color:var(--good); margin-top:2px; min-height:14px;"></div>
         <label>Amount</label>
         <input type="number" id="f-amount" step="0.01" min="0" placeholder="0.00" oninput="updateVatPreview()">
-        <div class="row2">
+        <div class="row2" id="f-debit-credit-row">
           <div>
-            <label>Debit account <span style="color:var(--muted); font-weight:400;">— receives the value</span></label>
+            <label id="f-debit-label">Debit account <span style="color:var(--muted); font-weight:400;">— receives the value</span></label>
             <input type="text" id="f-debit" list="account-list" autocomplete="off" placeholder="Start typing an account…">
           </div>
-          <div>
+          <div id="f-credit-col">
             <label>Credit account <span style="color:var(--muted); font-weight:400;">— value comes from here</span></label>
             <input type="text" id="f-credit" list="account-list" autocomplete="off" placeholder="Start typing an account…">
           </div>
         </div>
+        <div class="sub" id="quick-entry-hint" style="display:none; margin:4px 0 0;"></div>
         <datalist id="account-list"></datalist>
 
-        <label>VAT</label>
-        <div class="row2">
-          <select id="f-vat-rate" onchange="updateVatPreview()">
-            <option value="0">No VAT</option>
-            <option value="20">20% (Standard)</option>
-            <option value="5">5% (Reduced)</option>
-            <option value="0.001">0% (Zero-rated)</option>
-          </select>
-          <select id="f-vat-direction">
-            <option value="">—</option>
-            <option value="input">Input VAT (purchase/expense)</option>
-            <option value="output">Output VAT (sale)</option>
-          </select>
-        </div>
-        <div class="sub" id="vat-preview" style="margin:4px 0 0;"></div>
-
-        <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text);">
-          <input type="checkbox" id="f-foreign-currency" style="width:auto;" onchange="toggleForeignCurrencyRow()"> Foreign currency
-        </label>
-        <div id="f-foreign-currency-row" style="display:none;">
+        <div id="f-advanced-fields">
+          <label>VAT</label>
           <div class="row2">
-            <div><label>Currency code</label><input type="text" id="f-currency" placeholder="e.g. USD" maxlength="3" style="text-transform:uppercase;"></div>
-            <div><label>Exchange rate <span style="color:var(--muted); font-weight:400;">(1 unit = ? GBP)</span></label><input type="number" id="f-exchange-rate" step="0.0001" min="0" placeholder="0.0000"></div>
+            <select id="f-vat-rate" onchange="updateVatPreview()">
+              <option value="0">No VAT</option>
+              <option value="20">20% (Standard)</option>
+              <option value="5">5% (Reduced)</option>
+              <option value="0.001">0% (Zero-rated)</option>
+            </select>
+            <select id="f-vat-direction">
+              <option value="">—</option>
+              <option value="input">Input VAT (purchase/expense)</option>
+              <option value="output">Output VAT (sale)</option>
+            </select>
           </div>
-          <div class="sub" style="margin:0;">Amount above is entered in the foreign currency — it's converted to GBP at this rate for the ledger.</div>
-        </div>
+          <div class="sub" id="vat-preview" style="margin:4px 0 0;"></div>
 
-        <div id="f-fund-row" style="display:none;">
-          <label>Fund <span style="color:var(--muted); font-weight:400;">(optional)</span></label>
-          <select id="f-fund"><option value="">— none —</option></select>
-        </div>
+          <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text);">
+            <input type="checkbox" id="f-foreign-currency" style="width:auto;" onchange="toggleForeignCurrencyRow()"> Foreign currency
+          </label>
+          <div id="f-foreign-currency-row" style="display:none;">
+            <div class="row2">
+              <div><label>Currency code</label><input type="text" id="f-currency" placeholder="e.g. USD" maxlength="3" style="text-transform:uppercase;"></div>
+              <div><label>Exchange rate <span style="color:var(--muted); font-weight:400;">(1 unit = ? GBP)</span></label><input type="number" id="f-exchange-rate" step="0.0001" min="0" placeholder="0.0000"></div>
+            </div>
+            <div class="sub" style="margin:0;">Amount above is entered in the foreign currency — it's converted to GBP at this rate for the ledger.</div>
+          </div>
 
-        <div id="f-department-row" style="display:none;">
-          <label>Department <span style="color:var(--muted); font-weight:400;">(optional)</span></label>
-          <select id="f-department"><option value="">— none —</option></select>
+          <div id="f-fund-row" style="display:none;">
+            <label>Fund <span style="color:var(--muted); font-weight:400;">(optional)</span></label>
+            <select id="f-fund"><option value="">— none —</option></select>
+          </div>
+
+          <div id="f-department-row" style="display:none;">
+            <label>Department <span style="color:var(--muted); font-weight:400;">(optional)</span></label>
+            <select id="f-department"><option value="">— none —</option></select>
+          </div>
         </div>
 
         <button class="btn-primary" onclick="addTransaction()">Post Transaction</button>
@@ -1526,6 +1541,7 @@ async function openCompany(id) {
   recentlyPosted = []; renderUndoBar();
   askHistory = []; renderAskHistory();
   applyPermissionBanner();
+  initQuickEntryToggle();
   show('app-screen');
   await refreshAll();
   addOpeningBalanceRow();
@@ -1765,13 +1781,67 @@ function suggestFromDescription() {
   } else hint.textContent = '';
 }
 
+// ---------- quick-entry mode: hides VAT/FX/fund/department + credit account for the common
+// "just post a category against the bank/cash account" case. Persisted per-browser so it sticks
+// across sessions once someone turns it on. ----------
+function toggleQuickEntry() {
+  const on = document.getElementById('f-quick-entry').checked;
+  localStorage.setItem('quickEntryMode', on ? '1' : '0');
+  applyQuickEntryMode(on);
+}
+
+function applyQuickEntryMode(on) {
+  document.getElementById('f-advanced-fields').style.display = on ? 'none' : 'block';
+  document.getElementById('f-credit-col').style.display = on ? 'none' : 'block';
+  document.getElementById('quick-receipt-row').style.display = on ? 'block' : 'none';
+  document.getElementById('f-debit-label').innerHTML = on
+    ? 'Category <span style="color:var(--muted); font-weight:400;">— what this was for</span>'
+    : 'Debit account <span style="color:var(--muted); font-weight:400;">— receives the value</span>';
+  const hint = document.getElementById('quick-entry-hint');
+  if (on) {
+    hint.style.display = 'block';
+    hint.textContent = `Posts against ${currentCompany?.default_credit_account || 'Cash'} automatically — change the default in Settings, or switch off Quick entry for VAT/foreign currency/compound entries.`;
+  } else {
+    hint.style.display = 'none';
+  }
+}
+
+function initQuickEntryToggle() {
+  const on = localStorage.getItem('quickEntryMode') === '1';
+  document.getElementById('f-quick-entry').checked = on;
+  applyQuickEntryMode(on);
+}
+
+async function scanReceiptForQuickEntry(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById('quick-receipt-status');
+  statusEl.textContent = 'Reading receipt…';
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const res = await fetch(`/api/companies/${currentCompany.id}/scan-receipt`, { method: 'POST', body: formData, credentials: 'same-origin' });
+    const extracted = await res.json();
+    if (!res.ok) throw new Error(extracted.error || 'Could not read that receipt.');
+    if (extracted.date) document.getElementById('f-date').value = extracted.date;
+    if (extracted.desc) document.getElementById('f-desc').value = extracted.desc;
+    if (extracted.amount != null) document.getElementById('f-amount').value = extracted.amount;
+    statusEl.textContent = 'Filled in from the receipt — check it over, pick a category, then post.';
+    document.getElementById('f-debit').focus();
+  } catch (e) {
+    statusEl.textContent = e.message;
+  } finally {
+    event.target.value = '';
+  }
+}
+
 async function addTransaction() {
   const date = document.getElementById('f-date').value;
   const desc = document.getElementById('f-desc').value.trim();
   const amount = parseFloat(document.getElementById('f-amount').value);
   const debit = document.getElementById('f-debit').value.trim();
   let credit = document.getElementById('f-credit').value.trim();
-  if (!credit) credit = currentCompany.default_credit_account || '';
+  if (!credit) credit = currentCompany.default_credit_account || (document.getElementById('f-quick-entry').checked ? 'Cash' : '');
   const errEl = document.getElementById('form-error');
 
   if (!date || !desc || !amount || amount <= 0 || !debit || !credit) {

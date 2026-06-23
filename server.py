@@ -2641,14 +2641,39 @@ def download_attachment(company_id, attachment_id):
     )
 
 
+def extract_receipt_fields(api_key, mime_type, file_bytes):
+    """Shared receipt-OCR call: send file bytes to Claude (vision for images, native document
+    support for PDFs) and ask it to read off date/description/amount. Used both by the
+    post-hoc attachment extractor and the pre-transaction quick-scan endpoint, so there's one
+    place that owns the prompt and the response parsing."""
+    file_b64 = base64.b64encode(file_bytes).decode("ascii")
+    block_type = "document" if mime_type == "application/pdf" else "image"
+    prompt_text = (
+        "This is a receipt or invoice. Read off the date (YYYY-MM-DD), a short description "
+        "(vendor/item), and the total amount paid (a positive number, the gross/final total). "
+        'Return ONLY JSON, no prose: {"date":"YYYY-MM-DD","desc":"...","amount":0.00}. '
+        'If you genuinely cannot read a field, use null for it.'
+    )
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": block_type, "source": {"type": "base64", "media_type": mime_type, "data": file_b64}},
+            {"type": "text", "text": prompt_text},
+        ],
+    }]
+    raw_text = call_claude(api_key, messages, max_tokens=1024)
+    match = re.search(r"\{[\s\S]*\}", raw_text)
+    if not match:
+        raise ValueError("Claude did not return a parseable result.")
+    return json.loads(match.group(0))
+
+
 @app.route("/api/companies/<int:company_id>/attachments/<int:attachment_id>/extract", methods=["POST"])
 @login_required
 @company_required
 @write_required
 def extract_attachment(company_id, attachment_id):
-    """Stage 5 receipt OCR: send the stored file to Claude (vision for images, native
-    document support for PDFs) and ask it to read off date/description/amount/vendor —
-    same server-side-key pattern as ai_categorize, nothing new exposed to the browser."""
+    """Stage 5 receipt OCR on a file already attached to a transaction."""
     api_key = decrypt_secret(g.company["ai_api_key"])
     if not api_key:
         return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
@@ -2665,36 +2690,48 @@ def extract_attachment(company_id, attachment_id):
     if not file_path.exists():
         return jsonify({"error": "Stored file is missing."}), 404
     with open(file_path, "rb") as f:
-        file_b64 = base64.b64encode(f.read()).decode("ascii")
+        file_bytes = f.read()
 
-    block_type = "document" if row["mime_type"] == "application/pdf" else "image"
-    prompt_text = (
-        "This is a receipt or invoice. Read off the date (YYYY-MM-DD), a short description "
-        "(vendor/item), and the total amount paid (a positive number, the gross/final total). "
-        'Return ONLY JSON, no prose: {"date":"YYYY-MM-DD","desc":"...","amount":0.00}. '
-        'If you genuinely cannot read a field, use null for it.'
-    )
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": block_type, "source": {"type": "base64", "media_type": row["mime_type"], "data": file_b64}},
-            {"type": "text", "text": prompt_text},
-        ],
-    }]
     try:
-        raw_text = call_claude(api_key, messages, max_tokens=1024)
+        extracted = extract_receipt_fields(api_key, row["mime_type"], file_bytes)
     except urllib.error.HTTPError as e:
         return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
     except urllib.error.URLError as e:
         return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
+    except (ValueError, json.JSONDecodeError) as e:
+        return jsonify({"error": str(e) or "Claude's response wasn't valid JSON."}), 502
+    return jsonify(extracted)
 
-    match = re.search(r"\{[\s\S]*\}", raw_text)
-    if not match:
-        return jsonify({"error": "Claude did not return a parseable result."}), 502
+
+@app.route("/api/companies/<int:company_id>/scan-receipt", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def scan_receipt(company_id):
+    """Quick-entry receipt capture: OCR a photo BEFORE any transaction exists, so the
+    new-transaction form can be pre-filled and posted in one step. Deliberately doesn't persist
+    the file — attachments.transaction_id is NOT NULL (a file is always attached to a posted
+    transaction), so a scan that's discarded or never posted leaves nothing orphaned. If the
+    user wants the receipt kept, they attach it the normal way after posting."""
+    api_key = decrypt_secret(g.company["ai_api_key"])
+    if not api_key:
+        return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
+
+    file = request.files.get("file")
+    if file is None or not file.filename:
+        return jsonify({"error": "No file uploaded."}), 400
+    mime_type = file.mimetype or mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
+    if mime_type not in ALLOWED_ATTACHMENT_TYPES:
+        return jsonify({"error": f"Unsupported file type: {mime_type}. Allowed: PDF, PNG, JPEG, HEIC, WEBP."}), 400
+
     try:
-        extracted = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return jsonify({"error": "Claude's response wasn't valid JSON."}), 502
+        extracted = extract_receipt_fields(api_key, mime_type, file.read())
+    except urllib.error.HTTPError as e:
+        return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
+    except urllib.error.URLError as e:
+        return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
+    except (ValueError, json.JSONDecodeError) as e:
+        return jsonify({"error": str(e) or "Claude's response wasn't valid JSON."}), 502
     return jsonify(extracted)
 
 
