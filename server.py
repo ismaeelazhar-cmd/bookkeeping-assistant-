@@ -376,6 +376,49 @@ def init_db():
             UNIQUE (company_id, name COLLATE NOCASE)
         );
 
+        -- Stock/inventory for product-based businesses, costed FIFO. quantity_on_hand is
+        -- derived from stock_layers (sum of remaining_quantity), never stored directly, so it
+        -- can't drift out of sync with the layers that actually back the cost calculation.
+        CREATE TABLE IF NOT EXISTS stock_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            stock_account TEXT NOT NULL,
+            cogs_account TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (company_id, name COLLATE NOCASE)
+        );
+
+        -- One row per purchase ("layer") — a sale consumes the oldest layers first (FIFO) until
+        -- the sold quantity is covered, which is what makes the COGS figure FIFO rather than a
+        -- simple average cost.
+        CREATE TABLE IF NOT EXISTS stock_layers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            stock_item_id INTEGER NOT NULL REFERENCES stock_items(id) ON DELETE CASCADE,
+            date TEXT NOT NULL,
+            quantity_purchased REAL NOT NULL,
+            quantity_remaining REAL NOT NULL,
+            unit_cost_pence INTEGER NOT NULL,
+            transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- A record of each sale's FIFO consumption — kept separately from stock_layers (which
+        -- only tracks what's left) so a sale's actual cost breakdown stays inspectable later.
+        CREATE TABLE IF NOT EXISTS stock_sales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            stock_item_id INTEGER NOT NULL REFERENCES stock_items(id) ON DELETE CASCADE,
+            date TEXT NOT NULL,
+            quantity REAL NOT NULL,
+            cogs_pence INTEGER NOT NULL,
+            sale_amount_pence INTEGER NOT NULL,
+            revenue_transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
+            cogs_transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- Multi-entity consolidation: a simple named grouping of companies the same user owns.
         -- The consolidated report sums matching account lines across members — it's a plain
         -- aggregation, not true consolidation accounting (no intercompany eliminations).
@@ -1441,6 +1484,168 @@ def delete_department(company_id, department_id):
     db.execute("DELETE FROM departments WHERE id = ? AND company_id = ?", (department_id, company_id))
     db.commit()
     return jsonify({"ok": True})
+
+
+# ---------- stock / inventory (FIFO) ----------
+
+def _stock_item_summary(db, company_id, item):
+    layers = db.execute(
+        "SELECT quantity_remaining, unit_cost_pence FROM stock_layers "
+        "WHERE company_id = ? AND stock_item_id = ? AND quantity_remaining > 0 ORDER BY date, id",
+        (company_id, item["id"]),
+    ).fetchall()
+    quantity_on_hand = sum(l["quantity_remaining"] for l in layers)
+    value_pence = sum(l["quantity_remaining"] * l["unit_cost_pence"] for l in layers)
+    return {
+        "id": item["id"], "name": item["name"], "stockAccount": item["stock_account"], "cogsAccount": item["cogs_account"],
+        "quantityOnHand": quantity_on_hand,
+        "valueOnHand": from_pence(value_pence),
+        "averageUnitCost": from_pence(value_pence / quantity_on_hand) if quantity_on_hand > 0 else 0,
+    }
+
+
+@app.route("/api/companies/<int:company_id>/stock-items", methods=["GET"])
+@login_required
+@company_required
+def list_stock_items(company_id):
+    db = get_db()
+    items = db.execute("SELECT * FROM stock_items WHERE company_id = ? ORDER BY name", (company_id,)).fetchall()
+    return jsonify([_stock_item_summary(db, company_id, i) for i in items])
+
+
+@app.route("/api/companies/<int:company_id>/stock-items", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def create_stock_item(company_id):
+    data = request.get_json(force=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Stock item name is required."}), 400
+    db = get_db()
+    stock_account = resolve_account(db, company_id, data.get("stockAccount") or "Stock", "current_asset")
+    cogs_account = resolve_account(db, company_id, data.get("cogsAccount") or "Cost of Sales", "cogs")
+    try:
+        cur = db.execute(
+            "INSERT INTO stock_items (company_id, name, stock_account, cogs_account) VALUES (?,?,?,?)",
+            (company_id, name, stock_account, cogs_account),
+        )
+    except sqlite3.IntegrityError:
+        return jsonify({"error": f'A stock item named "{name}" already exists.'}), 409
+    db.commit()
+    return jsonify({"id": cur.lastrowid})
+
+
+@app.route("/api/companies/<int:company_id>/stock-items/<int:item_id>", methods=["DELETE"])
+@login_required
+@company_required
+@write_required
+def delete_stock_item(company_id, item_id):
+    db = get_db()
+    db.execute("DELETE FROM stock_items WHERE id = ? AND company_id = ?", (item_id, company_id))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/stock-items/<int:item_id>/purchase", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def purchase_stock(company_id, item_id):
+    data = request.get_json(force=True) or {}
+    date = data.get("date")
+    quantity = float(data.get("quantity") or 0)
+    unit_cost = float(data.get("unitCost") or 0)
+    payment_account = data.get("paymentAccount") or "Cash"
+    if not date or quantity <= 0 or unit_cost <= 0:
+        return jsonify({"error": "Date, a positive quantity, and a positive unit cost are required."}), 400
+
+    db = get_db()
+    item = db.execute("SELECT * FROM stock_items WHERE id = ? AND company_id = ?", (item_id, company_id)).fetchone()
+    if item is None:
+        return jsonify({"error": "Stock item not found."}), 404
+
+    unit_cost_pence = to_pence(unit_cost)
+    total_cost = from_pence(round(quantity * unit_cost_pence))
+    try:
+        tx_id = post_ledger_transaction(
+            db, company_id, date, f"Stock purchase — {item['name']}", total_cost, item["stock_account"], payment_account
+        )
+    except LedgerError as e:
+        return jsonify({"error": e.message}), e.status
+
+    db.execute(
+        "INSERT INTO stock_layers (company_id, stock_item_id, date, quantity_purchased, quantity_remaining, unit_cost_pence, transaction_id) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (company_id, item_id, date, quantity, quantity, unit_cost_pence, tx_id),
+    )
+    db.commit()
+    return jsonify({"transactionId": tx_id, "totalCost": total_cost})
+
+
+@app.route("/api/companies/<int:company_id>/stock-items/<int:item_id>/sale", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def sell_stock(company_id, item_id):
+    data = request.get_json(force=True) or {}
+    date = data.get("date")
+    quantity = float(data.get("quantity") or 0)
+    sale_amount = float(data.get("saleAmount") or 0)
+    revenue_account = data.get("revenueAccount") or "Sales"
+    payment_account = data.get("paymentAccount") or "Cash"
+    if not date or quantity <= 0 or sale_amount <= 0:
+        return jsonify({"error": "Date, a positive quantity, and a positive sale amount are required."}), 400
+
+    db = get_db()
+    item = db.execute("SELECT * FROM stock_items WHERE id = ? AND company_id = ?", (item_id, company_id)).fetchone()
+    if item is None:
+        return jsonify({"error": "Stock item not found."}), 404
+
+    layers = db.execute(
+        "SELECT id, quantity_remaining, unit_cost_pence FROM stock_layers "
+        "WHERE company_id = ? AND stock_item_id = ? AND quantity_remaining > 0 ORDER BY date, id",
+        (company_id, item_id),
+    ).fetchall()
+    available = sum(l["quantity_remaining"] for l in layers)
+    if quantity > available:
+        return jsonify({"error": f"Only {available} unit(s) on hand — can't sell {quantity}."}), 400
+
+    # consume the oldest layers first (FIFO) until the sold quantity is covered
+    remaining_to_consume = quantity
+    cogs_pence = 0
+    for layer in layers:
+        if remaining_to_consume <= 0:
+            break
+        take = min(layer["quantity_remaining"], remaining_to_consume)
+        cogs_pence += round(take * layer["unit_cost_pence"])
+        db.execute(
+            "UPDATE stock_layers SET quantity_remaining = quantity_remaining - ? WHERE id = ?",
+            (take, layer["id"]),
+        )
+        remaining_to_consume -= take
+
+    journal_id = uuid.uuid4().hex
+    try:
+        revenue_tx_id = post_ledger_transaction(
+            db, company_id, date, f"Stock sale — {item['name']}", sale_amount, payment_account, revenue_account,
+            journal_id=journal_id,
+        )
+        cogs_tx_id = post_ledger_transaction(
+            db, company_id, date, f"Cost of stock sold — {item['name']}", from_pence(cogs_pence),
+            item["cogs_account"], item["stock_account"], journal_id=journal_id,
+        )
+    except LedgerError as e:
+        db.rollback()
+        return jsonify({"error": e.message}), e.status
+
+    db.execute(
+        "INSERT INTO stock_sales (company_id, stock_item_id, date, quantity, cogs_pence, sale_amount_pence, revenue_transaction_id, cogs_transaction_id) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (company_id, item_id, date, quantity, cogs_pence, to_pence(sale_amount), revenue_tx_id, cogs_tx_id),
+    )
+    db.commit()
+    return jsonify({"revenueTransactionId": revenue_tx_id, "cogsTransactionId": cogs_tx_id, "cogs": from_pence(cogs_pence)})
 
 
 @app.route("/api/companies/<int:company_id>/sofa", methods=["GET"])

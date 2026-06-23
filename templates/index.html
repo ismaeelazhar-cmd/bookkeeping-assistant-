@@ -641,6 +641,60 @@
       <button class="btn-secondary" onclick="runFxRevaluation()">Revalue</button>
       <div id="fx-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Stock / Inventory (FIFO)</h2>
+      <div class="sub" style="margin-bottom:12px;">For product-based businesses: register an item, record purchases (each one a FIFO cost layer), then record sales — COGS is calculated by consuming the oldest layers first and posted automatically alongside the sale.</div>
+      <table class="inbox">
+        <thead><tr><th>Item</th><th class="num">Qty on hand</th><th class="num">Avg unit cost</th><th class="num">Value on hand</th><th></th></tr></thead>
+        <tbody id="stock-items-body"></tbody>
+      </table>
+      <div class="panel" style="background:var(--panel-soft); margin-top:14px; box-shadow:none;">
+        <h2 style="margin-top:0; font-size:13px;">Register a stock item</h2>
+        <div class="row2">
+          <div><label>Item name</label><input type="text" id="stock-new-name" placeholder="e.g. Widget"></div>
+          <div><label>Stock account</label><input type="text" id="stock-new-account" list="account-list" value="Stock"></div>
+        </div>
+        <label>COGS account</label>
+        <input type="text" id="stock-new-cogs-account" list="account-list" value="Cost of Sales">
+        <button class="btn-primary" onclick="addStockItem()">Register item</button>
+        <div id="stock-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+      </div>
+
+      <div class="row2" style="margin-top:16px;">
+        <div class="panel" style="margin:0;">
+          <h2 style="margin-top:0; font-size:13px;">Record a purchase</h2>
+          <label>Item</label>
+          <select id="stock-purchase-item"></select>
+          <div class="row2">
+            <div><label>Date</label><input type="date" id="stock-purchase-date"></div>
+            <div><label>Quantity</label><input type="number" id="stock-purchase-qty" step="0.01" min="0"></div>
+          </div>
+          <div class="row2">
+            <div><label>Unit cost</label><input type="number" id="stock-purchase-unit-cost" step="0.01" min="0"></div>
+            <div><label>Payment account</label><input type="text" id="stock-purchase-payment" list="account-list" value="Cash"></div>
+          </div>
+          <button class="btn-secondary" onclick="recordStockPurchase()">Record purchase</button>
+        </div>
+        <div class="panel" style="margin:0;">
+          <h2 style="margin-top:0; font-size:13px;">Record a sale</h2>
+          <label>Item</label>
+          <select id="stock-sale-item"></select>
+          <div class="row2">
+            <div><label>Date</label><input type="date" id="stock-sale-date"></div>
+            <div><label>Quantity</label><input type="number" id="stock-sale-qty" step="0.01" min="0"></div>
+          </div>
+          <div class="row2">
+            <div><label>Sale amount (total)</label><input type="number" id="stock-sale-amount" step="0.01" min="0"></div>
+            <div><label>Revenue account</label><input type="text" id="stock-sale-revenue" list="account-list" value="Sales"></div>
+          </div>
+          <label>Payment account</label>
+          <input type="text" id="stock-sale-payment" list="account-list" value="Cash">
+          <button class="btn-primary" onclick="recordStockSale()">Record sale</button>
+        </div>
+      </div>
+      <div id="stock-action-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
   </div>
 
   <div class="page" data-page="invoices" style="display:none;">
@@ -1532,6 +1586,7 @@ async function refreshAll() {
   await loadReconciliationHistory();
   await loadRecurringJournals();
   renderCashFlowForecast();
+  await loadStockItems();
 }
 
 function suggestFromDescription() {
@@ -3473,6 +3528,104 @@ async function runFxRevaluation() {
     showToast(`FX revaluation posted: ${result.adjustment > 0 ? 'gain' : 'loss'} of ${fmt(Math.abs(result.adjustment))}.`, 'success');
   }
   document.getElementById('fx-new-rate').value = '';
+  await refreshAll();
+}
+
+// ---------- Stock / inventory (FIFO) ----------
+
+let stockItems = [];
+
+async function loadStockItems() {
+  stockItems = await api(`/api/companies/${currentCompany.id}/stock-items`);
+  renderStockItems();
+  populateStockItemSelects();
+}
+
+function renderStockItems() {
+  const body = document.getElementById('stock-items-body');
+  if (!body) return;
+  body.innerHTML = stockItems.length ? stockItems.map(i => `
+    <tr>
+      <td>${escapeHtml(i.name)}</td>
+      <td class="num">${i.quantityOnHand}</td>
+      <td class="num">${fmt(i.averageUnitCost)}</td>
+      <td class="num">${fmt(i.valueOnHand)}</td>
+      <td><button class="btn-danger" onclick="deleteStockItem(${i.id}, '${i.name.replace(/'/g, "\\'")}')">✕</button></td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">No stock items yet.</td></tr>';
+}
+
+function populateStockItemSelects() {
+  const options = stockItems.map(i => `<option value="${i.id}">${escapeHtml(i.name)} (${i.quantityOnHand} on hand)</option>`).join('');
+  ['stock-purchase-item', 'stock-sale-item'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = options;
+  });
+}
+
+async function addStockItem() {
+  const name = document.getElementById('stock-new-name').value.trim();
+  const stockAccount = document.getElementById('stock-new-account').value.trim() || 'Stock';
+  const cogsAccount = document.getElementById('stock-new-cogs-account').value.trim() || 'Cost of Sales';
+  const statusEl = document.getElementById('stock-status');
+  if (!name) { statusEl.textContent = 'Enter an item name.'; return; }
+  try {
+    await api(`/api/companies/${currentCompany.id}/stock-items`, {
+      method: 'POST', body: JSON.stringify({ name, stockAccount, cogsAccount })
+    });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = '';
+  document.getElementById('stock-new-name').value = '';
+  await loadStockItems();
+}
+
+async function deleteStockItem(id, name) {
+  if (!(await confirmAction(`Delete stock item "${name}"?`, 'Delete'))) return;
+  await api(`/api/companies/${currentCompany.id}/stock-items/${id}`, { method: 'DELETE' });
+  await loadStockItems();
+}
+
+async function recordStockPurchase() {
+  const itemId = document.getElementById('stock-purchase-item').value;
+  const date = document.getElementById('stock-purchase-date').value;
+  const quantity = parseFloat(document.getElementById('stock-purchase-qty').value);
+  const unitCost = parseFloat(document.getElementById('stock-purchase-unit-cost').value);
+  const paymentAccount = document.getElementById('stock-purchase-payment').value.trim() || 'Cash';
+  const statusEl = document.getElementById('stock-action-status');
+  if (!itemId || !date || !quantity || quantity <= 0 || !unitCost || unitCost <= 0) {
+    statusEl.textContent = 'Pick an item, date, positive quantity, and positive unit cost.'; return;
+  }
+  try {
+    const result = await api(`/api/companies/${currentCompany.id}/stock-items/${itemId}/purchase`, {
+      method: 'POST', body: JSON.stringify({ date, quantity, unitCost, paymentAccount })
+    });
+    showToast(`Purchased ${quantity} unit(s) for ${fmt(result.totalCost)}.`, 'success');
+  } catch (e) { statusEl.textContent = e.message; showToast(e.message, 'error'); return; }
+  statusEl.textContent = '';
+  document.getElementById('stock-purchase-qty').value = '';
+  document.getElementById('stock-purchase-unit-cost').value = '';
+  await refreshAll();
+}
+
+async function recordStockSale() {
+  const itemId = document.getElementById('stock-sale-item').value;
+  const date = document.getElementById('stock-sale-date').value;
+  const quantity = parseFloat(document.getElementById('stock-sale-qty').value);
+  const saleAmount = parseFloat(document.getElementById('stock-sale-amount').value);
+  const revenueAccount = document.getElementById('stock-sale-revenue').value.trim() || 'Sales';
+  const paymentAccount = document.getElementById('stock-sale-payment').value.trim() || 'Cash';
+  const statusEl = document.getElementById('stock-action-status');
+  if (!itemId || !date || !quantity || quantity <= 0 || !saleAmount || saleAmount <= 0) {
+    statusEl.textContent = 'Pick an item, date, positive quantity, and positive sale amount.'; return;
+  }
+  try {
+    const result = await api(`/api/companies/${currentCompany.id}/stock-items/${itemId}/sale`, {
+      method: 'POST', body: JSON.stringify({ date, quantity, saleAmount, revenueAccount, paymentAccount })
+    });
+    showToast(`Sold ${quantity} unit(s) for ${fmt(saleAmount)} — COGS ${fmt(result.cogs)}.`, 'success');
+  } catch (e) { statusEl.textContent = e.message; showToast(e.message, 'error'); return; }
+  statusEl.textContent = '';
+  document.getElementById('stock-sale-qty').value = '';
+  document.getElementById('stock-sale-amount').value = '';
   await refreshAll();
 }
 
