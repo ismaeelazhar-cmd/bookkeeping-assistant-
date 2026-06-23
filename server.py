@@ -3399,6 +3399,30 @@ def delete_bank_connection(company_id, connection_id):
     return jsonify({"ok": True})
 
 
+def queue_plaid_line_if_unsure(db, company_id, cash_account, date, desc, amount):
+    """Plaid feed transactions never go through the AI suggester (that's a separate, paid call) —
+    the only signal available is whether this description has been seen before as a preset. A
+    new, never-seen description is exactly the case the clarification queue exists for: posting
+    it automatically based on nothing but the sign of the amount would be a silent guess."""
+    preset = db.execute(
+        "SELECT debit, credit FROM presets WHERE company_id = ? AND desc_key = ?",
+        (company_id, desc.strip().lower()),
+    ).fetchone()
+    if preset is not None:
+        return  # a known description — confident enough to leave for normal bank-rec matching
+
+    guessed_debit, guessed_credit = (cash_account, "Uncategorized") if amount > 0 else ("Uncategorized", cash_account)
+    db.execute(
+        "INSERT INTO clarification_queue (company_id, source, raw_line_json, suggested_debit, "
+        "suggested_credit, suggested_amount_pence, confidence, reason) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            company_id, "plaid", json.dumps({"date": date, "desc": desc, "amount": abs(amount)}),
+            guessed_debit, guessed_credit, to_pence(abs(amount)), 0.2,
+            "New bank feed transaction with no matching preset — description never seen before.",
+        ),
+    )
+
+
 def sync_bank_connection(db, company, connection_id):
     """Pull new transactions since the last sync via Plaid's cursor-based /transactions/sync,
     inserting each as a bank_line keyed by Plaid's own transaction_id so re-syncing (including
@@ -3418,16 +3442,17 @@ def sync_bank_connection(db, company, connection_id):
         result = call_plaid(company, "/transactions/sync", payload)
         for tx in result.get("added", []):
             amount = -float(tx["amount"])  # Plaid: positive = money out: flip sign to match this app's convention
+            desc = tx.get("merchant_name") or tx.get("name") or "Bank transaction"
             db.execute(
                 "INSERT INTO bank_lines (company_id, cash_account, date, desc, amount_pence, external_id) "
                 "VALUES (?,?,?,?,?,?) ON CONFLICT(company_id, external_id) WHERE external_id IS NOT NULL DO NOTHING",
                 (
-                    conn["company_id"], conn["cash_account"], tx["date"],
-                    tx.get("merchant_name") or tx.get("name") or "Bank transaction",
+                    conn["company_id"], conn["cash_account"], tx["date"], desc,
                     to_pence(amount), tx["transaction_id"],
                 ),
             )
             inserted += 1
+            queue_plaid_line_if_unsure(db, conn["company_id"], conn["cash_account"], tx["date"], desc, amount)
         cursor = result.get("next_cursor")
         has_more = result.get("has_more", False)
     db.execute("UPDATE bank_connections SET sync_cursor = ? WHERE id = ?", (cursor, connection_id))
