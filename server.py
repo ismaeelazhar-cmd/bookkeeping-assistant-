@@ -124,7 +124,7 @@ def check_csrf_origin():
         return jsonify({"error": "Cross-origin request blocked."}), 403
 
 
-SCHEMA_VERSION = 3  # bumped for Stage 2: contacts + invoices/bills
+SCHEMA_VERSION = 4  # bumped for #18: invoices_bills.cis_deduction_pence/cis_rate
 
 
 def init_db():
@@ -625,6 +625,11 @@ def init_db():
     ib_cols = {row[1] for row in db.execute("PRAGMA table_info(invoices_bills)").fetchall()}
     if "linked_doc_id" not in ib_cols:
         db.execute("ALTER TABLE invoices_bills ADD COLUMN linked_doc_id INTEGER DEFAULT NULL REFERENCES invoices_bills(id)")
+    if "cis_deduction_pence" not in ib_cols:
+        # #18: recorded at payment time so the CIS contractor view can list every deduction
+        # made/suffered without re-deriving it from transaction descriptions.
+        db.execute("ALTER TABLE invoices_bills ADD COLUMN cis_deduction_pence INTEGER DEFAULT 0")
+        db.execute("ALTER TABLE invoices_bills ADD COLUMN cis_rate REAL DEFAULT NULL")
     db.execute("DELETE FROM schema_meta")
     db.execute("INSERT INTO schema_meta (version) VALUES (?)", (SCHEMA_VERSION,))
     db.commit()
@@ -3206,8 +3211,10 @@ def pay_invoice_bill(company_id, doc_id):
     except LedgerError as e:
         return jsonify({"error": e.message}), e.status
 
+    cis_rate = round(cis_deduction / amount * 100, 2) if cis_deduction else None
     db.execute(
-        "UPDATE invoices_bills SET status = 'paid', payment_transaction_id = ? WHERE id = ?", (tx_id, doc_id)
+        "UPDATE invoices_bills SET status = 'paid', payment_transaction_id = ?, cis_deduction_pence = ?, cis_rate = ? WHERE id = ?",
+        (tx_id, to_pence(cis_deduction), cis_rate, doc_id),
     )
     db.commit()
     return jsonify({"ok": True, "transactionId": tx_id})
@@ -3408,6 +3415,46 @@ def delete_budget(company_id, budget_id):
     db.execute("DELETE FROM budgets WHERE id = ? AND company_id = ?", (budget_id, company_id))
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/cis-statements", methods=["GET"])
+@login_required
+@company_required
+def cis_statements(company_id):
+    """#18: every paid invoice/bill that had a CIS deduction applied, grouped by contact —
+    the data a CIS payment & deduction statement (which contractors must give subcontractors
+    for every payment under the scheme) is built from. kind='bill' rows are payments this
+    company made AS A CONTRACTOR to a subcontractor (CIS deducted, owed to HMRC); kind='invoice'
+    rows are payments this company RECEIVED as a subcontractor (CIS suffered, recoverable)."""
+    db = get_db()
+    from_date = request.args.get("from") or ""
+    to_date = request.args.get("to") or ""
+    date_clause = ""
+    params = [company_id]
+    if from_date:
+        date_clause += " AND ib.date >= ?"
+        params.append(from_date)
+    if to_date:
+        date_clause += " AND ib.date <= ?"
+        params.append(to_date)
+    rows = db.execute(
+        f"SELECT ib.id, ib.kind, ib.contact_id as contactId, c.name as contactName, ib.date, ib.desc, "
+        f"ib.amount_pence as grossPence, ib.cis_deduction_pence as cisPence, ib.cis_rate as cisRate "
+        f"FROM invoices_bills ib JOIN contacts c ON c.id = ib.contact_id "
+        f"WHERE ib.company_id = ? AND ib.status = 'paid' AND ib.cis_deduction_pence > 0 {date_clause} "
+        f"ORDER BY c.name, ib.date",
+        params,
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        gross = from_pence(d.pop("grossPence"))
+        cis = from_pence(d.pop("cisPence"))
+        d["gross"] = gross
+        d["cisDeducted"] = cis
+        d["net"] = round(gross - cis, 2)
+        out.append(d)
+    return jsonify(out)
 
 
 @app.route("/api/companies/<int:company_id>/aging-report", methods=["GET"])

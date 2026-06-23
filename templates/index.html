@@ -844,6 +844,16 @@
     </div>
 
     <div class="panel" style="margin-top:20px;">
+      <h2>CIS — Contractor / Subcontractor View</h2>
+      <div class="sub" style="margin-bottom:12px;">Every paid invoice or bill with a CIS deduction applied (set when marking it paid), grouped by who it's with. Bills are payments you made as a contractor (CIS deducted, owed to HMRC); invoices are payments you received as a subcontractor (CIS suffered, recoverable against your own tax).</div>
+      <div class="row2">
+        <div><label>From</label><input type="date" id="cis-from" onchange="renderCisStatements()"></div>
+        <div><label>To</label><input type="date" id="cis-to" onchange="renderCisStatements()"></div>
+      </div>
+      <div id="cis-statements-body"></div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
       <h2>Purchase Orders</h2>
       <div class="sub" style="margin-bottom:12px;">A pre-invoice document: draft → approved → received → billed. No ledger effect until it becomes a bill — and that bill only posts once it's sent, same as any other bill.</div>
       <table class="inbox">
@@ -2251,11 +2261,63 @@ function printCompilation() {
   win.document.close(); win.focus(); setTimeout(() => win.print(), 300);
 }
 
+// ---------- CIS contractor/subcontractor view (#18) ----------
+async function renderCisStatements() {
+  const body = document.getElementById('cis-statements-body');
+  if (!body) return;
+  const from = document.getElementById('cis-from').value;
+  const to = document.getElementById('cis-to').value;
+  const params = new URLSearchParams();
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+  const rows = await api(`/api/companies/${currentCompany.id}/cis-statements?${params}`);
+
+  if (!rows.length) { body.innerHTML = '<div class="empty">No CIS deductions in this period.</div>'; return; }
+
+  const byContact = {};
+  for (const r of rows) {
+    (byContact[r.contactId] = byContact[r.contactId] || { name: r.contactName, kind: r.kind, rows: [] }).rows.push(r);
+  }
+  body.innerHTML = Object.entries(byContact).map(([contactId, group]) => {
+    const totals = group.rows.reduce((s, r) => ({ gross: s.gross + r.gross, cis: s.cis + r.cisDeducted, net: s.net + r.net }), { gross: 0, cis: 0, net: 0 });
+    return `
+      <div class="panel" style="background:var(--panel-soft); box-shadow:none; margin-top:10px;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <h2 style="margin:0; font-size:13px;">${escapeHtml(group.name)} <span class="pill">${group.kind === 'bill' ? 'subcontractor paid' : 'paid as subcontractor'}</span></h2>
+          <button class="btn-secondary" onclick='printCisStatement(${JSON.stringify(contactId)}, ${JSON.stringify(group.name)}, ${JSON.stringify(group.rows)})'>Print statement</button>
+        </div>
+        <table class="inbox" style="margin-top:8px;">
+          <thead><tr><th>Date</th><th>Description</th><th class="num">Gross</th><th class="num">CIS rate</th><th class="num">CIS deducted</th><th class="num">Net</th></tr></thead>
+          <tbody>${group.rows.map(r => `<tr><td>${fmtDate(r.date)}</td><td>${escapeHtml(r.desc)}</td><td class="num">${fmt(r.gross)}</td><td class="num">${r.cisRate}%</td><td class="num">${fmt(r.cisDeducted)}</td><td class="num">${fmt(r.net)}</td></tr>`).join('')}</tbody>
+        </table>
+        <div style="text-align:right; font-weight:700; font-size:13px; margin-top:6px;">Total CIS: ${fmt(totals.cis)} — Net paid: ${fmt(totals.net)}</div>
+      </div>`;
+  }).join('');
+}
+
+function printCisStatement(contactId, contactName, rows) {
+  const totals = rows.reduce((s, r) => ({ gross: s.gross + r.gross, cis: s.cis + r.cisDeducted, net: s.net + r.net }), { gross: 0, cis: 0, net: 0 });
+  const win = window.open('', '_blank');
+  win.document.write(`<html><head><title>CIS Statement — ${escapeHtml(contactName)}</title><style>
+    body{font-family:-apple-system,sans-serif;padding:32px;color:#111;} h1{font-size:18px;margin-bottom:2px;} .sub{color:#666;font-size:12px;margin-bottom:20px;}
+    table{width:100%;border-collapse:collapse;font-size:13px;} th,td{padding:6px 8px;border-bottom:1px solid #ccc;text-align:left;} td.num,th.num{text-align:right;}
+    .totals{margin-top:16px;font-weight:700;text-align:right;}
+    </style></head><body>
+    <h1>CIS Payment and Deduction Statement</h1>
+    <div class="sub">${escapeHtml(currentCompany.name)} — Subcontractor: ${escapeHtml(contactName)}</div>
+    <table><thead><tr><th>Date</th><th>Description</th><th class="num">Gross</th><th class="num">CIS rate</th><th class="num">CIS deducted</th><th class="num">Net paid</th></tr></thead>
+    <tbody>${rows.map(r => `<tr><td>${fmtDate(r.date)}</td><td>${escapeHtml(r.desc)}</td><td class="num">${fmt(r.gross)}</td><td class="num">${r.cisRate}%</td><td class="num">${fmt(r.cisDeducted)}</td><td class="num">${fmt(r.net)}</td></tr>`).join('')}</tbody></table>
+    <div class="totals">Total gross: ${fmt(totals.gross)} &nbsp; Total CIS deducted: ${fmt(totals.cis)} &nbsp; Total net paid: ${fmt(totals.net)}</div>
+    </body></html>`);
+  win.document.close(); win.focus(); setTimeout(() => win.print(), 300);
+}
+
 function render() {
   renderAccounts(); renderJournal(); renderTrialBalance();
   renderChartOfAccounts(); renderFinancialStatements(); renderBrecTable(); renderFixedAssets();
   renderOpeningBalances(); renderContacts(); renderInvoicesBills(); renderAgingReport();
   renderDashboard(); renderAnomalies(); renderPurchaseOrders(); renderBudgetVsActual(); renderDeptPnl(); renderRatios(); renderPettyCash(); renderCisReturn();
+  renderCisStatements();
 }
 
 function renderAnomalies() {
