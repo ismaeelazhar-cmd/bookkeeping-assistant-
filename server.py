@@ -2781,6 +2781,7 @@ def pay_invoice_bill(company_id, doc_id):
     data = request.get_json(force=True) or {}
     payment_date = data.get("date") or datetime.date.today().isoformat()
     payment_account = data.get("account") or "Cash"
+    cis_deduction = float(data.get("cisDeduction") or 0)
 
     db = get_db()
     doc = db.execute(
@@ -2792,17 +2793,54 @@ def pay_invoice_bill(company_id, doc_id):
         return jsonify({"error": "Only a sent invoice/bill can be marked paid."}), 400
 
     amount = from_pence(doc["amount_pence"])
-    if doc["kind"] == "invoice":
-        debtors_account = resolve_account(db, company_id, "Trade Receivables", "current_asset")
-        debit, credit = payment_account, debtors_account
-    else:
-        creditors_account = resolve_account(db, company_id, "Trade Payables", "current_liability")
-        debit, credit = creditors_account, payment_account
+    if cis_deduction < 0 or cis_deduction > amount:
+        return jsonify({"error": "CIS deduction must be between 0 and the full amount."}), 400
+    net_amount = round(amount - cis_deduction, 2)
 
     try:
-        tx_id = post_ledger_transaction(
-            db, company_id, payment_date, f'Payment: {doc["desc"]}', amount, debit, credit
-        )
+        if not cis_deduction:
+            if doc["kind"] == "invoice":
+                debtors_account = resolve_account(db, company_id, "Trade Receivables", "current_asset")
+                debit, credit = payment_account, debtors_account
+            else:
+                creditors_account = resolve_account(db, company_id, "Trade Payables", "current_liability")
+                debit, credit = creditors_account, payment_account
+            tx_id = post_ledger_transaction(
+                db, company_id, payment_date, f'Payment: {doc["desc"]}', amount, debit, credit
+            )
+        else:
+            # CIS (Construction Industry Scheme): the contractor paying a subcontractor withholds
+            # CIS tax from the payment and owes it to HMRC; the subcontractor being paid has that
+            # same amount withheld but it's recoverable against their own tax bill ("CIS suffered").
+            # Either way the invoice/bill is still settled in FULL — it's just split across two
+            # legs sharing one journal_id instead of one Cash leg for the whole amount.
+            journal_id = uuid.uuid4().hex
+            tx_id = None
+            if doc["kind"] == "invoice":
+                debtors_account = resolve_account(db, company_id, "Trade Receivables", "current_asset")
+                cis_account = resolve_account(db, company_id, "CIS Suffered", "current_asset")
+                if net_amount > 0:
+                    tx_id = post_ledger_transaction(
+                        db, company_id, payment_date, f'Payment: {doc["desc"]}', net_amount,
+                        payment_account, debtors_account, journal_id=journal_id,
+                    )
+                cis_tx_id = post_ledger_transaction(
+                    db, company_id, payment_date, f'CIS suffered: {doc["desc"]}', cis_deduction,
+                    cis_account, debtors_account, journal_id=journal_id,
+                )
+            else:
+                creditors_account = resolve_account(db, company_id, "Trade Payables", "current_liability")
+                cis_account = resolve_account(db, company_id, "CIS Deductions Payable", "current_liability")
+                if net_amount > 0:
+                    tx_id = post_ledger_transaction(
+                        db, company_id, payment_date, f'Payment: {doc["desc"]}', net_amount,
+                        creditors_account, payment_account, journal_id=journal_id,
+                    )
+                cis_tx_id = post_ledger_transaction(
+                    db, company_id, payment_date, f'CIS deducted: {doc["desc"]}', cis_deduction,
+                    creditors_account, cis_account, journal_id=journal_id,
+                )
+            tx_id = tx_id or cis_tx_id
     except LedgerError as e:
         return jsonify({"error": e.message}), e.status
 

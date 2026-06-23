@@ -854,6 +854,12 @@
     </div>
 
     <div class="panel" style="margin-top:20px;">
+      <h2>CIS Monthly Return</h2>
+      <div class="sub" style="margin-bottom:12px;">CIS suffered (deductions withheld from your invoices, recoverable against your tax bill) and CIS deducted on bills you've paid to subcontractors (owed to HMRC) — using the Financial Statements period above. Record a CIS deduction when marking an invoice/bill paid.</div>
+      <table class="trial" id="cis-table" style="margin-top:10px;"></table>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
       <h2>Self Assessment Helper (SA103)</h2>
       <div class="sub" style="margin-bottom:12px;">For sole traders: maps P&amp;L accounts to SA103 self-employment boxes by keyword, using the Financial Statements period above. A starting point for your return, not a substitute for checking each account lands in the right box.</div>
       <button class="btn-secondary" onclick="renderSelfAssessment()">Map to SA103</button>
@@ -1879,7 +1885,7 @@ function render() {
   renderAccounts(); renderJournal(); renderTrialBalance();
   renderChartOfAccounts(); renderFinancialStatements(); renderBrecTable(); renderFixedAssets();
   renderOpeningBalances(); renderContacts(); renderInvoicesBills(); renderAgingReport();
-  renderDashboard(); renderAnomalies(); renderPurchaseOrders(); renderBudgetVsActual(); renderDeptPnl(); renderRatios(); renderPettyCash();
+  renderDashboard(); renderAnomalies(); renderPurchaseOrders(); renderBudgetVsActual(); renderDeptPnl(); renderRatios(); renderPettyCash(); renderCisReturn();
 }
 
 function renderAnomalies() {
@@ -2800,6 +2806,26 @@ function mapAccountToSA103Box(name, type) {
     if (entry.match instanceof RegExp && entry.match.test(name)) return entry.box;
   }
   return 'Box 28 — Other business expenses';
+}
+
+function renderCisReturn() {
+  const table = document.getElementById('cis-table');
+  if (!table) return;
+  const from = document.getElementById('fs-from').value;
+  const to = document.getElementById('fs-to').value;
+  const periodTx = transactions.filter(t => (!from || t.date >= from) && (!to || t.date <= to));
+
+  let cisSuffered = 0, cisDeducted = 0;
+  for (const t of periodTx) {
+    if (t.debit === 'CIS Suffered') cisSuffered += t.amount;
+    if (t.credit === 'CIS Suffered') cisSuffered -= t.amount;
+    if (t.credit === 'CIS Deductions Payable') cisDeducted += t.amount;
+    if (t.debit === 'CIS Deductions Payable') cisDeducted -= t.amount;
+  }
+  table.innerHTML = [
+    lineRow('CIS suffered (recoverable against your tax bill)', cisSuffered),
+    lineRow('CIS deducted from subcontractors (owed to HMRC)', cisDeducted, { total: true }),
+  ].join('');
 }
 
 function renderSelfAssessment() {
@@ -3830,8 +3856,10 @@ async function payInvoiceBill(id) {
   if (!account) return;
   const date = prompt('Payment date (YYYY-MM-DD)?', new Date().toISOString().slice(0, 10));
   if (!date) return;
+  const cisInput = prompt('CIS deduction withheld on this payment, if any (leave blank if not CIS-registered work)?', '');
+  const cisDeduction = cisInput ? parseFloat(cisInput) : 0;
   try {
-    await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/pay`, { method: 'POST', body: JSON.stringify({ account, date }) });
+    await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/pay`, { method: 'POST', body: JSON.stringify({ account, date, cisDeduction }) });
   } catch (e) { alert(e.message); return; }
   await refreshAll();
 }
