@@ -1475,6 +1475,40 @@ def get_brand_logo(company_id):
     return send_from_directory(str(UPLOADS_DIR / directory), filename)
 
 
+@app.route("/api/companies/<int:company_id>/health-summary", methods=["GET"])
+@login_required
+@company_required
+def company_health_summary(company_id):
+    """#20: the data behind the firm/multi-client view on the company picker — cash position,
+    overdue receivables, and bank-rec freshness for ONE company, computed server-side via SQL
+    aggregates rather than loading that company's full transaction list into the browser just
+    to show a glance-able summary card."""
+    db = get_db()
+    today = datetime.date.today().isoformat()
+    cash_pence = db.execute(
+        "SELECT COALESCE(SUM(CASE WHEN t.debit = a.name THEN t.amount_pence ELSE 0 END) "
+        "- SUM(CASE WHEN t.credit = a.name THEN t.amount_pence ELSE 0 END), 0) as cash "
+        "FROM accounts a LEFT JOIN transactions t ON t.company_id = a.company_id "
+        "AND (t.debit = a.name OR t.credit = a.name) AND t.voided_at IS NULL "
+        "WHERE a.company_id = ? AND a.type = 'cash'",
+        (company_id,),
+    ).fetchone()["cash"]
+    overdue = db.execute(
+        "SELECT COUNT(*) as cnt, COALESCE(SUM(amount_pence), 0) as total FROM invoices_bills "
+        "WHERE company_id = ? AND kind = 'invoice' AND status = 'sent' AND due_date < ?",
+        (company_id, today),
+    ).fetchone()
+    last_reconciled = db.execute(
+        "SELECT MAX(statement_date) as d FROM bank_reconciliations WHERE company_id = ? AND status = 'closed'", (company_id,)
+    ).fetchone()["d"]
+    return jsonify({
+        "cash": from_pence(cash_pence),
+        "overdueCount": overdue["cnt"],
+        "overdueTotal": from_pence(overdue["total"]),
+        "lastReconciled": last_reconciled,
+    })
+
+
 @app.route("/api/companies/<int:company_id>/period-lock", methods=["PUT"])
 @login_required
 @company_required

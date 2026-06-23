@@ -1636,10 +1636,31 @@ function renderCompanyList() {
     return;
   }
   list.innerHTML = companies.map(c => `
-    <div class="company-card" onclick="openCompany(${c.id})">
-      <span>${escapeHtml(c.name)} ${c.permission !== 'owner' ? `<span class="pill">shared (${c.permission})</span>` : ''}</span>
-      ${c.permission === 'owner' ? `<button class="btn-danger" onclick="event.stopPropagation(); deleteCompany(${c.id}, '${c.name.replace(/'/g, "\\'")}')">Delete</button>` : ''}
+    <div class="company-card" onclick="openCompany(${c.id})" style="flex-direction:column; align-items:stretch; gap:6px;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span>${escapeHtml(c.name)} ${c.permission !== 'owner' ? `<span class="pill">shared (${c.permission})</span>` : ''}</span>
+        ${c.permission === 'owner' ? `<button class="btn-danger" onclick="event.stopPropagation(); deleteCompany(${c.id}, '${c.name.replace(/'/g, "\\'")}')">Delete</button>` : ''}
+      </div>
+      ${companies.length >= 2 ? `<div id="firm-summary-${c.id}" style="font-size:12px; color:var(--muted);">Loading…</div>` : ''}
     </div>`).join('');
+  if (companies.length >= 2) loadFirmHealthSummaries();
+}
+
+// ---------- Firm/multi-client view (#20, lite) — a quick-glance summary per company on the
+// picker screen, useful once someone (an accountant, or an owner of several businesses) has
+// more than one company to keep an eye on. ----------
+async function loadFirmHealthSummaries() {
+  await Promise.all(companies.map(async c => {
+    const el = document.getElementById(`firm-summary-${c.id}`);
+    if (!el) return;
+    try {
+      const s = await api(`/api/companies/${c.id}/health-summary`);
+      const parts = [`Cash ${fmt(s.cash)}`];
+      if (s.overdueCount) parts.push(`<span style="color:var(--bad);">${s.overdueCount} overdue (${fmt(s.overdueTotal)})</span>`);
+      parts.push(`Bank rec: ${s.lastReconciled ? fmtDate(s.lastReconciled) : 'never'}`);
+      el.innerHTML = parts.join(' · ');
+    } catch (e) { el.textContent = ''; }
+  }));
 }
 
 // ---------- onboarding wizard (business type -> opening balances -> create) ----------
