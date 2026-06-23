@@ -250,6 +250,21 @@
   <div id="toast-container" style="position:fixed; top:16px; right:16px; z-index:200; display:flex; flex-direction:column; gap:8px; max-width:340px;"></div>
 
   <div class="page" data-page="dashboard">
+    <div class="panel" id="health-score-card" style="margin-bottom:16px;">
+      <div style="display:flex; align-items:center; gap:20px;">
+        <div style="text-align:center; flex:0 0 auto;">
+          <div style="font-size:36px; font-weight:800;" id="health-score-number">—</div>
+          <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em;">Business Health</div>
+        </div>
+        <div style="flex:1; min-width:0;">
+          <div id="health-score-bar" style="background:var(--panel-soft); border-radius:5px; height:10px; overflow:hidden; margin-bottom:8px;">
+            <div id="health-score-fill" style="height:100%; border-radius:5px; width:0%; transition:width .3s ease;"></div>
+          </div>
+          <div id="health-score-breakdown" style="font-size:12px; color:var(--muted); display:flex; gap:16px; flex-wrap:wrap;"></div>
+        </div>
+      </div>
+    </div>
+
     <div id="dashboard" class="row2" style="grid-template-columns: repeat(4, 1fr); margin-bottom:16px;">
       <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--text);">
         <div class="sub" style="margin:0;">Cash position</div>
@@ -2418,6 +2433,33 @@ function renderAnomalies() {
     }
   }
 
+  // Missing receipt detection (autonomous evidence collection, lite): any expense/COGS posting
+  // over a threshold with zero attachments — the AI receipt-scan flow only helps if a receipt
+  // actually gets attached, so this is the autonomous nudge for the ones that slipped through.
+  const RECEIPT_THRESHOLD = 20;
+  for (const t of transactions) {
+    const debitType = getAccountType(t.debit);
+    if ((debitType === 'expense' || debitType === 'cogs') && t.amount >= RECEIPT_THRESHOLD && !t.attachmentCount) {
+      anomalies.push({ type: 'Missing receipt', account: t.debit, date: t.date, desc: t.desc, amount: t.amount, why: `${fmt(t.amount)} expense with no attached receipt — attach one via the 📎 button on this entry, or scan it next time with Quick entry's "Scan a receipt".`, txId: t.id });
+    }
+  }
+
+  // Duplicate bill/invoice detection (AI AP/AR agent, lite): same contact, same amount, dated
+  // within 7 days of each other — catches a bill/invoice keyed in twice, the AP/AR equivalent
+  // of the existing duplicate-transaction check above.
+  const sortedDocs = [...invoicesBills].filter(d => d.status !== 'voided').sort((a, b) => a.date.localeCompare(b.date));
+  for (let i = 0; i < sortedDocs.length; i++) {
+    for (let j = i + 1; j < sortedDocs.length; j++) {
+      const a = sortedDocs[i], b = sortedDocs[j];
+      const daysApart = (new Date(b.date) - new Date(a.date)) / 86400000;
+      if (daysApart > 7) break;
+      if (a.id === b.id || a.kind !== b.kind || a.contactId !== b.contactId) continue;
+      if (Math.abs(a.amount - b.amount) < 0.005) {
+        anomalies.push({ type: `Possible duplicate ${b.kind}`, account: b.contactName, date: b.date, desc: b.desc, amount: b.amount, why: `Same contact and amount as a ${a.kind} dated ${fmtDate(a.date)} — check this wasn't keyed in twice.` });
+      }
+    }
+  }
+
   anomalies.sort((a, b) => b.date.localeCompare(a.date));
   document.getElementById('anomaly-count').textContent = `${anomalies.length} flagged`;
   const body = document.getElementById('anomaly-body');
@@ -2460,6 +2502,70 @@ function renderDashboard() {
 
   renderAttentionList();
   renderSpendByCategory();
+  renderHealthScore();
+}
+
+// ---------- Business Health Score (Business Health Digital Twin, lite) ----------
+// Four components, 0-25 each, computed entirely client-side from data already loaded —
+// no new endpoint. Each is a genuinely different signal (cash runway, profitability, how much
+// of receivables is overdue, how stale bank reconciliation is) so the single number means
+// something rather than just restating the cash balance.
+function computeHealthScore() {
+  const accounts = buildAccounts();
+  const names = Object.keys(accounts);
+  const cash = names.filter(n => getAccountType(n) === 'cash').reduce((s, n) => s + accountNetBalance(accounts[n], 'cash'), 0);
+
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+  const recentTx = transactions.filter(t => t.date >= ninetyDaysAgo);
+  const recentAccounts = buildAccountsFromTx(recentTx, false);
+  let revenue = 0, cogs = 0, expenses = 0;
+  for (const name of Object.keys(recentAccounts)) {
+    const type = getAccountType(name);
+    const balance = accountNetBalance(recentAccounts[name], type);
+    if (type === 'revenue') revenue += balance;
+    else if (type === 'cogs') cogs += balance;
+    else if (type === 'expense') expenses += balance;
+  }
+  const monthlyBurn = (cogs + expenses) / 3;
+  const runwayMonths = cash <= 0 ? 0 : (monthlyBurn > 0 ? cash / monthlyBurn : 12);
+  const runwayScore = Math.max(0, Math.min(25, (runwayMonths / 6) * 25));
+
+  const margin = revenue > 0 ? (revenue - cogs - expenses) / revenue : 0;
+  const marginScore = Math.max(0, Math.min(25, ((margin + 0.1) / 0.3) * 25));
+
+  const outstanding = invoicesBills.filter(d => d.kind === 'invoice' && d.status !== 'paid' && d.status !== 'draft');
+  const overdue = outstanding.filter(d => d.displayStatus === 'overdue');
+  const overdueRatio = outstanding.length ? overdue.reduce((s, d) => s + d.amount, 0) / outstanding.reduce((s, d) => s + d.amount, 0) : 0;
+  const overdueScore = Math.max(0, 25 - overdueRatio * 25);
+
+  const lastReconciled = reconciliations.filter(r => r.status === 'closed').reduce((max, r) => r.statementDate > max ? r.statementDate : max, '');
+  const daysSinceReconciled = lastReconciled ? (Date.now() - new Date(lastReconciled).getTime()) / 86400000 : Infinity;
+  const reconScore = daysSinceReconciled <= 31 ? 25 : Math.max(0, 25 - (daysSinceReconciled - 31) / 2);
+
+  const total = Math.round(runwayScore + marginScore + overdueScore + reconScore);
+  return {
+    total,
+    components: [
+      { label: 'Cash runway', value: cash <= 0 ? '0mo' : (monthlyBurn > 0 ? `${runwayMonths.toFixed(1)}mo` : '6mo+'), score: runwayScore },
+      { label: 'Profit margin (90d)', value: `${(margin * 100).toFixed(0)}%`, score: marginScore },
+      { label: 'Overdue receivables', value: `${(overdueRatio * 100).toFixed(0)}%`, score: overdueScore },
+      { label: 'Bank rec freshness', value: lastReconciled ? `${Math.round(daysSinceReconciled)}d ago` : 'never', score: reconScore },
+    ],
+  };
+}
+
+function renderHealthScore() {
+  const card = document.getElementById('health-score-number');
+  if (!card) return;
+  const { total, components } = computeHealthScore();
+  const color = total >= 70 ? 'var(--good)' : total >= 40 ? '#B45309' : 'var(--bad)';
+  document.getElementById('health-score-number').textContent = total;
+  document.getElementById('health-score-number').style.color = color;
+  document.getElementById('health-score-fill').style.width = `${total}%`;
+  document.getElementById('health-score-fill').style.background = color;
+  document.getElementById('health-score-breakdown').innerHTML = components.map(c =>
+    `<span><strong style="color:var(--text);">${escapeHtml(c.value)}</strong> ${escapeHtml(c.label)}</span>`
+  ).join('');
 }
 
 function renderAttentionList() {
@@ -2988,6 +3094,7 @@ async function loadRecurringJournals() {
 async function loadReconciliationHistory() {
   reconciliations = await api(`/api/companies/${currentCompany.id}/reconciliations`);
   renderReconciliationHistory();
+  renderHealthScore();
 }
 
 function renderReconciliationHistory() {
