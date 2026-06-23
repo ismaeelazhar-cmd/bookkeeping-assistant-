@@ -22,12 +22,17 @@ A multi-tenant double-entry bookkeeping web app: log in, create one or more comp
 
 ## Tax & compliance
 
-- **VAT engine**: per-transaction rate and direction, automatic splitting into Net + VAT Control Account + Gross postings, and a VAT Return report (Boxes 1/4/5/6/7) for any date range. See `docs/MTD-evaluation.md` for why direct HMRC submission isn't built (yet) and what the pragmatic interim is.
+- **VAT engine**: per-transaction rate and direction, automatic splitting into Net + VAT Control Account + Gross postings, and a VAT Return report (Boxes 1/4/5/6/7) for any date range.
+- **Making Tax Digital (HMRC) submission**: OAuth connection, obligations check, and direct VAT-return submission via HMRC's API, with a **filing history** of what was actually submitted and HMRC's response. Submission itself is unverified against a real HMRC account — it needs the user's own application registered on HMRC's Developer Hub.
+- **Mileage log**: logs a business trip and posts the HMRC-approved mileage claim (45p/25p taper at 10,000 miles, flat rates for motorcycle/bicycle) straight to the ledger.
+- **CIS (Construction Industry Scheme)**: split-leg postings for CIS suffered/deducted at payment time, plus a per-subcontractor **Payment and Deduction Statement** view with a printable document.
 - **Fixed asset register**: register an asset, run straight-line or reducing-balance depreciation per month as a normal ledger posting (flows into the P&L and reduces net book value automatically).
 
 ## Sales & purchases
 
 - **Contacts** (customers/suppliers) and real **Invoices/Bills** with a draft → sent → paid lifecycle. Sending posts to Trade Receivables/Payables (with VAT if set); paying settles it. Deleting one voids its linked ledger postings rather than leaving orphans.
+- **Invoice PDFs**: a real PDF (logo, business address, payment terms, bank details — all from Settings → Branding) generated with `fpdf2` (pure-Python, no system libraries), downloadable per invoice/bill and emailable as an attachment.
+- **Customer payment portal**: every sent invoice gets an unguessable `/portal/<token>` link — a public, read-only page showing the invoice, with a "Pay now" button once Stripe keys are configured (falls back to read-only if not). Paying through Stripe Checkout auto-posts the payment and marks the invoice paid via a signature-verified webhook.
 - **Aging report** bucketing outstanding invoices/bills by days overdue.
 
 ## Reporting & analysis
@@ -45,7 +50,17 @@ A multi-tenant double-entry bookkeeping web app: log in, create one or more comp
 
 ## AI integration
 
-The Claude API key is **write-only** — once set, it's never serialized back to the browser in any API response, and the actual Anthropic API call happens server-side (`server.py`'s `call_claude`), not from client-side JavaScript. Used for: Movements Inbox categorization, receipt OCR, and Ask Your Ledger.
+The Claude API key is **write-only** — once set, it's never serialized back to the browser in any API response, and the actual Anthropic API call happens server-side (`server.py`'s `call_claude`), not from client-side JavaScript. Used for: Movements Inbox categorization, receipt OCR (including a pre-transaction "scan a receipt" flow in Quick Entry that pre-fills the form before anything is posted), and Ask Your Ledger.
+
+## Business health & automation
+
+- **Business Health Score**: a single 0-100 dashboard number from four independent signals — cash runway (months), 90-day profit margin, % of receivables overdue, and days since the last closed bank reconciliation.
+- **Missing-receipt detection**: flags expense/COGS postings over £20 with no attached receipt, in the same Anomalies panel as the existing duplicate-transaction and unusual-balance checks; extended to also catch duplicate bills/invoices (same contact + amount within 7 days).
+- **Onboarding wizard**: business-type chart-of-accounts templates (retail/service/construction) and opening balances posted as real ledger entries, instead of a blank chart on day one.
+- **Demo mode**: one click from the login screen, no signup — spins up a throwaway account and a pre-seeded "Riverside Plumbing & Heating" company with 6 months of sample transactions.
+- **Quick entry mode**: a stripped-down transaction form (date/description/amount/category) for the common case, hiding VAT/FX/fund/department fields behind a toggle; posts against the company's default credit account automatically.
+- **Cash flow what-if scenarios**: overlay a hypothetical amount/date on the existing Cash Flow Forecast without touching the real ledger.
+- **Accountant collaboration**: a "comment" permission tier (between view and post) that can leave transaction comments and lock periods, but can't post or delete a transaction — for an invited accountant who needs more than view-only without full write access.
 
 ## Running locally
 
@@ -84,8 +99,14 @@ gunicorn -c gunicorn.conf.py server:app
 
 Set the `SECRET_KEY` env var to hand the session secret to the app via your deploy platform's config instead of relying on the on-disk `.secret_key` file — it takes priority when set. `FLASK_HTTPS=1` is for *local* dev convenience only (a throwaway self-signed cert via Werkzeug's `ssl_context="adhoc"`, for testing anything that needs a secure context); it is not a substitute for #2 above and should never be set in production.
 
+**4. (Optional) A real cron job for notifications.** The daily digest email (overdue invoices, VAT deadlines, stale bank-rec) is currently triggered from the dashboard load — fine for an app someone opens daily, but a company nobody logs into for a week won't get notified. For that, add an actual cron entry hitting `POST /api/companies/<id>/run-notifications-check` once a day per company (it's already deduped server-side, so calling it more than once a day is harmless, just a no-op after the first).
+
+**5. (Optional) A Stripe webhook, if using the customer payment portal.** In the Stripe Dashboard, add a webhook endpoint pointing at `https://yourdomain.com/webhooks/stripe` listening for `checkout.session.completed`, then paste the resulting signing secret into Settings → Online Payments → Webhook signing secret. Without this, a customer can still pay via the portal, but the invoice won't auto-mark-paid on this end — it'll need reconciling manually.
+
 ## Status
 
 Hardened so far: persistent session secret, basic rate limiting on auth endpoints, CSRF protection (Origin/Referer validation on state-changing requests), AI API key encrypted at rest (separate key file from the session secret), a full JSON backup endpoint, and server-side-only AI key handling (the key is write-only — never serialized back to the browser in any response). **Still not built**: 2FA backup/recovery codes (losing your authenticator device currently means losing account access — there's no recovery flow), and a built-in automated backup schedule (the export endpoint exists; nothing calls it on a timer).
 
-**Deliberately not built**: real consolidation accounting (intercompany eliminations, minority interest) — the multi-entity consolidation feature is a plain aggregation, documented as such; fund-level opening balances and cumulative funds-carried-forward across periods for the SOFA report.
+**Deliberately not built**: real consolidation accounting (intercompany eliminations, minority interest) — the multi-entity consolidation feature is a plain aggregation, documented as such; fund-level opening balances and cumulative funds-carried-forward across periods for the SOFA report; a background job scheduler/event bus/data warehouse or any other heavy platform infrastructure — this is a single Flask+SQLite app, and that scale of architecture would be scaffolding with nothing real behind it, not a feature.
+
+**Unverified against real third-party accounts** (the code path is real and tested with fake/local data, but needs the user's own credentials to confirm end-to-end): Making Tax Digital submission needs a real HMRC Developer Hub application; the Stripe customer-payment portal needs a real Stripe account and API keys; SMTP-based emails/notifications need real mail server credentials. Stripe Checkout session creation, the PDF generator, and the public portal page are all verified working with placeholder/no credentials — only the actual money-moving and email-sending steps are unverified.
