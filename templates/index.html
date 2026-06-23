@@ -509,6 +509,38 @@
       <button class="btn-primary" onclick="postDividend()">Post dividend</button>
       <div id="div-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <h2>Mileage Log</h2>
+      <div class="sub" style="margin-bottom:12px;">Business trips in your own vehicle, claimed at HMRC's approved mileage rate (45p/mile for the first 10,000 business miles in the tax year, 25p after — flat rates for motorcycle/bicycle). Posts straight to the ledger as a Mileage Expense.</div>
+      <div class="row2">
+        <div><label>Date</label><input type="date" id="ml-date"></div>
+        <div><label>Vehicle</label>
+          <select id="ml-vehicle">
+            <option value="car">Car</option>
+            <option value="van">Van</option>
+            <option value="motorcycle">Motorcycle</option>
+            <option value="bicycle">Bicycle</option>
+          </select>
+        </div>
+      </div>
+      <div class="row2">
+        <div><label>From</label><input type="text" id="ml-from" placeholder="e.g. Home office"></div>
+        <div><label>To</label><input type="text" id="ml-to" placeholder="e.g. Client site"></div>
+      </div>
+      <div class="row2">
+        <div><label>Miles</label><input type="number" id="ml-miles" step="0.1" min="0" placeholder="0.0"></div>
+        <div><label>Reimbursed via <span style="color:var(--muted); font-weight:400;">(credit account)</span></label><input type="text" id="ml-credit-account" list="account-list" value="Director's Loan Account"></div>
+      </div>
+      <label>Purpose</label>
+      <input type="text" id="ml-purpose" placeholder="e.g. Site visit — Hartley job">
+      <button class="btn-primary" onclick="postMileage()">Log trip &amp; post to ledger</button>
+      <div id="ml-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+      <table class="inbox" style="margin-top:14px;">
+        <thead><tr><th>Date</th><th>Trip</th><th>Purpose</th><th class="num">Miles</th><th class="num">Claim</th><th></th></tr></thead>
+        <tbody id="mileage-log-body"></tbody>
+      </table>
+    </div>
   </div>
 
   <div class="page" data-page="bank" style="display:none;">
@@ -1857,6 +1889,7 @@ async function refreshAll() {
   renderCashFlowForecast();
   renderMonthlyPnL();
   await loadStockItems();
+  await loadMileageLog();
 }
 
 function suggestFromDescription() {
@@ -4589,6 +4622,60 @@ async function postDividend(force) {
   showToast(`Dividend posted — ${fmt(amount)}. Distributable reserves remaining: ${fmt(result.availableReserves - amount)}.`, 'success');
   statusEl.textContent = '';
   document.getElementById('div-amount').value = '';
+  await refreshAll();
+}
+
+// ---------- Mileage log (#17) ----------
+let mileageLog = [];
+
+async function loadMileageLog() {
+  mileageLog = await api(`/api/companies/${currentCompany.id}/mileage-log`);
+  renderMileageLog();
+}
+
+function renderMileageLog() {
+  const body = document.getElementById('mileage-log-body');
+  if (!body) return;
+  body.innerHTML = mileageLog.length ? mileageLog.map(m => `
+    <tr>
+      <td>${fmtDate(m.date)}</td>
+      <td>${escapeHtml(m.fromLocation)} → ${escapeHtml(m.toLocation)}</td>
+      <td>${escapeHtml(m.purpose)}</td>
+      <td class="num">${m.miles}</td>
+      <td class="num">${fmt(m.amount)}</td>
+      <td><button class="btn-danger" onclick="deleteMileageEntry(${m.id})">✕</button></td>
+    </tr>`).join('') : '<tr><td colspan="6" class="empty">No trips logged yet.</td></tr>';
+}
+
+async function postMileage() {
+  const date = document.getElementById('ml-date').value;
+  const vehicleType = document.getElementById('ml-vehicle').value;
+  const fromLocation = document.getElementById('ml-from').value.trim();
+  const toLocation = document.getElementById('ml-to').value.trim();
+  const miles = parseFloat(document.getElementById('ml-miles').value);
+  const creditAccount = document.getElementById('ml-credit-account').value.trim() || "Director's Loan Account";
+  const purpose = document.getElementById('ml-purpose').value.trim();
+  const statusEl = document.getElementById('ml-status');
+  if (!date || !fromLocation || !toLocation || !purpose || !miles || miles <= 0) {
+    statusEl.textContent = 'Fill in date, from, to, purpose, and a positive mileage.'; return;
+  }
+  try {
+    const result = await api(`/api/companies/${currentCompany.id}/mileage-log`, {
+      method: 'POST', body: JSON.stringify({ date, vehicleType, fromLocation, toLocation, miles, creditAccount, purpose }),
+    });
+    showToast(`Logged ${miles} miles — ${fmt(result.amount)} claim posted.`, 'success');
+  } catch (e) { statusEl.textContent = e.message; showToast(e.message, 'error'); return; }
+  statusEl.textContent = '';
+  document.getElementById('ml-from').value = '';
+  document.getElementById('ml-to').value = '';
+  document.getElementById('ml-miles').value = '';
+  document.getElementById('ml-purpose').value = '';
+  await refreshAll();
+}
+
+async function deleteMileageEntry(id) {
+  if (!(await confirmAction('Delete this mileage entry? This also voids the linked ledger transaction.'))) return;
+  await api(`/api/companies/${currentCompany.id}/mileage-log/${id}`, { method: 'DELETE' });
   await refreshAll();
 }
 

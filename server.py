@@ -337,6 +337,24 @@ def init_db():
             uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- #17: mileage log for sole traders/directors using their own vehicle for business
+        -- trips — HMRC's Approved Mileage Allowance Payments (AMAP) scheme, claimed instead of
+        -- tracking actual fuel/running costs.
+        CREATE TABLE IF NOT EXISTS mileage_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            date TEXT NOT NULL,
+            tax_year TEXT NOT NULL,
+            from_location TEXT NOT NULL,
+            to_location TEXT NOT NULL,
+            miles REAL NOT NULL,
+            purpose TEXT NOT NULL,
+            vehicle_type TEXT NOT NULL DEFAULT 'car',
+            amount_pence INTEGER NOT NULL,
+            transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- #14: free-text notes on a transaction ("Asked John about this — waiting for receipt"),
         -- separate from the audit log since these are conversational, not a record of what
         -- changed in the ledger.
@@ -4088,6 +4106,121 @@ def period_close(company_id):
 
 
 # ---------- payroll journal wizard ----------
+
+def amap_rate_pence(vehicle_type):
+    """HMRC Approved Mileage Allowance Payments rates (2024/25). Cars/vans taper from 45p to 25p
+    after the first 10,000 business miles in a tax year; motorcycles and bicycles are flat."""
+    return {"car": (45, 25, 10000), "van": (45, 25, 10000), "motorcycle": (24, 24, None), "bicycle": (20, 20, None)}.get(
+        vehicle_type, (45, 25, 10000)
+    )
+
+
+def compute_mileage_amount_pence(miles_before_this_trip, miles_this_trip, vehicle_type):
+    """Splits a trip's miles across the 10,000-mile-per-tax-year threshold if it straddles it —
+    e.g. a 200-mile trip starting at mile 9,950 charges 50 miles at the higher rate and 150 at
+    the lower one, rather than rounding the whole trip to one rate."""
+    high_rate, low_rate, threshold = amap_rate_pence(vehicle_type)
+    if threshold is None:
+        return round(miles_this_trip * high_rate)
+    miles_at_high = max(0, min(miles_this_trip, threshold - miles_before_this_trip))
+    miles_at_low = miles_this_trip - miles_at_high
+    return round(miles_at_high * high_rate + miles_at_low * low_rate)
+
+
+@app.route("/api/companies/<int:company_id>/mileage-log", methods=["GET"])
+@login_required
+@company_required
+def list_mileage_log(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, date, tax_year as taxYear, from_location as fromLocation, to_location as toLocation, "
+        "miles, purpose, vehicle_type as vehicleType, amount_pence as amountPence, transaction_id as transactionId "
+        "FROM mileage_log WHERE company_id = ? ORDER BY date DESC", (company_id,),
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["amount"] = from_pence(d.pop("amountPence"))
+        out.append(d)
+    return jsonify(out)
+
+
+@app.route("/api/companies/<int:company_id>/mileage-log", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def add_mileage_log(company_id):
+    """Logs a business trip, computes the AMAP claim against miles already logged this tax
+    year, and posts it straight to the ledger (DR Mileage Expense, CR the chosen liability/cash
+    account — typically Director's Loan Account if the driver is reimbursed later, or Cash if
+    paid immediately) so it shows up in expenses without a second manual entry."""
+    data = request.get_json(force=True) or {}
+    date = data.get("date")
+    from_location = (data.get("fromLocation") or "").strip()
+    to_location = (data.get("toLocation") or "").strip()
+    purpose = (data.get("purpose") or "").strip()
+    vehicle_type = data.get("vehicleType") or "car"
+    credit_account = (data.get("creditAccount") or "Director's Loan Account").strip()
+    try:
+        miles = float(data.get("miles") or 0)
+    except (TypeError, ValueError):
+        miles = 0
+
+    if not date or not from_location or not to_location or not purpose or miles <= 0:
+        return jsonify({"error": "Date, from, to, purpose, and a positive mileage are required."}), 400
+    if is_locked(g.company, date):
+        return jsonify({"error": f"This period is locked until {g.company['locked_until']}."}), 423
+
+    db = get_db()
+    tax_year = compute_tax_year(date, g.company["period_start_date"])
+    miles_before = db.execute(
+        "SELECT COALESCE(SUM(miles), 0) as total FROM mileage_log WHERE company_id = ? AND tax_year = ? AND vehicle_type = ?",
+        (company_id, tax_year, vehicle_type),
+    ).fetchone()["total"]
+    amount_pence = compute_mileage_amount_pence(miles_before, miles, vehicle_type)
+    amount = from_pence(amount_pence)
+
+    try:
+        transaction_id = post_ledger_transaction(
+            db, company_id, date, f"Mileage — {from_location} to {to_location} ({purpose})",
+            amount, "Mileage Expense", credit_account,
+        )
+    except LedgerError as e:
+        return jsonify({"error": e.message}), e.status
+
+    cur = db.execute(
+        "INSERT INTO mileage_log (company_id, date, tax_year, from_location, to_location, miles, purpose, vehicle_type, amount_pence, transaction_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (company_id, date, tax_year, from_location, to_location, miles, purpose, vehicle_type, amount_pence, transaction_id),
+    )
+    db.commit()
+    return jsonify({
+        "id": cur.lastrowid, "date": date, "taxYear": tax_year, "fromLocation": from_location, "toLocation": to_location,
+        "miles": miles, "purpose": purpose, "vehicleType": vehicle_type, "amount": amount, "transactionId": transaction_id,
+        "milesBeforeThisTrip": miles_before,
+    })
+
+
+@app.route("/api/companies/<int:company_id>/mileage-log/<int:entry_id>", methods=["DELETE"])
+@login_required
+@company_required
+@write_required
+def delete_mileage_log(company_id, entry_id):
+    db = get_db()
+    row = db.execute(
+        "SELECT transaction_id FROM mileage_log WHERE id = ? AND company_id = ?", (entry_id, company_id)
+    ).fetchone()
+    if row is None:
+        return jsonify({"ok": True})
+    if row["transaction_id"]:
+        tx = db.execute("SELECT * FROM transactions WHERE id = ?", (row["transaction_id"],)).fetchone()
+        if tx is not None:
+            db.execute("UPDATE transactions SET voided_at = ?, voided_by = ? WHERE id = ?",
+                       (datetime.datetime.utcnow().isoformat(), session.get("email", "unknown"), tx["id"]))
+    db.execute("DELETE FROM mileage_log WHERE id = ?", (entry_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
 
 @app.route("/api/companies/<int:company_id>/payroll-journal", methods=["POST"])
 @login_required
