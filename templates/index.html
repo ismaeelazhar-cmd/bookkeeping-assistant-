@@ -241,6 +241,7 @@
       <input type="search" id="global-search" placeholder="Search transactions, accounts, contacts…"
              oninput="runGlobalSearch()" style="width:220px; display:inline-block; margin-right:10px; vertical-align:middle;">
       <span id="who-email-2" style="margin-right:10px; color:var(--muted); font-size:13px;"></span>
+      <button class="btn-secondary" style="margin-top:0;" onclick="openShortcutsModal()" title="Keyboard shortcuts">⌨</button>
       <button class="btn-secondary" style="margin-top:0;" onclick="goToCompanyPicker()">Switch company</button>
       <button class="btn-secondary" style="margin-top:0;" onclick="logout(event)">Log out</button>
     </div>
@@ -1169,6 +1170,21 @@
   </div>
 </div>
 
+<div id="shortcuts-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:60; align-items:center; justify-content:center;" onclick="if(event.target===this) closeShortcutsModal()">
+  <div class="panel" style="width:380px;">
+    <h2>Keyboard Shortcuts</h2>
+    <table class="inbox">
+      <tbody>
+        <tr><td><span class="pill">Ctrl/Cmd + Enter</span></td><td>Post the transaction in the New Transaction form</td></tr>
+        <tr><td><span class="pill">Ctrl/Cmd + K</span></td><td>Jump to the search bar</td></tr>
+        <tr><td><span class="pill">?</span></td><td>Open this panel</td></tr>
+        <tr><td><span class="pill">Esc</span></td><td>Close any open panel/modal</td></tr>
+      </tbody>
+    </table>
+    <button class="btn-secondary" style="width:100%; margin-top:14px;" onclick="closeShortcutsModal()">Close</button>
+  </div>
+</div>
+
 <div id="drilldown-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:50; align-items:center; justify-content:center;">
   <div class="panel" style="width:580px; max-height:80vh; overflow:auto;">
     <h2 id="drilldown-title">Account</h2>
@@ -1267,6 +1283,30 @@ async function submitAuth() {
     errEl.textContent = e.message;
   }
 }
+
+// ---------- keyboard shortcuts (#13): Ctrl/Cmd+Enter to post already existed; this surfaces
+// the full list and adds a couple more globally useful ones rather than leaving them undiscoverable. ----------
+function openShortcutsModal() { document.getElementById('shortcuts-overlay').style.display = 'flex'; }
+function closeShortcutsModal() { document.getElementById('shortcuts-overlay').style.display = 'none'; }
+
+document.addEventListener('keydown', (e) => {
+  const tag = (e.target.tagName || '').toLowerCase();
+  const typing = tag === 'input' || tag === 'textarea' || tag === 'select';
+  if (e.key === 'Escape') {
+    document.querySelectorAll('[id$="-overlay"]').forEach(el => { if (el.style.display !== 'none') el.style.display = 'none'; });
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    const search = document.getElementById('global-search');
+    if (search) search.focus();
+    return;
+  }
+  if (e.key === '?' && !typing) {
+    e.preventDefault();
+    openShortcutsModal();
+  }
+});
 
 async function startDemo(event) {
   if (event) event.preventDefault();
@@ -2039,7 +2079,7 @@ function renderAccounts() {
     const creditLines = acc.credits.map(t => `<div class="tline"><span class="desc" title="${escapeHtml(t.desc)}${vatTag(t)} (vs ${escapeHtml(t.debit)})">${fmtDate(t.date)} — ${escapeHtml(t.desc)}${vatTag(t)}</span><span class="amt credit">${fmt(t.amount)}</span></div>`).join('') || '<div class="tline" style="color:var(--muted)">—</div>';
     return `
       <div class="taccount">
-        <div class="taccount-title"><span>${escapeHtml(name)}</span><span class="bal">${balLabel}</span></div>
+        <div class="taccount-title"><span>${accountTypeDot(name)}${escapeHtml(name)}</span><span class="bal">${balLabel}</span></div>
         <div class="tbody">
           <div class="tside debit"><div class="tside-label">Debit</div>${debitLines}</div>
           <div class="tside credit"><div class="tside-label">Credit</div>${creditLines}</div>
@@ -2071,8 +2111,8 @@ function renderJournal() {
   tbody.innerHTML = sorted.length ? sorted.map(t => `
     <tr>
       <td>${fmtDate(t.date)}</td><td>${escapeHtml(t.desc)}${t.journalId ? ` <span class="pill" title="Part of a compound journal — other legs share this ID">journal ${t.journalId.slice(0,6)}</span>` : ''}</td>
-      <td style="color:var(--debit)">${escapeHtml(t.debit)}</td>
-      <td style="color:var(--credit)">${escapeHtml(t.credit)}</td>
+      <td style="color:var(--debit)">${accountTypeDot(t.debit)}${escapeHtml(t.debit)}</td>
+      <td style="color:var(--credit)">${accountTypeDot(t.credit)}${escapeHtml(t.credit)}</td>
       <td class="num">${fmt(t.amount)}</td>
       <td>${t.vatDirection ? `<span class="pill">${t.vatRate}% ${t.vatDirection}</span>` : ''}</td>
       <td>
@@ -2946,6 +2986,20 @@ const ACCOUNT_TYPE_LABELS = {
 const DEBIT_NORMAL = { cash: true, cogs: true, expense: true, current_asset: true, noncurrent_asset: true, drawings: true,
   revenue: false, current_liability: false, noncurrent_liability: false, equity: false };
 
+// Account-type colour coding (#11) — a quick visual category at a glance when scanning the
+// chart of accounts or a T-account heading, rather than everything being the same colour.
+const ACCOUNT_TYPE_COLORS = {
+  cash: '#0A7EA4', current_asset: '#5B7A99', noncurrent_asset: '#5B7A99',
+  revenue: '#1A7A4E', cogs: '#92400E', expense: '#C53030',
+  current_liability: '#92400E', noncurrent_liability: '#92400E',
+  equity: '#6B46C1', drawings: '#6B46C1',
+};
+function accountTypeDot(typeOrName) {
+  const type = ACCOUNT_TYPE_LABELS[typeOrName] ? typeOrName : getAccountType(typeOrName);
+  const color = ACCOUNT_TYPE_COLORS[type] || 'var(--muted)';
+  return `<span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${color}; margin-right:7px; flex:0 0 auto;"></span>`;
+}
+
 function renderChartOfAccounts() {
   const body = document.getElementById('coa-body');
   const filterEl = document.getElementById('coa-filter');
@@ -2958,7 +3012,7 @@ function renderChartOfAccounts() {
       `<option value="${val}" ${val === a.type ? 'selected' : ''}>${label}</option>`).join('');
     return `<tr>
       <td>${escapeHtml(a.code)}</td>
-      <td>${escapeHtml(a.name)}</td>
+      <td>${accountTypeDot(a.type)}${escapeHtml(a.name)}</td>
       <td><select onchange="updateChartAccountType(${a.id}, this.value)">${options}</select></td>
       <td><button class="btn-danger" onclick="deleteChartAccount(${a.id}, '${a.name.replace(/'/g, "\\'")}')">✕</button></td>
     </tr>`;
