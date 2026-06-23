@@ -1198,6 +1198,11 @@
       <label>Send digest to</label>
       <input type="email" id="notify-email" placeholder="you@example.com" oninput="saveSettings()">
 
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); margin:16px 0 0;">
+        <input type="checkbox" id="auto-chase-enabled" style="width:auto;" onchange="saveSettings()"> Automatically email customers about overdue invoices
+      </label>
+      <div class="sub" style="margin:4px 0 0;">Sends the same reminder as the manual "Remind" button, at most once a week per invoice, to whoever's on file for that customer — separate from the digest above, which only emails you. Off by default since this emails your customers directly.</div>
+
       <h2 style="margin-top:20px; font-size:13px;">Outbound email (SMTP)</h2>
       <div class="sub" style="margin-bottom:8px;">Works with any provider — Gmail, SendGrid, AWS SES, or your own mail server's SMTP credentials. Also used to email invoice PDFs to customers.</div>
       <div class="row2">
@@ -1787,6 +1792,7 @@ async function openCompany(id) {
   document.getElementById('brand-bank-details').value = currentCompany.brand_bank_details || '';
   renderBrandLogoPreview();
   document.getElementById('notify-enabled').checked = !!currentCompany.notifications_enabled;
+  document.getElementById('auto-chase-enabled').checked = !!currentCompany.auto_chase_overdue_invoices;
   document.getElementById('notify-email').value = currentCompany.notify_email || '';
   document.getElementById('smtp-host').value = currentCompany.smtp_host || '';
   document.getElementById('smtp-port').value = currentCompany.smtp_port || 587;
@@ -1839,6 +1845,7 @@ function buildSettingsPayload(extra) {
     brandPaymentTerms: document.getElementById('brand-payment-terms').value,
     brandBankDetails: document.getElementById('brand-bank-details').value,
     notificationsEnabled: document.getElementById('notify-enabled').checked,
+    autoChaseOverdueInvoices: document.getElementById('auto-chase-enabled').checked,
     notifyEmail: document.getElementById('notify-email').value.trim(),
     smtpHost: document.getElementById('smtp-host').value.trim(),
     smtpPort: parseInt(document.getElementById('smtp-port').value, 10) || 587,
@@ -4727,6 +4734,7 @@ function renderInvoicesBills() {
       actions.push(`<a href="/api/companies/${currentCompany.id}/invoices-bills/${d.id}/pdf" target="_blank" class="btn-secondary" style="display:inline-block; text-decoration:none;">PDF</a>`);
       actions.push(`<button class="btn-secondary" onclick="emailInvoiceBill(${d.id})">Email</button>`);
       if (d.kind === 'invoice') actions.push(`<button class="btn-secondary" onclick="copyPortalLink(${d.id})">Copy link</button>`);
+      if (d.kind === 'invoice' && d.displayStatus === 'overdue') actions.push(`<button class="btn-secondary" style="color:var(--bad);" onclick="remindInvoiceBill(${d.id})">Remind</button>`);
     }
     actions.push(`<button class="btn-danger" onclick="deleteInvoiceBill(${d.id})">✕</button>`);
     const kindLabel = { invoice: 'Invoice', bill: 'Bill', credit_note: 'Credit note' }[d.kind] || d.kind;
@@ -4796,6 +4804,13 @@ async function emailInvoiceBill(id) {
   try {
     const result = await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/email`, { method: 'POST' });
     showToast(`Emailed to ${result.sentTo}.`, 'success');
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function remindInvoiceBill(id) {
+  try {
+    const result = await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/send-reminder`, { method: 'POST' });
+    showToast(`Reminder sent to ${result.sentTo}.`, 'success');
   } catch (e) { showToast(e.message, 'error'); }
 }
 

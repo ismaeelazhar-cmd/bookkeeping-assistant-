@@ -160,7 +160,7 @@ def check_csrf_origin():
         return jsonify({"error": "Cross-origin request blocked."}), 403
 
 
-SCHEMA_VERSION = 5  # bumped for #6/#7/#9/#20: SMTP, branding, Stripe, portal tokens
+SCHEMA_VERSION = 6  # bumped for #6/#20: companies.auto_chase_overdue_invoices
 
 
 def init_db():
@@ -715,6 +715,12 @@ def init_db():
         db.execute("ALTER TABLE companies ADD COLUMN stripe_payment_account TEXT DEFAULT 'Cash'")
     if "last_notification_run" not in company_cols:
         db.execute("ALTER TABLE companies ADD COLUMN last_notification_run TEXT DEFAULT ''")
+    if "auto_chase_overdue_invoices" not in company_cols:
+        # #6/#20: opt-in autonomous AR chasing — emails the CUSTOMER directly about their
+        # overdue invoice, distinct from notify_email's internal digest to the business owner.
+        # Off by default: auto-emailing a customer is a much bigger behavioural change than an
+        # internal nudge, and shouldn't start happening just because SMTP got configured.
+        db.execute("ALTER TABLE companies ADD COLUMN auto_chase_overdue_invoices INTEGER DEFAULT 0")
     db.execute("DELETE FROM schema_meta")
     db.execute("INSERT INTO schema_meta (version) VALUES (?)", (SCHEMA_VERSION,))
     db.commit()
@@ -1255,7 +1261,7 @@ def list_companies():
         "hmrc_client_id, hmrc_client_secret, hmrc_env, hmrc_vrn, hmrc_access_token, "
         "smtp_host, smtp_port, smtp_username, smtp_password, smtp_from_email, notifications_enabled, notify_email, "
         "brand_logo_path, brand_color, brand_display_name, brand_address, brand_payment_terms, brand_bank_details, "
-        "stripe_secret_key, stripe_publishable_key, stripe_webhook_secret, stripe_payment_account, "
+        "stripe_secret_key, stripe_publishable_key, stripe_webhook_secret, stripe_payment_account, auto_chase_overdue_invoices, "
         "'owner' as permission "
         "FROM companies WHERE user_id = ? "
         "UNION ALL "
@@ -1264,7 +1270,7 @@ def list_companies():
         "c.hmrc_client_id, c.hmrc_client_secret, c.hmrc_env, c.hmrc_vrn, c.hmrc_access_token, "
         "c.smtp_host, c.smtp_port, c.smtp_username, c.smtp_password, c.smtp_from_email, c.notifications_enabled, c.notify_email, "
         "c.brand_logo_path, c.brand_color, c.brand_display_name, c.brand_address, c.brand_payment_terms, c.brand_bank_details, "
-        "c.stripe_secret_key, c.stripe_publishable_key, c.stripe_webhook_secret, c.stripe_payment_account, "
+        "c.stripe_secret_key, c.stripe_publishable_key, c.stripe_webhook_secret, c.stripe_payment_account, c.auto_chase_overdue_invoices, "
         "cm.permission "
         "FROM companies c JOIN company_members cm ON cm.company_id = c.id "
         "WHERE cm.user_id = ? "
@@ -1376,7 +1382,7 @@ def update_settings(company_id):
         "smtp_host = ?, smtp_port = ?, smtp_username = ?, smtp_from_email = ?, "
         "notifications_enabled = ?, notify_email = ?, "
         "brand_color = ?, brand_display_name = ?, brand_address = ?, brand_payment_terms = ?, brand_bank_details = ?, "
-        "stripe_payment_account = ? "
+        "stripe_payment_account = ?, auto_chase_overdue_invoices = ? "
         "WHERE id = ?",
         (
             data.get("defaultCreditAccount", ""), data.get("lockedUntil", ""), data.get("periodStartDate", ""),
@@ -1389,6 +1395,7 @@ def update_settings(company_id):
             data.get("brandColor") or "#0A7EA4", data.get("brandDisplayName", ""), data.get("brandAddress", ""),
             data.get("brandPaymentTerms", ""), data.get("brandBankDetails", ""),
             data.get("stripePaymentAccount") or "Cash",
+            1 if data.get("autoChaseOverdueInvoices") else 0,
             company_id,
         ),
     )
@@ -3562,6 +3569,47 @@ def download_invoice_pdf(company_id, doc_id):
     })
 
 
+def _ensure_portal_token(db, doc):
+    if doc["kind"] != "invoice" or doc["portal_token"]:
+        return doc
+    token = secrets.token_urlsafe(24)
+    db.execute("UPDATE invoices_bills SET portal_token = ? WHERE id = ?", (token, doc["id"]))
+    db.commit()
+    return db.execute("SELECT * FROM invoices_bills WHERE id = ?", (doc["id"],)).fetchone()
+
+
+def send_invoice_email(db, company, doc, contact, reminder=False):
+    """Shared send path for both the manual "Email" button and an overdue chase — a chase is
+    the same document with a different subject/opening line and the dedupe entry it leaves
+    behind, not a different code path."""
+    if not contact["email"]:
+        raise ValueError(f'"{contact["name"]}" has no email address on file — add one in Contacts first.')
+    doc = _ensure_portal_token(db, doc)
+    pdf_bytes = generate_invoice_pdf(company, doc, contact)
+    label = {"invoice": "Invoice", "bill": "Bill", "credit_note": "Credit note"}.get(doc["kind"], "Document")
+    amount = from_pence(doc["amount_pence"])
+    display_name = company["brand_display_name"] or company["name"]
+
+    portal_link_line = ""
+    if doc["portal_token"]:
+        portal_url = f"{request.url_root.rstrip('/')}/portal/{doc['portal_token']}"
+        portal_link_line = f"\n\nView and pay online: {portal_url}"
+
+    opening = (
+        f"This is a friendly reminder that {label.lower()} #{doc['id']:04d} is now overdue."
+        if reminder else f"{label} #{doc['id']:04d} from {display_name}."
+    )
+    subject = (f"Reminder: {label} #{doc['id']:04d} overdue" if reminder else f"{label} #{doc['id']:04d} from {display_name}")
+    body = (
+        f"{opening}\n\n"
+        f"Amount due: {amount:,.2f}\nDue date: {doc['due_date']}\n\n"
+        f"{doc['desc']}{portal_link_line}\n\nA PDF copy is attached."
+    )
+    send_email(company, contact["email"], subject, body,
+               attachment_bytes=pdf_bytes, attachment_filename=f"{doc['kind']}-{doc['id']:04d}.pdf")
+    return doc
+
+
 @app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>/email", methods=["POST"])
 @login_required
 @company_required
@@ -3571,32 +3619,34 @@ def email_invoice_pdf(company_id, doc_id):
     doc, contact = _load_doc_and_contact(db, company_id, doc_id)
     if doc is None or contact is None:
         return jsonify({"error": "Not found."}), 404
-    if not contact["email"]:
-        return jsonify({"error": f'"{contact["name"]}" has no email address on file — add one in Contacts first.'}), 400
-
-    pdf_bytes = generate_invoice_pdf(g.company, doc, contact)
-    label = {"invoice": "Invoice", "bill": "Bill", "credit_note": "Credit note"}.get(doc["kind"], "Document")
-    amount = from_pence(doc["amount_pence"])
-    display_name = g.company["brand_display_name"] or g.company["name"]
-
-    portal_link_line = ""
-    if doc["kind"] == "invoice":
-        if not doc["portal_token"]:
-            token = secrets.token_urlsafe(24)
-            db.execute("UPDATE invoices_bills SET portal_token = ? WHERE id = ?", (token, doc_id))
-            db.commit()
-            doc = db.execute("SELECT * FROM invoices_bills WHERE id = ?", (doc_id,)).fetchone()
-        portal_url = f"{request.url_root.rstrip('/')}/portal/{doc['portal_token']}"
-        portal_link_line = f"\n\nView and pay online: {portal_url}"
-
-    body = (
-        f"{label} #{doc_id:04d} from {display_name}\n\n"
-        f"Amount due: {amount:,.2f}\nDue date: {doc['due_date']}\n\n"
-        f"{doc['desc']}{portal_link_line}\n\nA PDF copy is attached."
-    )
     try:
-        send_email(g.company, contact["email"], f"{label} #{doc_id:04d} from {display_name}", body,
-                   attachment_bytes=pdf_bytes, attachment_filename=f"{doc['kind']}-{doc_id:04d}.pdf")
+        send_invoice_email(db, g.company, doc, contact, reminder=False)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except EmailNotConfigured as e:
+        return jsonify({"error": str(e)}), 400
+    except (smtplib.SMTPException, OSError) as e:
+        return jsonify({"error": f"Could not send: {e}"}), 502
+    return jsonify({"ok": True, "sentTo": contact["email"]})
+
+
+@app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>/send-reminder", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def send_invoice_reminder(company_id, doc_id):
+    """#6/#20: manual "chase this customer now" — the same email an automated overdue-chase
+    digest would send (see run_notifications_check), triggered on demand for one invoice."""
+    db = get_db()
+    doc, contact = _load_doc_and_contact(db, company_id, doc_id)
+    if doc is None or contact is None:
+        return jsonify({"error": "Not found."}), 404
+    if doc["kind"] != "invoice" or doc["status"] != "sent":
+        return jsonify({"error": "Only a sent (unpaid) invoice can be chased."}), 400
+    try:
+        send_invoice_email(db, g.company, doc, contact, reminder=True)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except EmailNotConfigured as e:
         return jsonify({"error": str(e)}), 400
     except (smtplib.SMTPException, OSError) as e:
@@ -3782,11 +3832,36 @@ def run_notifications_check(company_id):
     db = get_db()
     today = datetime.date.today().isoformat()
     force = (request.get_json(silent=True) or {}).get("force", False)
+    already_ran_today = g.company["last_notification_run"] == today
+
+    # Autonomous AR chasing (#6/#20): independent of the notifications_enabled digest toggle —
+    # a customer-facing email is a bigger step than an internal nudge, gated by its own setting.
+    # Re-chases at most once every 7 days per invoice (event_key buckets by week number), not
+    # once a day, so an unpaid invoice doesn't generate a reminder every single day.
+    chased = []
+    if g.company["auto_chase_overdue_invoices"] and (force or not already_ran_today):
+        week_bucket = datetime.date.today().isocalendar()[1]
+        overdue_docs = db.execute(
+            "SELECT * FROM invoices_bills WHERE company_id = ? AND kind = 'invoice' AND status = 'sent' AND due_date < ?",
+            (company_id, today),
+        ).fetchall()
+        for doc in overdue_docs:
+            event_key = f"auto_chase:{doc['id']}:{week_bucket}"
+            if db.execute("SELECT 1 FROM notification_log WHERE company_id = ? AND event_key = ?", (company_id, event_key)).fetchone():
+                continue
+            contact = db.execute("SELECT * FROM contacts WHERE id = ?", (doc["contact_id"],)).fetchone()
+            try:
+                send_invoice_email(db, g.company, doc, contact, reminder=True)
+                db.execute("INSERT INTO notification_log (company_id, event_key) VALUES (?, ?)", (company_id, event_key))
+                db.commit()
+                chased.append(doc["id"])
+            except (ValueError, EmailNotConfigured, smtplib.SMTPException, OSError):
+                continue  # one customer's bad email address shouldn't block chasing the rest
 
     if not g.company["notifications_enabled"]:
-        return jsonify({"sent": False, "reason": "Notifications are turned off in Settings."})
-    if not force and g.company["last_notification_run"] == today:
-        return jsonify({"sent": False, "reason": "Already checked today."})
+        return jsonify({"sent": False, "chased": chased, "reason": "Notifications are turned off in Settings."})
+    if not force and already_ran_today:
+        return jsonify({"sent": False, "chased": chased, "reason": "Already checked today."})
 
     to_email = g.company["notify_email"] or session.get("email")
     lines = []
@@ -3823,7 +3898,7 @@ def run_notifications_check(company_id):
     db.commit()
 
     if not lines:
-        return jsonify({"sent": False, "reason": "Nothing to report today."})
+        return jsonify({"sent": False, "chased": chased, "reason": "Nothing to report today."})
     if not to_email:
         return jsonify({"sent": False, "reason": "No notification email set in Settings."})
 
@@ -3847,7 +3922,7 @@ def run_notifications_check(company_id):
         (company_id, event_key),
     )
     db.commit()
-    return jsonify({"sent": True, "summary": lines})
+    return jsonify({"sent": True, "chased": chased, "summary": lines})
 
 
 @app.route("/api/companies/<int:company_id>/cis-statements", methods=["GET"])
