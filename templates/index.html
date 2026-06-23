@@ -878,6 +878,18 @@
     </div>
 
     <div class="panel" style="margin-top:20px;">
+      <h2>P&amp;L by Month</h2>
+      <div class="sub" style="margin-bottom:12px;">One row per income/expense account, one column per month — the fastest way to spot a trend (a cost creeping up, a sales dip) without opening an accountant's report.</div>
+      <label>Months to show</label>
+      <select id="monthly-pnl-count" onchange="renderMonthlyPnL()" style="max-width:160px;">
+        <option value="6">Last 6 months</option>
+        <option value="12" selected>Last 12 months</option>
+        <option value="24">Last 24 months</option>
+      </select>
+      <div style="overflow-x:auto; margin-top:10px;"><table class="trial" id="monthly-pnl-table"></table></div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
       <h2>Cash Flow Forecast</h2>
       <div class="sub" style="margin-bottom:12px;">Projected cash position: current cash, plus outstanding receivables/payables and recurring journal commitments due within each window. Not a guarantee — customers and suppliers don't always pay on the due date.</div>
       <div id="forecast-bars"></div>
@@ -1831,6 +1843,7 @@ async function refreshAll() {
   await loadReconciliationHistory();
   await loadRecurringJournals();
   renderCashFlowForecast();
+  renderMonthlyPnL();
   await loadStockItems();
 }
 
@@ -3267,6 +3280,61 @@ function renderTaxComputation() {
     lineRow('Taxable profit', taxableProfit, { total: true }),
     lineRow(`Estimated tax due (${rate}%)`, estimatedTax, { total: true }),
   ].join('');
+}
+
+// ---------- P&L by month (#15) ----------
+function renderMonthlyPnL() {
+  const table = document.getElementById('monthly-pnl-table');
+  if (!table) return;
+  const numMonths = parseInt(document.getElementById('monthly-pnl-count').value, 10) || 12;
+
+  const months = [];
+  const cursor = new Date();
+  cursor.setDate(1);
+  for (let i = numMonths - 1; i >= 0; i--) {
+    const d = new Date(cursor.getFullYear(), cursor.getMonth() - i, 1);
+    months.push(d.toISOString().slice(0, 7));
+  }
+
+  // totals[accountName][month] = net balance contribution for that account in that month,
+  // using the same debit/credit-normal convention as accountNetBalance.
+  const totals = {};
+  const accountTypeOf = {};
+  for (const t of transactions) {
+    const month = t.date.slice(0, 7);
+    if (!months.includes(month)) continue;
+    for (const [account, sign] of [[t.debit, 1], [t.credit, -1]]) {
+      const type = getAccountType(account);
+      if (type !== 'revenue' && type !== 'cogs' && type !== 'expense') continue;
+      accountTypeOf[account] = type;
+      totals[account] = totals[account] || {};
+      const normalSign = DEBIT_NORMAL[type] ? sign : -sign;
+      totals[account][month] = (totals[account][month] || 0) + normalSign * t.amount;
+    }
+  }
+
+  const accountNames = Object.keys(totals).sort((a, b) => {
+    const order = { revenue: 0, cogs: 1, expense: 2 };
+    return (order[accountTypeOf[a]] - order[accountTypeOf[b]]) || a.localeCompare(b);
+  });
+
+  const monthHeaderLabel = m => new Date(m + '-01').toLocaleDateString('en-GB', { month: 'short', year: '2-digit' });
+  let html = `<thead><tr><td><b>Account</b></td>${months.map(m => `<td class="num"><b>${monthHeaderLabel(m)}</b></td>`).join('')}</tr></thead><tbody>`;
+  if (!accountNames.length) {
+    html += `<tr><td colspan="${months.length + 1}" class="empty">No income or expense transactions in this window.</td></tr>`;
+  } else {
+    for (const name of accountNames) {
+      html += `<tr><td>${accountTypeDot(name)}${escapeHtml(name)}</td>${months.map(m => `<td class="num">${fmt(totals[name][m] || 0)}</td>`).join('')}</tr>`;
+    }
+    const netByMonth = months.map(m => accountNames.reduce((s, name) => {
+      const type = accountTypeOf[name];
+      const v = totals[name][m] || 0;
+      return s + (type === 'revenue' ? v : -v);
+    }, 0));
+    html += `<tr style="font-weight:700; border-top:2px solid var(--border);"><td>Net profit</td>${netByMonth.map(v => `<td class="num" style="color:${v >= 0 ? 'var(--good)' : 'var(--bad)'}">${fmt(v)}</td>`).join('')}</tr>`;
+  }
+  html += '</tbody>';
+  table.innerHTML = html;
 }
 
 function renderCashFlowForecast() {
