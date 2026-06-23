@@ -1,7 +1,10 @@
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+os.environ["DISABLE_BACKGROUND_SCHEDULER"] = "1"  # tests don't need an hourly thread running
 
 import pytest
 import server as server_module

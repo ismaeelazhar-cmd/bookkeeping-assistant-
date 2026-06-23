@@ -12,6 +12,7 @@ import uuid
 import re
 import base64
 import time
+import threading
 import hmac
 import struct
 import hashlib
@@ -3814,32 +3815,22 @@ def delete_budget(company_id, budget_id):
     return jsonify({"ok": True})
 
 
-@app.route("/api/companies/<int:company_id>/run-notifications-check", methods=["POST"])
-@login_required
-@company_required
-def run_notifications_check(company_id):
-    """#9: an in-app cron substitute — called from the dashboard on load, throttled to once a
-    day per company via companies.last_notification_run, rather than requiring real
-    infrastructure (a scheduler/cron) this app doesn't have. For a production deployment, the
-    same endpoint should also be hit by an actual cron job so companies get notified even on
-    days nobody opens the app — that's a deployment-config addition, not a code change.
+def run_notifications_for_company(db, company, force=False, fallback_email=None):
+    """#9: the actual notification/chasing logic, independent of Flask's request context so it
+    can run both from the on-demand route AND the background scheduler (run_scheduler_loop)
+    that now ticks automatically every hour for every company — nobody has to open the app or
+    configure a cron job for this to happen, which is the whole point of "automated as possible."
 
     Sends ONE digest email (not one per item) covering: invoices that went overdue, a VAT
-    deadline within 7 days (only if HMRC is connected — otherwise this line is skipped, not
-    guessed at), and a nudge if no bank reconciliation has closed in 35+ days. Deduped per
-    calendar day via notification_log so re-running (or reloading the dashboard repeatedly)
-    never double-sends."""
-    db = get_db()
+    deadline within 7 days (only if HMRC is connected), and a nudge if no bank reconciliation
+    has closed in 35+ days. Deduped per calendar day via notification_log. Also runs the
+    autonomous AR chase (at most once a week per invoice) if that's separately turned on."""
+    company_id = company["id"]
     today = datetime.date.today().isoformat()
-    force = (request.get_json(silent=True) or {}).get("force", False)
-    already_ran_today = g.company["last_notification_run"] == today
+    already_ran_today = company["last_notification_run"] == today
 
-    # Autonomous AR chasing (#6/#20): independent of the notifications_enabled digest toggle —
-    # a customer-facing email is a bigger step than an internal nudge, gated by its own setting.
-    # Re-chases at most once every 7 days per invoice (event_key buckets by week number), not
-    # once a day, so an unpaid invoice doesn't generate a reminder every single day.
     chased = []
-    if g.company["auto_chase_overdue_invoices"] and (force or not already_ran_today):
+    if company["auto_chase_overdue_invoices"] and (force or not already_ran_today):
         week_bucket = datetime.date.today().isocalendar()[1]
         overdue_docs = db.execute(
             "SELECT * FROM invoices_bills WHERE company_id = ? AND kind = 'invoice' AND status = 'sent' AND due_date < ?",
@@ -3847,23 +3838,31 @@ def run_notifications_check(company_id):
         ).fetchall()
         for doc in overdue_docs:
             event_key = f"auto_chase:{doc['id']}:{week_bucket}"
-            if db.execute("SELECT 1 FROM notification_log WHERE company_id = ? AND event_key = ?", (company_id, event_key)).fetchone():
+            if force:
+                db.execute("DELETE FROM notification_log WHERE company_id = ? AND event_key = ?", (company_id, event_key))
+            # Claim the event BEFORE sending (not after) so two processes racing on the same
+            # company (e.g. multiple gunicorn workers each running the background scheduler)
+            # can't both pass a "not yet sent" check and double-chase the same customer.
+            claimed = db.execute(
+                "INSERT INTO notification_log (company_id, event_key) VALUES (?, ?) ON CONFLICT(company_id, event_key) DO NOTHING",
+                (company_id, event_key),
+            ).rowcount
+            db.commit()
+            if not claimed:
                 continue
             contact = db.execute("SELECT * FROM contacts WHERE id = ?", (doc["contact_id"],)).fetchone()
             try:
-                send_invoice_email(db, g.company, doc, contact, reminder=True)
-                db.execute("INSERT INTO notification_log (company_id, event_key) VALUES (?, ?)", (company_id, event_key))
-                db.commit()
+                send_invoice_email(db, company, doc, contact, reminder=True)
                 chased.append(doc["id"])
             except (ValueError, EmailNotConfigured, smtplib.SMTPException, OSError):
                 continue  # one customer's bad email address shouldn't block chasing the rest
 
-    if not g.company["notifications_enabled"]:
-        return jsonify({"sent": False, "chased": chased, "reason": "Notifications are turned off in Settings."})
+    if not company["notifications_enabled"]:
+        return {"sent": False, "chased": chased, "reason": "Notifications are turned off in Settings."}
     if not force and already_ran_today:
-        return jsonify({"sent": False, "chased": chased, "reason": "Already checked today."})
+        return {"sent": False, "chased": chased, "reason": "Already checked today."}
 
-    to_email = g.company["notify_email"] or session.get("email")
+    to_email = company["notify_email"] or fallback_email
     lines = []
 
     overdue = db.execute(
@@ -3877,9 +3876,9 @@ def run_notifications_check(company_id):
         for r in overdue[:10]:
             lines.append(f"  - #{r['id']:04d} {r['desc']} — due {r['due_date']}, {from_pence(r['amount_pence']):,.2f}")
 
-    if (g.company["hmrc_vrn"] or "").strip() and decrypt_secret(g.company["hmrc_access_token"]):
+    if (company["hmrc_vrn"] or "").strip() and decrypt_secret(company["hmrc_access_token"]):
         try:
-            obligations = call_hmrc(g.company, "GET", f"/organisations/vat/{g.company['hmrc_vrn'].strip()}/obligations?status=O")
+            obligations = call_hmrc(company, "GET", f"/organisations/vat/{company['hmrc_vrn'].strip()}/obligations?status=O")
             for ob in obligations.get("obligations", []):
                 due = ob.get("due")
                 if due and due <= (datetime.date.today() + datetime.timedelta(days=7)).isoformat():
@@ -3898,31 +3897,40 @@ def run_notifications_check(company_id):
     db.commit()
 
     if not lines:
-        return jsonify({"sent": False, "chased": chased, "reason": "Nothing to report today."})
+        return {"sent": False, "chased": chased, "reason": "Nothing to report today."}
     if not to_email:
-        return jsonify({"sent": False, "reason": "No notification email set in Settings."})
+        return {"sent": False, "chased": chased, "reason": "No notification email set in Settings."}
 
     event_key = f"daily_digest:{today}"
-    already_sent = db.execute(
-        "SELECT 1 FROM notification_log WHERE company_id = ? AND event_key = ?", (company_id, event_key)
-    ).fetchone()
-    if already_sent and not force:
-        return jsonify({"sent": False, "reason": "Already sent today."})
-
-    body = f"Daily summary for {g.company['name']}:\n\n" + "\n".join(lines)
-    try:
-        send_email(g.company, to_email, f"{g.company['name']} — daily summary", body)
-    except EmailNotConfigured as e:
-        return jsonify({"sent": False, "reason": str(e)})
-    except (smtplib.SMTPException, OSError) as e:
-        return jsonify({"sent": False, "reason": f"Could not send: {e}"})
-
-    db.execute(
+    if force:
+        db.execute("DELETE FROM notification_log WHERE company_id = ? AND event_key = ?", (company_id, event_key))
+    claimed = db.execute(
         "INSERT INTO notification_log (company_id, event_key) VALUES (?, ?) ON CONFLICT(company_id, event_key) DO NOTHING",
         (company_id, event_key),
-    )
+    ).rowcount
     db.commit()
-    return jsonify({"sent": True, "chased": chased, "summary": lines})
+    if not claimed:
+        return {"sent": False, "chased": chased, "reason": "Already sent today."}
+
+    body = f"Daily summary for {company['name']}:\n\n" + "\n".join(lines)
+    try:
+        send_email(company, to_email, f"{company['name']} — daily summary", body)
+    except EmailNotConfigured as e:
+        return {"sent": False, "chased": chased, "reason": str(e)}
+    except (smtplib.SMTPException, OSError) as e:
+        return {"sent": False, "chased": chased, "reason": f"Could not send: {e}"}
+
+    return {"sent": True, "chased": chased, "summary": lines}
+
+
+@app.route("/api/companies/<int:company_id>/run-notifications-check", methods=["POST"])
+@login_required
+@company_required
+def run_notifications_check(company_id):
+    db = get_db()
+    force = (request.get_json(silent=True) or {}).get("force", False)
+    result = run_notifications_for_company(db, g.company, force=force, fallback_email=session.get("email"))
+    return jsonify(result)
 
 
 @app.route("/api/companies/<int:company_id>/cis-statements", methods=["GET"])
@@ -5420,7 +5428,50 @@ def stripe_webhook():
     return jsonify({"received": True})
 
 
+# ---------- background scheduler ----------
+#
+# Makes notifications/AR-chasing genuinely automatic — no real cron job, no dependency on
+# someone opening the dashboard. A daemon thread wakes up once an hour, checks every company,
+# and calls the exact same run_notifications_for_company() the on-demand button calls. Each
+# tick opens its own short-lived SQLite connection (not Flask's per-request g.db) and closes it
+# immediately after — this runs outside any HTTP request, so there's no request-scoped
+# connection to reuse. notification_log's atomic claim-before-send (see above) makes this safe
+# even if more than one worker process ends up running this loop.
+_SCHEDULER_TICK_SECONDS = 3600
+
+
+def _scheduler_tick():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        companies = conn.execute("SELECT * FROM companies").fetchall()
+        for company in companies:
+            try:
+                run_notifications_for_company(conn, company)
+            except Exception:
+                logging.exception("Scheduler: notification check failed for company %s", company["id"])
+    finally:
+        conn.close()
+
+
+def _scheduler_loop():
+    while True:
+        time.sleep(_SCHEDULER_TICK_SECONDS)
+        try:
+            _scheduler_tick()
+        except Exception:
+            logging.exception("Scheduler tick failed")
+
+
+def start_background_scheduler():
+    if os.environ.get("DISABLE_BACKGROUND_SCHEDULER") == "1":
+        return  # escape hatch for tests / anywhere multiple short-lived processes would each spawn a thread
+    threading.Thread(target=_scheduler_loop, daemon=True, name="notifications-scheduler").start()
+
+
 init_db()  # runs on import too, not just `python3 server.py` directly — gunicorn imports this module without executing __main__
+start_background_scheduler()
 
 if __name__ == "__main__":
     debug = os.environ.get("FLASK_DEBUG", "1") == "1"  # default on for local dev; set FLASK_DEBUG=0 to turn off

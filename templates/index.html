@@ -1203,33 +1203,57 @@
       </label>
       <div class="sub" style="margin:4px 0 0;">Sends the same reminder as the manual "Remind" button, at most once a week per invoice, to whoever's on file for that customer — separate from the digest above, which only emails you. Off by default since this emails your customers directly.</div>
 
-      <h2 style="margin-top:20px; font-size:13px;">Outbound email (SMTP)</h2>
-      <div class="sub" style="margin-bottom:8px;">Works with any provider — Gmail, SendGrid, AWS SES, or your own mail server's SMTP credentials. Also used to email invoice PDFs to customers.</div>
-      <div class="row2">
-        <div><label>SMTP host</label><input type="text" id="smtp-host" placeholder="smtp.gmail.com" oninput="saveSettings()"></div>
-        <div><label>Port</label><input type="number" id="smtp-port" placeholder="587" oninput="saveSettings()"></div>
+      <h2 style="margin-top:20px; font-size:13px;">Connect an email address</h2>
+      <div class="sub" style="margin-bottom:8px;">This is what the digest above, invoice emails, and reminders are sent from. Pick your provider and we'll fill in the technical bits — you just need the email address and a password for it.</div>
+      <label>Email provider</label>
+      <select id="smtp-provider" onchange="applySmtpProviderPreset()">
+        <option value="gmail">Gmail / Google Workspace</option>
+        <option value="outlook">Outlook / Microsoft 365</option>
+        <option value="yahoo">Yahoo Mail</option>
+        <option value="other">Other / my own mail server</option>
+      </select>
+      <div id="smtp-provider-help" class="sub" style="margin:6px 0 0;"></div>
+      <div class="row2" style="margin-top:10px;">
+        <div><label>Email address</label><input type="email" id="smtp-username" placeholder="you@example.com" oninput="saveSettings()"></div>
+        <div><label id="smtp-password-label">App password <span id="smtp-password-status" style="color:var(--muted); font-weight:400;"></span></label><input type="password" id="smtp-password" placeholder="enter to set/replace" oninput="saveSettings()"></div>
       </div>
-      <div class="row2">
-        <div><label>Username</label><input type="text" id="smtp-username" oninput="saveSettings()"></div>
-        <div><label>Password <span id="smtp-password-status" style="color:var(--muted); font-weight:400;"></span></label><input type="password" id="smtp-password" placeholder="enter to set/replace" oninput="saveSettings()"></div>
+      <div id="smtp-advanced-toggle" style="margin-top:8px;">
+        <a href="#" onclick="toggleSmtpAdvanced(event)" style="font-size:12px; color:var(--muted);">Show advanced server settings</a>
       </div>
-      <label>From address <span style="color:var(--muted); font-weight:400;">(blank = username)</span></label>
-      <input type="email" id="smtp-from-email" oninput="saveSettings()">
-      <button class="btn-secondary" onclick="sendTestEmail()">Send test email</button>
+      <div id="smtp-advanced-fields" style="display:none; margin-top:10px;">
+        <div class="row2">
+          <div><label>Server (host)</label><input type="text" id="smtp-host" placeholder="smtp.gmail.com" oninput="saveSettings()"></div>
+          <div><label>Port</label><input type="number" id="smtp-port" placeholder="587" oninput="saveSettings()"></div>
+        </div>
+        <label>From address <span style="color:var(--muted); font-weight:400;">(blank = email address above)</span></label>
+        <input type="email" id="smtp-from-email" oninput="saveSettings()">
+      </div>
+      <button class="btn-secondary" style="margin-top:12px;" onclick="sendTestEmail()">Send test email</button>
       <div id="notify-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
 
     <div class="panel" style="margin-top:20px;">
-      <h2>Online Payments (Stripe)</h2>
-      <div class="sub" style="margin-bottom:10px;">Lets customers pay an invoice online via the portal link emailed to them. Needs your own Stripe account — create one at stripe.com, then paste your API keys here. Until set, the portal link still works as a read-only invoice view, just without a "Pay now" button.</div>
+      <h2>Get Paid Online</h2>
+      <div class="sub" style="margin-bottom:10px;">Lets a customer pay an invoice with a card by clicking the link you email them — no chasing a bank transfer. Powered by Stripe (the same payment processor Amazon and Shopify use), since taking real card payments needs a real, regulated payment provider behind it.</div>
+      <ol style="font-size:13px; color:var(--text); margin:0 0 12px; padding-left:20px;">
+        <li style="margin-bottom:4px;">Create a free account at <strong>stripe.com</strong> — no setup fee, takes a few minutes.</li>
+        <li style="margin-bottom:4px;">In the Stripe dashboard, go to <strong>Developers → API keys</strong> and copy the two keys below.</li>
+      </ol>
       <div class="row2">
         <div><label>Publishable key</label><input type="text" id="stripe-publishable-key" placeholder="pk_live_… or pk_test_…" oninput="saveSettings()"></div>
         <div><label>Secret key <span id="stripe-secret-status" style="color:var(--muted); font-weight:400;"></span></label><input type="password" id="stripe-secret-key" placeholder="sk_live_… or sk_test_…" oninput="saveSettings()"></div>
       </div>
-      <label>Webhook signing secret <span id="stripe-webhook-status" style="color:var(--muted); font-weight:400;"></span> <span style="color:var(--muted); font-weight:400;">(from the webhook endpoint you add in Stripe, pointing at this app's /webhooks/stripe)</span></label>
-      <input type="password" id="stripe-webhook-secret" placeholder="whsec_…" oninput="saveSettings()">
-      <label>Account to credit when a payment lands <span style="color:var(--muted); font-weight:400;">(net of Stripe's fee — set up a separate "Stripe" bank account if you want the fee visible)</span></label>
-      <input type="text" id="stripe-payment-account" list="account-list" value="Cash" oninput="saveSettings()">
+      <div class="sub" style="margin:8px 0 0;">That's enough to start taking payments. The advanced option below makes paid invoices tick over to "Paid" automatically — without it, you'll just mark them paid yourself once the money lands.</div>
+      <div style="margin-top:8px;">
+        <a href="#" onclick="toggleStripeAdvanced(event)" style="font-size:12px; color:var(--muted);">Show advanced (auto-confirm payments)</a>
+      </div>
+      <div id="stripe-advanced-fields" style="display:none; margin-top:10px;">
+        <label>Webhook signing secret <span id="stripe-webhook-status" style="color:var(--muted); font-weight:400;"></span></label>
+        <div class="sub" style="margin:0 0 4px;">In Stripe: Developers → Webhooks → Add endpoint → URL <code id="stripe-webhook-url"></code> → listen for <code>checkout.session.completed</code> → copy the signing secret here.</div>
+        <input type="password" id="stripe-webhook-secret" placeholder="whsec_…" oninput="saveSettings()">
+        <label>Account to credit when a payment lands <span style="color:var(--muted); font-weight:400;">(net of Stripe's fee)</span></label>
+        <input type="text" id="stripe-payment-account" list="account-list" value="Cash" oninput="saveSettings()">
+      </div>
     </div>
 
     <div class="panel" style="margin-top:20px;">
@@ -1800,12 +1824,19 @@ async function openCompany(id) {
   document.getElementById('smtp-password').value = '';
   document.getElementById('smtp-password-status').textContent = currentCompany.smtp_password_set ? '(set)' : '(not set)';
   document.getElementById('smtp-from-email').value = currentCompany.smtp_from_email || '';
+  const guessedProvider = guessSmtpProvider(currentCompany.smtp_host);
+  document.getElementById('smtp-provider').value = guessedProvider;
+  document.getElementById('smtp-provider-help').textContent = SMTP_PROVIDER_PRESETS[guessedProvider].help;
+  document.getElementById('smtp-advanced-fields').style.display = guessedProvider === 'other' ? 'block' : 'none';
+  document.getElementById('smtp-advanced-toggle').style.display = guessedProvider === 'other' ? 'none' : 'block';
   document.getElementById('stripe-publishable-key').value = currentCompany.stripe_publishable_key || '';
   document.getElementById('stripe-secret-key').value = '';
   document.getElementById('stripe-secret-status').textContent = currentCompany.stripe_secret_key_set ? '(set)' : '(not set)';
   document.getElementById('stripe-webhook-secret').value = '';
   document.getElementById('stripe-webhook-status').textContent = currentCompany.stripe_webhook_secret_set ? '(set)' : '(not set)';
   document.getElementById('stripe-payment-account').value = currentCompany.stripe_payment_account || 'Cash';
+  document.getElementById('stripe-advanced-fields').style.display = currentCompany.stripe_webhook_secret_set ? 'block' : 'none';
+  document.getElementById('stripe-webhook-url').textContent = `${location.origin}/webhooks/stripe`;
   document.getElementById('ob-rows').innerHTML = ''; obRowCount = 0;
   document.getElementById('cj-rows').innerHTML = ''; cjRowCount = 0;
   document.getElementById('cj-date').valueAsDate = new Date();
@@ -1920,6 +1951,51 @@ async function sendTestEmail() {
     statusEl.textContent = e.message;
     showToast(e.message, 'error');
   }
+}
+
+// ---------- simplified email setup: provider presets + progressive disclosure of the
+// technical SMTP fields, so most people never need to know what "SMTP" or "port 587" mean. ----------
+const SMTP_PROVIDER_PRESETS = {
+  gmail: { host: 'smtp.gmail.com', port: 587, help: 'Use a Gmail "app password", not your normal password — in your Google Account: Security → 2-Step Verification (turn on first) → App passwords → generate one for "Mail".' },
+  outlook: { host: 'smtp.office365.com', port: 587, help: 'Use your normal Microsoft 365/Outlook.com password, or an app password if you have 2-factor authentication turned on.' },
+  yahoo: { host: 'smtp.mail.yahoo.com', port: 587, help: 'Yahoo requires an "app password" — in Yahoo Account Security, generate one and use it here instead of your normal password.' },
+  other: { host: '', port: 587, help: "Ask whoever manages your email/domain (your IT provider, or your hosting company) for the SMTP server address and port." },
+};
+
+function applySmtpProviderPreset() {
+  const provider = document.getElementById('smtp-provider').value;
+  const preset = SMTP_PROVIDER_PRESETS[provider];
+  document.getElementById('smtp-host').value = preset.host;
+  document.getElementById('smtp-port').value = preset.port;
+  document.getElementById('smtp-provider-help').textContent = preset.help;
+  document.getElementById('smtp-password-label').innerHTML = provider === 'other'
+    ? 'Password <span id="smtp-password-status" style="color:var(--muted); font-weight:400;"></span>'
+    : `App password <span id="smtp-password-status" style="color:var(--muted); font-weight:400;"></span>`;
+  if (provider === 'other') {
+    document.getElementById('smtp-advanced-fields').style.display = 'block';
+    document.getElementById('smtp-advanced-toggle').style.display = 'none';
+  }
+  saveSettings();
+}
+
+function guessSmtpProvider(host) {
+  if (!host) return 'gmail';
+  if (host.includes('google')) return 'gmail';
+  if (host.includes('office365') || host.includes('outlook')) return 'outlook';
+  if (host.includes('yahoo')) return 'yahoo';
+  return 'other';
+}
+
+function toggleSmtpAdvanced(event) {
+  event.preventDefault();
+  const fields = document.getElementById('smtp-advanced-fields');
+  fields.style.display = fields.style.display === 'none' ? 'block' : 'none';
+}
+
+function toggleStripeAdvanced(event) {
+  event.preventDefault();
+  const fields = document.getElementById('stripe-advanced-fields');
+  fields.style.display = fields.style.display === 'none' ? 'block' : 'none';
 }
 
 async function clearAiApiKey() {
