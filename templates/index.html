@@ -155,6 +155,7 @@
     </div>
     <div class="sub" style="margin-top:10px; margin-bottom:0; text-align:center; padding-top:10px; border-top:1px solid var(--border);">
       <a href="#" onclick="startDemo(event)" style="color:var(--accent); font-weight:600;">Try the demo — no signup required</a>
+      <div style="margin-top:6px;"><a href="#" onclick="startDemo(event, true)" style="color:var(--muted); font-size:12px;">…or take the 2-minute guided tour</a></div>
     </div>
   </div>
   <div class="panel auth-card" id="auth-card-2fa" style="display:none;">
@@ -241,6 +242,7 @@
       <input type="search" id="global-search" placeholder="Search transactions, accounts, contacts…"
              oninput="runGlobalSearch()" style="width:220px; display:inline-block; margin-right:10px; vertical-align:middle;">
       <span id="who-email-2" style="margin-right:10px; color:var(--muted); font-size:13px;"></span>
+      <button class="btn-secondary" style="margin-top:0;" onclick="startTour()" title="Take the guided tour">🎓</button>
       <button class="btn-secondary" style="margin-top:0;" onclick="openShortcutsModal()" title="Keyboard shortcuts">⌨</button>
       <button class="btn-secondary" style="margin-top:0;" onclick="goToCompanyPicker()">Switch company</button>
       <button class="btn-secondary" style="margin-top:0;" onclick="logout(event)">Log out</button>
@@ -1189,7 +1191,7 @@
       <textarea id="brand-bank-details" rows="2" placeholder="e.g. Sort code 12-34-56, Account 12345678" oninput="saveSettings()"></textarea>
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" id="settings-notifications-panel" style="margin-top:20px;">
       <h2>Notifications</h2>
       <div class="sub" style="margin-bottom:10px;">A daily digest email — overdue invoices, a VAT deadline within 7 days (if HMRC is connected), and a nudge if bank reconciliation has gone stale. Checked once a day when the dashboard loads; needs an outbound email server below.</div>
       <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); margin:0 0 10px;">
@@ -1371,6 +1373,22 @@
   </div>
 </div>
 
+<div id="tour-overlay" style="display:none; position:fixed; inset:0; z-index:70; pointer-events:none;">
+  <div id="tour-highlight" style="position:absolute; border:2px solid var(--accent); border-radius:8px; box-shadow:0 0 0 4000px rgba(27,37,56,0.45); transition:all .2s ease; pointer-events:none;"></div>
+  <div id="tour-card" class="panel" style="position:absolute; width:300px; pointer-events:auto; box-shadow:0 8px 24px rgba(0,0,0,0.25);">
+    <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px;">Guided tour <span id="tour-step-count"></span></div>
+    <h2 id="tour-title" style="margin-top:0; font-size:15px;"></h2>
+    <div id="tour-text" class="sub" style="margin-bottom:14px;"></div>
+    <div style="display:flex; justify-content:space-between; gap:8px;">
+      <a href="#" onclick="endTour(event)" style="color:var(--muted); font-size:12px; align-self:center;">Skip tour</a>
+      <div style="display:flex; gap:8px;">
+        <button class="btn-secondary" id="tour-back-btn" style="padding:6px 12px;" onclick="tourStep(-1)">Back</button>
+        <button class="btn-primary" id="tour-next-btn" style="margin-top:0; padding:6px 14px;" onclick="tourStep(1)">Next</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="drilldown-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:50; align-items:center; justify-content:center;">
   <div class="panel" style="width:580px; max-height:80vh; overflow:auto;">
     <h2 id="drilldown-title">Account</h2>
@@ -1472,6 +1490,88 @@ async function submitAuth() {
 
 // ---------- keyboard shortcuts (#13): Ctrl/Cmd+Enter to post already existed; this surfaces
 // the full list and adds a couple more globally useful ones rather than leaving them undiscoverable. ----------
+// ---------- guided tour: a plain-language walkthrough of the app, written once rather than
+// generated per-visitor by an AI call (most people trying this — especially via "Try the demo"
+// — won't have a Claude API key set yet, so a real per-step AI explanation would just fail for
+// almost everyone; a well-written static tour is the version of this that actually works for
+// every visitor, with the right framing for the parts that need the user's own external
+// accounts (email, Stripe) rather than pretending those are connected for them). ----------
+const TOUR_STEPS = [
+  { page: 'dashboard', selector: '#health-score-card', title: 'Your Business Health Score',
+    text: 'One number, 0-100, built from cash runway, profit margin, how much is overdue, and how fresh your bank reconciliation is. A quick "is everything okay?" check before you dig into anything.' },
+  { page: 'dashboard', selector: '#dash-attention-list', title: 'Needs Your Attention',
+    text: 'Overdue invoices, things due this week, and anything sitting in the review queue — the short list of what actually needs a decision from you today.' },
+  { page: 'transactions', selector: '#f-quick-entry', title: 'Quick entry mode',
+    text: 'Turn this on for the 80% of entries that are just "this much, for this category" — it hides VAT, foreign currency, and the rest until you need them.' },
+  { page: 'transactions', selector: '#quick-receipt-row', title: 'Scan a receipt',
+    text: 'With Quick entry on, snap or upload a photo of a receipt and it reads the date, amount, and description straight into the form for you to check before posting.' },
+  { page: 'bank', selector: '#clarification-queue-wrap', title: 'Things the system wasn\'t sure about',
+    text: 'Bank lines and imports the categoriser wasn\'t confident enough to post automatically land here for a quick human decision, instead of silently guessing.' },
+  { page: 'invoices', selector: '#ib-body', title: 'Invoices that chase themselves',
+    text: 'Every sent invoice gets a PDF, an emailable copy, and a payment link your customer can pay online with a card. The "Remind" button on an overdue one sends a polite nudge in one click.' },
+  { page: 'reports', selector: '#monthly-pnl-table', title: 'P&L by month',
+    text: 'One row per account, one column per month — the fastest way to spot a cost creeping up or a sales dip without generating a full report each time.' },
+  { page: 'settings', selector: '#settings-notifications-panel', title: 'Email and online payments are optional',
+    text: 'Settings lets you connect your own email (for reminders/invoices) and your own Stripe account (to get paid online) — both completely optional, and both stay off until you add your own details. Nothing here is pre-connected for you; we don\'t set these up on your behalf.' },
+];
+let tourIndex = 0;
+
+async function startTour() {
+  if (!currentCompany) return;
+  tourIndex = 0;
+  document.getElementById('tour-overlay').style.display = 'block';
+  await showTourStep();
+}
+
+async function tourStep(delta) {
+  tourIndex += delta;
+  if (tourIndex < 0) tourIndex = 0;
+  if (tourIndex >= TOUR_STEPS.length) { endTour(); return; }
+  await showTourStep();
+}
+
+function endTour(event) {
+  if (event) event.preventDefault();
+  document.getElementById('tour-overlay').style.display = 'none';
+}
+
+async function showTourStep() {
+  const step = TOUR_STEPS[tourIndex];
+  if (step.page) {
+    showPage(step.page);
+    await new Promise(r => setTimeout(r, 60)); // let the page swap paint before measuring
+  }
+  const target = document.querySelector(step.selector);
+  const highlight = document.getElementById('tour-highlight');
+  const card = document.getElementById('tour-card');
+  if (!target) {
+    // selector not on this page/state right now (e.g. quick entry not toggled on yet) — still
+    // show the explanation, just centered, rather than skipping the step silently.
+    highlight.style.display = 'none';
+    card.style.top = '40%';
+    card.style.left = '50%';
+    card.style.transform = 'translate(-50%, -50%)';
+  } else {
+    const rect = target.getBoundingClientRect();
+    highlight.style.display = 'block';
+    highlight.style.top = `${rect.top - 6}px`;
+    highlight.style.left = `${rect.left - 6}px`;
+    highlight.style.width = `${rect.width + 12}px`;
+    highlight.style.height = `${rect.height + 12}px`;
+    const cardTop = Math.min(window.innerHeight - 220, rect.bottom + 14);
+    const cardLeft = Math.min(window.innerWidth - 320, Math.max(20, rect.left));
+    card.style.top = `${cardTop}px`;
+    card.style.left = `${cardLeft}px`;
+    card.style.transform = 'none';
+    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+  document.getElementById('tour-step-count').textContent = `${tourIndex + 1} / ${TOUR_STEPS.length}`;
+  document.getElementById('tour-title').textContent = step.title;
+  document.getElementById('tour-text').textContent = step.text;
+  document.getElementById('tour-back-btn').style.display = tourIndex === 0 ? 'none' : 'inline-block';
+  document.getElementById('tour-next-btn').textContent = tourIndex === TOUR_STEPS.length - 1 ? 'Done' : 'Next';
+}
+
 function openShortcutsModal() { document.getElementById('shortcuts-overlay').style.display = 'flex'; }
 function closeShortcutsModal() { document.getElementById('shortcuts-overlay').style.display = 'none'; }
 
@@ -1494,7 +1594,7 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-async function startDemo(event) {
+async function startDemo(event, andStartTour) {
   if (event) event.preventDefault();
   const errEl = document.getElementById('auth-error');
   errEl.textContent = '';
@@ -1503,6 +1603,7 @@ async function startDemo(event) {
     currentUser = { email: data.email };
     await loadCompanies();
     await openCompany(data.id);
+    if (andStartTour) startTour();
   } catch (e) {
     errEl.textContent = e.message;
   }
