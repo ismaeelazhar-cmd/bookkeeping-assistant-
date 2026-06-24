@@ -871,6 +871,17 @@
           <div><label>Email (optional)</label><input type="email" id="contact-email"></div>
           <div><label>Phone (optional)</label><input type="text" id="contact-phone"></div>
         </div>
+        <label>Address (optional)</label>
+        <input type="text" id="contact-address-line1" placeholder="Address line 1" style="margin-bottom:8px;">
+        <div class="row2">
+          <input type="text" id="contact-address-city" placeholder="City">
+          <input type="text" id="contact-address-postcode" placeholder="Postcode">
+        </div>
+        <input type="text" id="contact-address-country" placeholder="Country" style="margin-top:8px;">
+        <div class="row2" style="margin-top:8px;">
+          <div><label>Default payment terms <span style="color:var(--muted); font-weight:400;">(days — fills the due date on new invoices)</span></label><input type="number" id="contact-payment-terms" min="0" placeholder="e.g. 30"></div>
+          <div><label>Notes (optional)</label><input type="text" id="contact-notes" placeholder="e.g. Prefers email, pays by BACS"></div>
+        </div>
         <button class="btn-primary" onclick="addContact()">Add contact</button>
         <div id="contact-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
       </div>
@@ -888,14 +899,14 @@
         <div class="sub" style="margin-bottom:12px;">Starts as a draft (no ledger effect). "Send" posts it to Trade Receivables/Payables (with VAT if set). "Mark Paid" settles it against the account you choose.</div>
         <div class="row2">
           <div><label>Kind</label><select id="ib-kind" onchange="toggleCreditNoteLinkField()"><option value="invoice">Invoice (to a customer)</option><option value="bill">Bill (from a supplier)</option><option value="credit_note">Credit note (return/correction)</option></select></div>
-          <div><label>Contact</label><select id="ib-contact"></select></div>
+          <div><label>Contact</label><select id="ib-contact" onchange="applyContactPaymentTerms()"></select></div>
         </div>
         <div id="ib-link-row" style="display:none;">
           <label>Credit note against <span style="color:var(--muted); font-weight:400;">(the original invoice/bill this corrects)</span></label>
           <select id="ib-linked-doc"></select>
         </div>
         <div class="row2">
-          <div><label>Date</label><input type="date" id="ib-date"></div>
+          <div><label>Date</label><input type="date" id="ib-date" onchange="applyContactPaymentTerms()"></div>
           <div><label>Due date</label><input type="date" id="ib-due-date"></div>
         </div>
         <label>Description <span style="color:var(--muted); font-weight:400;">(blank = first line item, when using line items)</span></label>
@@ -1402,6 +1413,41 @@
     </div>
   </div>
 </dialog>
+
+<div id="contact-modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:50; align-items:center; justify-content:center;" onclick="if(event.target===this) closeContactModal()">
+  <div class="panel" style="width:520px; max-height:85vh; overflow:auto;">
+    <h2 id="contact-modal-title">Contact</h2>
+    <div class="row2">
+      <div><label>Name</label><input type="text" id="cm-name"></div>
+      <div><label>Type</label><select id="cm-type"><option value="customer">Customer</option><option value="supplier">Supplier</option><option value="both">Both</option></select></div>
+    </div>
+    <div class="row2">
+      <div><label>Email</label><input type="email" id="cm-email"></div>
+      <div><label>Phone</label><input type="text" id="cm-phone"></div>
+    </div>
+    <label>Address</label>
+    <input type="text" id="cm-address-line1" placeholder="Address line 1" style="margin-bottom:8px;">
+    <div class="row2">
+      <input type="text" id="cm-address-city" placeholder="City">
+      <input type="text" id="cm-address-postcode" placeholder="Postcode">
+    </div>
+    <input type="text" id="cm-address-country" placeholder="Country" style="margin-top:8px;">
+    <div class="row2" style="margin-top:8px;">
+      <div><label>Default payment terms (days)</label><input type="number" id="cm-payment-terms" min="0"></div>
+      <div><label>Notes</label><input type="text" id="cm-notes"></div>
+    </div>
+    <button class="btn-primary" onclick="saveContactModal()">Save changes</button>
+    <div id="cm-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+
+    <h2 style="margin-top:20px;">Invoice &amp; Bill History</h2>
+    <table class="inbox">
+      <thead><tr><th>Kind</th><th>Date</th><th>Description</th><th class="num">Amount</th><th>Status</th></tr></thead>
+      <tbody id="cm-history-body"></tbody>
+    </table>
+
+    <button class="btn-secondary" style="width:100%; margin-top:14px;" onclick="closeContactModal()">Close</button>
+  </div>
+</div>
 
 <div id="source-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:50; align-items:center; justify-content:center;" onclick="if(event.target===this) closeSourceModal()">
   <div class="panel" style="width:440px; max-height:80vh; overflow:auto;">
@@ -5066,17 +5112,27 @@ async function postOpeningBalances() {
 function renderContacts() {
   const body = document.getElementById('contacts-body');
   body.innerHTML = contacts.length ? contacts.map(c => `
-    <tr>
+    <tr style="cursor:pointer;" onclick="openContactModal(${c.id})">
       <td>${escapeHtml(c.name)}</td>
       <td>${escapeHtml(c.type)}</td>
       <td>${escapeHtml(c.email || '')}</td>
       <td>${escapeHtml(c.phone || '')}</td>
-      <td><button class="btn-danger" onclick="deleteContact(${c.id}, '${c.name.replace(/'/g, "\\'")}')">✕</button></td>
+      <td><button class="btn-danger" onclick="event.stopPropagation(); deleteContact(${c.id}, '${c.name.replace(/'/g, "\\'")}')">✕</button></td>
     </tr>`).join('') : `<tr><td colspan="5"><div class="empty-state">
       <div class="empty-state-icon">👥</div>
       <div class="empty-state-desc">No contacts yet — add a customer or supplier to start raising invoices and bills.</div>
       <button class="btn-primary" onclick="document.getElementById('contact-name').focus()">Add a contact</button>
     </div></td></tr>`;
+}
+
+function applyContactPaymentTerms() {
+  const contactId = parseInt(document.getElementById('ib-contact').value, 10);
+  const contact = contacts.find(c => c.id === contactId);
+  const date = document.getElementById('ib-date').value;
+  if (!contact || !contact.paymentTermsDays || !date) return;
+  const due = new Date(date);
+  due.setDate(due.getDate() + contact.paymentTermsDays);
+  document.getElementById('ib-due-date').value = due.toISOString().slice(0, 10);
 }
 
 function populateContactSelect() {
@@ -5094,18 +5150,81 @@ async function addContact() {
   const type = document.getElementById('contact-type').value;
   const email = document.getElementById('contact-email').value.trim();
   const phone = document.getElementById('contact-phone').value.trim();
+  const addressLine1 = document.getElementById('contact-address-line1').value.trim();
+  const addressCity = document.getElementById('contact-address-city').value.trim();
+  const addressPostcode = document.getElementById('contact-address-postcode').value.trim();
+  const addressCountry = document.getElementById('contact-address-country').value.trim();
+  const paymentTermsDays = document.getElementById('contact-payment-terms').value ? parseInt(document.getElementById('contact-payment-terms').value, 10) : null;
+  const notes = document.getElementById('contact-notes').value.trim();
   const statusEl = document.getElementById('contact-status');
   if (!name) { statusEl.textContent = 'Enter a contact name.'; return; }
   try {
-    await api(`/api/companies/${currentCompany.id}/contacts`, { method: 'POST', body: JSON.stringify({ name, type, email, phone }) });
+    await api(`/api/companies/${currentCompany.id}/contacts`, {
+      method: 'POST',
+      body: JSON.stringify({ name, type, email, phone, addressLine1, addressCity, addressPostcode, addressCountry, paymentTermsDays, notes }),
+    });
   } catch (e) { statusEl.textContent = e.message; return; }
   statusEl.textContent = '';
-  document.getElementById('contact-name').value = '';
-  document.getElementById('contact-email').value = '';
-  document.getElementById('contact-phone').value = '';
+  ['contact-name', 'contact-email', 'contact-phone', 'contact-address-line1', 'contact-address-city',
+   'contact-address-postcode', 'contact-address-country', 'contact-payment-terms', 'contact-notes']
+    .forEach(id => document.getElementById(id).value = '');
   contacts = await api(`/api/companies/${currentCompany.id}/contacts`);
   populateContactSelect();
   renderContacts();
+}
+
+// ---------- contact detail modal: edit + linked invoice/bill history ----------
+let contactModalId = null;
+
+function openContactModal(id) {
+  contactModalId = id;
+  const c = contacts.find(x => x.id === id);
+  if (!c) return;
+  document.getElementById('contact-modal-title').textContent = c.name;
+  document.getElementById('cm-name').value = c.name;
+  document.getElementById('cm-type').value = c.type;
+  document.getElementById('cm-email').value = c.email || '';
+  document.getElementById('cm-phone').value = c.phone || '';
+  document.getElementById('cm-address-line1').value = c.addressLine1 || '';
+  document.getElementById('cm-address-city').value = c.addressCity || '';
+  document.getElementById('cm-address-postcode').value = c.addressPostcode || '';
+  document.getElementById('cm-address-country').value = c.addressCountry || '';
+  document.getElementById('cm-payment-terms').value = c.paymentTermsDays || '';
+  document.getElementById('cm-notes').value = c.notes || '';
+  document.getElementById('cm-status').textContent = '';
+
+  const docs = invoicesBills.filter(d => d.contactId === id);
+  const historyBody = document.getElementById('cm-history-body');
+  historyBody.innerHTML = docs.length ? docs.map(d => {
+    const kindLabel = { invoice: 'Invoice', bill: 'Bill', credit_note: 'Credit note' }[d.kind] || d.kind;
+    return `<tr><td>${kindLabel}</td><td>${fmtDate(d.date)}</td><td>${escapeHtml(d.desc)}</td><td class="num">${fmt(d.amount)}</td><td>${escapeHtml(d.displayStatus)}</td></tr>`;
+  }).join('') : '<tr><td colspan="5" class="empty">No invoices or bills with this contact yet.</td></tr>';
+
+  document.getElementById('contact-modal-overlay').style.display = 'flex';
+}
+
+function closeContactModal() { document.getElementById('contact-modal-overlay').style.display = 'none'; }
+
+async function saveContactModal() {
+  const statusEl = document.getElementById('cm-status');
+  const name = document.getElementById('cm-name').value.trim();
+  if (!name) { statusEl.textContent = 'Enter a contact name.'; return; }
+  const body = {
+    name, type: document.getElementById('cm-type').value,
+    email: document.getElementById('cm-email').value.trim(), phone: document.getElementById('cm-phone').value.trim(),
+    addressLine1: document.getElementById('cm-address-line1').value.trim(), addressCity: document.getElementById('cm-address-city').value.trim(),
+    addressPostcode: document.getElementById('cm-address-postcode').value.trim(), addressCountry: document.getElementById('cm-address-country').value.trim(),
+    paymentTermsDays: document.getElementById('cm-payment-terms').value ? parseInt(document.getElementById('cm-payment-terms').value, 10) : null,
+    notes: document.getElementById('cm-notes').value.trim(),
+  };
+  try {
+    await api(`/api/companies/${currentCompany.id}/contacts/${contactModalId}`, { method: 'PUT', body: JSON.stringify(body) });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  contacts = await api(`/api/companies/${currentCompany.id}/contacts`);
+  populateContactSelect();
+  renderContacts();
+  closeContactModal();
+  showToast('Contact updated.', 'success');
 }
 
 async function deleteContact(id, name) {

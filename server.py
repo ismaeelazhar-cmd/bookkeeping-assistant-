@@ -161,7 +161,7 @@ def check_csrf_origin():
         return jsonify({"error": "Cross-origin request blocked."}), 403
 
 
-SCHEMA_VERSION = 8  # bumped for: companies.show_fx_tools
+SCHEMA_VERSION = 9  # bumped for: contacts.payment_terms_days/notes + exposing address fields
 
 
 def init_db():
@@ -338,6 +338,8 @@ def init_db():
             address_city TEXT DEFAULT '',
             address_postcode TEXT DEFAULT '',
             address_country TEXT DEFAULT '',
+            payment_terms_days INTEGER DEFAULT NULL,
+            notes TEXT DEFAULT '',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -686,6 +688,12 @@ def init_db():
         db.execute("ALTER TABLE contacts ADD COLUMN address_city TEXT DEFAULT ''")
         db.execute("ALTER TABLE contacts ADD COLUMN address_postcode TEXT DEFAULT ''")
         db.execute("ALTER TABLE contacts ADD COLUMN address_country TEXT DEFAULT ''")
+    if "payment_terms_days" not in contact_cols:
+        # Address fields existed in the schema already but were never accepted by
+        # create_contact or returned by list_contacts — a real gap, not a deliberate cut.
+        # payment_terms_days defaults the due date when raising a new invoice for this contact.
+        db.execute("ALTER TABLE contacts ADD COLUMN payment_terms_days INTEGER DEFAULT NULL")
+        db.execute("ALTER TABLE contacts ADD COLUMN notes TEXT DEFAULT ''")
     ib_cols = {row[1] for row in db.execute("PRAGMA table_info(invoices_bills)").fetchall()}
     if "linked_doc_id" not in ib_cols:
         db.execute("ALTER TABLE invoices_bills ADD COLUMN linked_doc_id INTEGER DEFAULT NULL REFERENCES invoices_bills(id)")
@@ -3233,7 +3241,10 @@ def list_presets(company_id):
 def list_contacts(company_id):
     db = get_db()
     rows = db.execute(
-        "SELECT id, name, type, email, phone FROM contacts WHERE company_id = ? ORDER BY name",
+        "SELECT id, name, type, email, phone, address_line1 as addressLine1, address_city as addressCity, "
+        "address_postcode as addressPostcode, address_country as addressCountry, "
+        "payment_terms_days as paymentTermsDays, notes "
+        "FROM contacts WHERE company_id = ? ORDER BY name",
         (company_id,),
     ).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -3250,11 +3261,43 @@ def create_contact(company_id):
         return jsonify({"error": "Contact name is required."}), 400
     db = get_db()
     cur = db.execute(
-        "INSERT INTO contacts (company_id, name, type, email, phone) VALUES (?,?,?,?,?)",
-        (company_id, name, data.get("type", "customer"), data.get("email", ""), data.get("phone", "")),
+        "INSERT INTO contacts (company_id, name, type, email, phone, address_line1, address_city, "
+        "address_postcode, address_country, payment_terms_days, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            company_id, name, data.get("type", "customer"), data.get("email", ""), data.get("phone", ""),
+            data.get("addressLine1", ""), data.get("addressCity", ""), data.get("addressPostcode", ""),
+            data.get("addressCountry", ""), data.get("paymentTermsDays") or None, data.get("notes", ""),
+        ),
     )
     db.commit()
     return jsonify({"id": cur.lastrowid})
+
+
+@app.route("/api/companies/<int:company_id>/contacts/<int:contact_id>", methods=["PUT"])
+@login_required
+@company_required
+@write_required
+def update_contact(company_id, contact_id):
+    data = request.get_json(force=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Contact name is required."}), 400
+    db = get_db()
+    cur = db.execute(
+        "UPDATE contacts SET name = ?, type = ?, email = ?, phone = ?, address_line1 = ?, address_city = ?, "
+        "address_postcode = ?, address_country = ?, payment_terms_days = ?, notes = ? "
+        "WHERE id = ? AND company_id = ?",
+        (
+            name, data.get("type", "customer"), data.get("email", ""), data.get("phone", ""),
+            data.get("addressLine1", ""), data.get("addressCity", ""), data.get("addressPostcode", ""),
+            data.get("addressCountry", ""), data.get("paymentTermsDays") or None, data.get("notes", ""),
+            contact_id, company_id,
+        ),
+    )
+    db.commit()
+    if cur.rowcount == 0:
+        return jsonify({"error": "Not found."}), 404
+    return jsonify({"ok": True})
 
 
 @app.route("/api/companies/<int:company_id>/contacts/<int:contact_id>", methods=["DELETE"])
