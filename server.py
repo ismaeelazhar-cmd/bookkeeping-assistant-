@@ -161,7 +161,7 @@ def check_csrf_origin():
         return jsonify({"error": "Cross-origin request blocked."}), 403
 
 
-SCHEMA_VERSION = 7  # bumped for: companies.business_type/show_cis_tools/tour_completed
+SCHEMA_VERSION = 8  # bumped for: companies.show_fx_tools
 
 
 def init_db():
@@ -746,6 +746,13 @@ def init_db():
         db.execute("ALTER TABLE companies ADD COLUMN business_type TEXT DEFAULT 'general'")
         db.execute("ALTER TABLE companies ADD COLUMN show_cis_tools INTEGER DEFAULT 0")
         db.execute("ALTER TABLE companies ADD COLUMN tour_completed INTEGER DEFAULT 0")
+    if "show_fx_tools" not in company_cols:
+        # FX Revaluation (a periodic foreign-currency adjustment tool) was permanently visible
+        # on the Accounts page regardless of whether the company has ever touched a foreign
+        # currency — the same clutter complaint CIS already got fixed for. Auto-shown once any
+        # transaction actually carries a currency (see applyFxVisibility client-side), or turned
+        # on manually here for someone who knows they'll need it before posting one.
+        db.execute("ALTER TABLE companies ADD COLUMN show_fx_tools INTEGER DEFAULT 0")
     db.execute("DELETE FROM schema_meta")
     db.execute("INSERT INTO schema_meta (version) VALUES (?)", (SCHEMA_VERSION,))
     db.commit()
@@ -1287,7 +1294,7 @@ def list_companies():
         "smtp_host, smtp_port, smtp_username, smtp_password, smtp_from_email, notifications_enabled, notify_email, "
         "brand_logo_path, brand_color, brand_display_name, brand_address, brand_payment_terms, brand_bank_details, "
         "stripe_secret_key, stripe_publishable_key, stripe_webhook_secret, stripe_payment_account, auto_chase_overdue_invoices, "
-        "business_type, show_cis_tools, tour_completed, "
+        "business_type, show_cis_tools, show_fx_tools, tour_completed, "
         "'owner' as permission "
         "FROM companies WHERE user_id = ? "
         "UNION ALL "
@@ -1297,7 +1304,7 @@ def list_companies():
         "c.smtp_host, c.smtp_port, c.smtp_username, c.smtp_password, c.smtp_from_email, c.notifications_enabled, c.notify_email, "
         "c.brand_logo_path, c.brand_color, c.brand_display_name, c.brand_address, c.brand_payment_terms, c.brand_bank_details, "
         "c.stripe_secret_key, c.stripe_publishable_key, c.stripe_webhook_secret, c.stripe_payment_account, c.auto_chase_overdue_invoices, "
-        "c.business_type, c.show_cis_tools, c.tour_completed, "
+        "c.business_type, c.show_cis_tools, c.show_fx_tools, c.tour_completed, "
         "cm.permission "
         "FROM companies c JOIN company_members cm ON cm.company_id = c.id "
         "WHERE cm.user_id = ? "
@@ -1410,7 +1417,7 @@ def update_settings(company_id):
         "smtp_host = ?, smtp_port = ?, smtp_username = ?, smtp_from_email = ?, "
         "notifications_enabled = ?, notify_email = ?, "
         "brand_color = ?, brand_display_name = ?, brand_address = ?, brand_payment_terms = ?, brand_bank_details = ?, "
-        "stripe_payment_account = ?, auto_chase_overdue_invoices = ?, show_cis_tools = ? "
+        "stripe_payment_account = ?, auto_chase_overdue_invoices = ?, show_cis_tools = ?, show_fx_tools = ? "
         "WHERE id = ?",
         (
             data.get("defaultCreditAccount", ""), data.get("lockedUntil", ""), data.get("periodStartDate", ""),
@@ -1425,6 +1432,7 @@ def update_settings(company_id):
             data.get("stripePaymentAccount") or "Cash",
             1 if data.get("autoChaseOverdueInvoices") else 0,
             1 if data.get("showCisTools") else 0,
+            1 if data.get("showFxTools") else 0,
             company_id,
         ),
     )

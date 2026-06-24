@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bookkeeping — T-Account Ledger</title>
 <link rel="stylesheet" href="/static/css/tokens.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -70,6 +71,29 @@
   nav.page-tabs a.nav-active { background: var(--sidebar-active-bg); color: var(--sidebar-text-active); font-weight: 700; }
   .kpi-card { transition: box-shadow .12s ease; }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+
+  /* Mobile: the sidebar becomes an off-canvas drawer (hidden by default, toggled by the
+     hamburger button), and the fixed 4-column KPI/row2 grids collapse to one column so nothing
+     gets squeezed below a usable width — this is the "use it on your phone" pass: mileage
+     logging on site, checking an invoice's status, approving a transaction. */
+  #mobile-menu-btn { display: none; }
+  @media (max-width: 768px) {
+    #mobile-menu-btn { display: inline-flex; }
+    .app-shell { flex-direction: column; }
+    .sidebar {
+      position: fixed; top: 0; left: 0; height: 100vh; z-index: 80; width: 240px;
+      transform: translateX(-100%); transition: transform .2s ease; box-shadow: 2px 0 12px rgba(0,0,0,0.25);
+    }
+    .sidebar.mobile-open { transform: translateX(0); }
+    .main-area { padding: 16px; }
+    #dashboard.row2[style*="repeat(4"] { grid-template-columns: 1fr 1fr !important; }
+    .row2 { grid-template-columns: 1fr !important; }
+    table.journal, table.inbox, table.trial { display: block; overflow-x: auto; white-space: nowrap; }
+    .topbar { flex-wrap: wrap; gap: 10px; }
+    .topbar .who input[type="search"] { width: 100% !important; margin-bottom: 8px; }
+  }
+  #mobile-sidebar-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index:70; }
+  #mobile-sidebar-backdrop.show { display: block; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
   .panel h2 { font-size: 11px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; font-weight: 700; }
   label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; font-family: inherit; }
@@ -240,9 +264,11 @@
         <a href="#page-audit" data-page="audit">Audit</a>
       </nav>
     </aside>
+    <div id="mobile-sidebar-backdrop" onclick="closeMobileSidebar()"></div>
     <div class="main-area">
   <div class="topbar">
     <div>
+      <button id="mobile-menu-btn" class="btn-secondary" onclick="toggleMobileSidebar()" style="margin:0 0 10px;" aria-label="Menu">☰</button>
       <h1 id="company-name-header">Bookkeeping — Double Entry Ledger</h1>
       <div class="sub" style="margin-bottom:0;">Enter a transaction once. It posts as a Debit and a Credit, and shows up on both accounts' T-tables.</div>
       <div id="permission-banner" class="pill" style="display:none; margin-top:6px;"></div>
@@ -280,6 +306,7 @@
       <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--text);">
         <div class="sub" style="margin:0;">Cash position</div>
         <div style="font-size:22px; font-weight:700;" id="dash-cash">—</div>
+        <div id="dash-cash-vs-last-month" style="font-size:11px; margin-top:2px; min-height:14px;"></div>
       </div>
       <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--debit);">
         <div class="sub" style="margin:0;">Outstanding receivables</div>
@@ -743,7 +770,7 @@
       <div id="fa-run-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" id="fx-revaluation-panel" style="margin-top:20px; display:none;">
       <h2>FX Revaluation</h2>
       <div class="sub" style="margin-bottom:12px;">Revalues an account's foreign-currency transactions at a new rate and posts the GBP difference to Unrealised FX Gain/Loss. Only affects accounts with at least one transaction originally posted as a foreign currency (the "Foreign currency" checkbox on Post Transaction).</div>
       <div class="row2">
@@ -1181,6 +1208,12 @@
       <div class="sub" style="margin-bottom:8px;">On automatically if you set up as a construction business — turn it on manually here if you do subcontractor work under a different business type. Off by default for everyone else, since most businesses never see a CIS deduction.</div>
       <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); margin:0;">
         <input type="checkbox" id="show-cis-tools" style="width:auto;" onchange="saveSettings()"> Show CIS tools
+      </label>
+
+      <h2 style="margin-top:24px;">Foreign Currency / FX Revaluation</h2>
+      <div class="sub" style="margin-bottom:8px;">Shows up automatically once you post a transaction in a foreign currency — turn it on manually if you know you'll need it before you've posted one. Off by default for everyone else.</div>
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); margin:0;">
+        <input type="checkbox" id="show-fx-tools" style="width:auto;" onchange="saveSettings()"> Show FX tools
       </label>
     </div>
 
@@ -2002,6 +2035,8 @@ async function openCompany(id) {
   document.getElementById('auto-chase-enabled').checked = !!currentCompany.auto_chase_overdue_invoices;
   document.getElementById('show-cis-tools').checked = !!currentCompany.show_cis_tools;
   applyCisVisibility();
+  document.getElementById('show-fx-tools').checked = !!currentCompany.show_fx_tools;
+  applyFxVisibility();
   document.getElementById('notify-email').value = currentCompany.notify_email || '';
   document.getElementById('smtp-host').value = currentCompany.smtp_host || '';
   document.getElementById('smtp-port').value = currentCompany.smtp_port || 587;
@@ -2063,6 +2098,7 @@ function buildSettingsPayload(extra) {
     notificationsEnabled: document.getElementById('notify-enabled').checked,
     autoChaseOverdueInvoices: document.getElementById('auto-chase-enabled').checked,
     showCisTools: document.getElementById('show-cis-tools').checked,
+    showFxTools: document.getElementById('show-fx-tools').checked,
     notifyEmail: document.getElementById('notify-email').value.trim(),
     smtpHost: document.getElementById('smtp-host').value.trim(),
     smtpPort: parseInt(document.getElementById('smtp-port').value, 10) || 587,
@@ -2089,6 +2125,8 @@ async function saveSettings() {
   currentCompany.fund_accounting_enabled = document.getElementById('f-fund-accounting').checked;
   currentCompany.show_cis_tools = document.getElementById('show-cis-tools').checked;
   applyCisVisibility();
+  currentCompany.show_fx_tools = document.getElementById('show-fx-tools').checked;
+  applyFxVisibility();
   currentCompany.cost_centres_enabled = document.getElementById('f-cost-centres').checked;
   currentCompany.confidence_threshold = parseFloat(document.getElementById('f-confidence-threshold').value);
   const newKey = document.getElementById('ai-api-key').value.trim();
@@ -2251,11 +2289,21 @@ function pageFromHash() {
 
 document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('nav.page-tabs a').forEach(a => {
-    a.addEventListener('click', e => { e.preventDefault(); showPage(a.dataset.page); });
+    a.addEventListener('click', e => { e.preventDefault(); showPage(a.dataset.page); closeMobileSidebar(); });
   });
   window.addEventListener('hashchange', () => showPage(pageFromHash()));
   showPage(pageFromHash());
 });
+
+function toggleMobileSidebar() {
+  document.querySelector('.sidebar').classList.toggle('mobile-open');
+  document.getElementById('mobile-sidebar-backdrop').classList.toggle('show');
+}
+
+function closeMobileSidebar() {
+  document.querySelector('.sidebar').classList.remove('mobile-open');
+  document.getElementById('mobile-sidebar-backdrop').classList.remove('show');
+}
 
 let _searchDebounce = null;
 async function runGlobalSearch() {
@@ -2843,6 +2891,7 @@ function render() {
   renderDashboard(); renderAnomalies(); renderPurchaseOrders(); renderBudgetVsActual(); renderDeptPnl(); renderRatios(); renderPettyCash(); renderCisReturn();
   renderCisStatements();
   renderLedgersPage();
+  applyFxVisibility();
 }
 
 function renderAnomalies() {
@@ -2980,6 +3029,22 @@ function renderDashboard() {
   const cash = names.filter(n => getAccountType(n) === 'cash')
     .reduce((s, n) => s + accountNetBalance(accounts[n], 'cash'), 0);
   document.getElementById('dash-cash').textContent = fmt(cash);
+
+  // "Cash this month vs last" — cash balance as it stood at the end of last month (transactions
+  // up to that date only), so the comparison is "where was I a month ago" not "what moved today".
+  const today = new Date();
+  const endOfLastMonth = new Date(today.getFullYear(), today.getMonth(), 0).toISOString().slice(0, 10);
+  const lastMonthAccounts = buildAccountsFromTx(transactions.filter(t => t.date <= endOfLastMonth), true);
+  const lastMonthCash = Object.keys(lastMonthAccounts).filter(n => getAccountType(n) === 'cash')
+    .reduce((s, n) => s + accountNetBalance(lastMonthAccounts[n], 'cash'), 0);
+  const cashDelta = cash - lastMonthCash;
+  const cashVsEl = document.getElementById('dash-cash-vs-last-month');
+  if (transactions.length) {
+    cashVsEl.style.color = cashDelta >= 0 ? 'var(--good)' : 'var(--bad)';
+    cashVsEl.textContent = `${cashDelta >= 0 ? '↑' : '↓'} ${fmt(Math.abs(cashDelta))} vs end of last month`;
+  } else {
+    cashVsEl.textContent = '';
+  }
 
   const receivables = invoicesBills.filter(d => d.kind === 'invoice' && d.status === 'sent').reduce((s, d) => s + d.amount, 0);
   const payables = invoicesBills.filter(d => d.kind === 'bill' && d.status === 'sent').reduce((s, d) => s + d.amount, 0);
@@ -5809,6 +5874,13 @@ function applyCisVisibility() {
   const cisReturnPanel = document.getElementById('cis-return-panel');
   if (cisPanel) cisPanel.style.display = show ? '' : 'none';
   if (cisReturnPanel) cisReturnPanel.style.display = show ? '' : 'none';
+}
+
+function applyFxVisibility() {
+  const hasForeignCurrency = transactions.some(t => t.currency);
+  const show = hasForeignCurrency || !!currentCompany.show_fx_tools;
+  const panel = document.getElementById('fx-revaluation-panel');
+  if (panel) panel.style.display = show ? '' : 'none';
 }
 
 function toggleAccountantTools() {
