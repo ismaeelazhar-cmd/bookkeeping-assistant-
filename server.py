@@ -161,7 +161,7 @@ def check_csrf_origin():
         return jsonify({"error": "Cross-origin request blocked."}), 403
 
 
-SCHEMA_VERSION = 6  # bumped for #6/#20: companies.auto_chase_overdue_invoices
+SCHEMA_VERSION = 7  # bumped for: companies.business_type/show_cis_tools/tour_completed
 
 
 def init_db():
@@ -722,6 +722,14 @@ def init_db():
         # Off by default: auto-emailing a customer is a much bigger behavioural change than an
         # internal nudge, and shouldn't start happening just because SMTP got configured.
         db.execute("ALTER TABLE companies ADD COLUMN auto_chase_overdue_invoices INTEGER DEFAULT 0")
+    if "business_type" not in company_cols:
+        # Persists the onboarding wizard's business-type choice (previously only used once, to
+        # pick a chart-of-accounts template, then thrown away) so the UI can hide irrelevant
+        # tools — e.g. CIS only matters to construction businesses — instead of showing every
+        # feature to every persona regardless of fit.
+        db.execute("ALTER TABLE companies ADD COLUMN business_type TEXT DEFAULT 'general'")
+        db.execute("ALTER TABLE companies ADD COLUMN show_cis_tools INTEGER DEFAULT 0")
+        db.execute("ALTER TABLE companies ADD COLUMN tour_completed INTEGER DEFAULT 0")
     db.execute("DELETE FROM schema_meta")
     db.execute("INSERT INTO schema_meta (version) VALUES (?)", (SCHEMA_VERSION,))
     db.commit()
@@ -1263,6 +1271,7 @@ def list_companies():
         "smtp_host, smtp_port, smtp_username, smtp_password, smtp_from_email, notifications_enabled, notify_email, "
         "brand_logo_path, brand_color, brand_display_name, brand_address, brand_payment_terms, brand_bank_details, "
         "stripe_secret_key, stripe_publishable_key, stripe_webhook_secret, stripe_payment_account, auto_chase_overdue_invoices, "
+        "business_type, show_cis_tools, tour_completed, "
         "'owner' as permission "
         "FROM companies WHERE user_id = ? "
         "UNION ALL "
@@ -1272,6 +1281,7 @@ def list_companies():
         "c.smtp_host, c.smtp_port, c.smtp_username, c.smtp_password, c.smtp_from_email, c.notifications_enabled, c.notify_email, "
         "c.brand_logo_path, c.brand_color, c.brand_display_name, c.brand_address, c.brand_payment_terms, c.brand_bank_details, "
         "c.stripe_secret_key, c.stripe_publishable_key, c.stripe_webhook_secret, c.stripe_payment_account, c.auto_chase_overdue_invoices, "
+        "c.business_type, c.show_cis_tools, c.tour_completed, "
         "cm.permission "
         "FROM companies c JOIN company_members cm ON cm.company_id = c.id "
         "WHERE cm.user_id = ? "
@@ -1304,7 +1314,8 @@ def create_company():
         business_type = "general"
     db = get_db()
     cur = db.execute(
-        "INSERT INTO companies (user_id, name) VALUES (?, ?)", (session["user_id"], name)
+        "INSERT INTO companies (user_id, name, business_type, show_cis_tools) VALUES (?, ?, ?, ?)",
+        (session["user_id"], name, business_type, 1 if business_type == "construction" else 0),
     )
     company_id = cur.lastrowid
     seed_default_chart(db, company_id, business_type)
@@ -1383,7 +1394,7 @@ def update_settings(company_id):
         "smtp_host = ?, smtp_port = ?, smtp_username = ?, smtp_from_email = ?, "
         "notifications_enabled = ?, notify_email = ?, "
         "brand_color = ?, brand_display_name = ?, brand_address = ?, brand_payment_terms = ?, brand_bank_details = ?, "
-        "stripe_payment_account = ?, auto_chase_overdue_invoices = ? "
+        "stripe_payment_account = ?, auto_chase_overdue_invoices = ?, show_cis_tools = ? "
         "WHERE id = ?",
         (
             data.get("defaultCreditAccount", ""), data.get("lockedUntil", ""), data.get("periodStartDate", ""),
@@ -1397,6 +1408,7 @@ def update_settings(company_id):
             data.get("brandPaymentTerms", ""), data.get("brandBankDetails", ""),
             data.get("stripePaymentAccount") or "Cash",
             1 if data.get("autoChaseOverdueInvoices") else 0,
+            1 if data.get("showCisTools") else 0,
             company_id,
         ),
     )
@@ -1428,6 +1440,16 @@ def update_settings(company_id):
         db.execute("UPDATE companies SET stripe_webhook_secret = ? WHERE id = ?", (encrypt_secret(data["stripeWebhookSecret"]), company_id))
     elif data.get("clearStripeWebhookSecret"):
         db.execute("UPDATE companies SET stripe_webhook_secret = '' WHERE id = ?", (company_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/tour-completed", methods=["POST"])
+@login_required
+@company_required
+def mark_tour_completed(company_id):
+    db = get_db()
+    db.execute("UPDATE companies SET tour_completed = 1 WHERE id = ?", (company_id,))
     db.commit()
     return jsonify({"ok": True})
 

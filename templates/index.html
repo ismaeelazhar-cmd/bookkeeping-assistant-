@@ -139,7 +139,15 @@
 </head>
 <body>
 
-<div id="auth-screen" class="center-screen" style="display:none;">
+<div id="auth-screen" class="center-screen" style="display:none; flex-direction:column; gap:24px;">
+  <div style="text-align:center; max-width:420px;">
+    <div style="font-weight:800; font-size:20px; letter-spacing:-0.02em; margin-bottom:10px;">MyAccountingPal</div>
+    <div style="font-size:14px; color:var(--muted); line-height:1.5;">
+      Real double-entry bookkeeping that posts itself where it can.<br>
+      Snap a receipt, send an invoice, ask a plain-English question about your books — the ledger, VAT, and reports update automatically.<br>
+      Built for small businesses, not accountants — though accountants are welcome too.
+    </div>
+  </div>
   <div class="panel auth-card" id="auth-card-fields">
     <h1 id="auth-title">Log in</h1>
     <div class="sub">Bookkeeping — multi-company ledger</div>
@@ -456,7 +464,13 @@
       </div>
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div style="margin-top:20px;">
+      <div class="panel" style="cursor:pointer;" onclick="toggleAccountantTools()">
+        <h2 style="margin:0; display:flex; justify-content:space-between; align-items:center;">Accountant Tools <span id="accountant-tools-chevron">▸</span></h2>
+        <div class="sub" style="margin:4px 0 0;">Compound journals, payroll, dividends, and mileage — less-common entries, tucked away so the everyday workflow stays clean.</div>
+      </div>
+      <div id="accountant-tools-body" style="display:none;">
+    <div class="panel" style="margin-top:12px;">
       <h2>Compound Journal Entry</h2>
       <div class="sub" style="margin-bottom:12px;">For one payment or receipt that splits across several accounts (e.g. a BACS run covering Rent + Utilities + Insurance from one bank line). Pick the one account every line below shares — and add a line per other account. This posts as linked entries sharing one journal ID, with the exact same net ledger effect as a single multi-line posting.</div>
 
@@ -558,6 +572,8 @@
         <thead><tr><th>Date</th><th>Trip</th><th>Purpose</th><th class="num">Miles</th><th class="num">Claim</th><th></th></tr></thead>
         <tbody id="mileage-log-body"></tbody>
       </table>
+    </div>
+      </div>
     </div>
   </div>
 
@@ -879,7 +895,7 @@
       <table class="trial"><thead><tr><td><b>Supplier</b></td><td class="num"><b>Current</b></td><td class="num"><b>1-30</b></td><td class="num"><b>31-60</b></td><td class="num"><b>61-90</b></td><td class="num"><b>90+</b></td></tr></thead><tbody id="aging-bill-body"></tbody></table>
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" id="cis-panel" style="margin-top:20px; display:none;">
       <h2>CIS — Contractor / Subcontractor View</h2>
       <div class="sub" style="margin-bottom:12px;">Every paid invoice or bill with a CIS deduction applied (set when marking it paid), grouped by who it's with. Bills are payments you made as a contractor (CIS deducted, owed to HMRC); invoices are payments you received as a subcontractor (CIS suffered, recoverable against your own tax).</div>
       <div class="row2">
@@ -1002,7 +1018,7 @@
       <table class="trial" id="tax-computation-table" style="margin-top:10px;"></table>
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" id="cis-return-panel" style="margin-top:20px; display:none;">
       <h2>CIS Monthly Return</h2>
       <div class="sub" style="margin-bottom:12px;">CIS suffered (deductions withheld from your invoices, recoverable against your tax bill) and CIS deducted on bills you've paid to subcontractors (owed to HMRC) — using the Financial Statements period above. Record a CIS deduction when marking an invoice/bill paid.</div>
       <table class="trial" id="cis-table" style="margin-top:10px;"></table>
@@ -1137,14 +1153,25 @@
       <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); margin:0;">
         <input type="checkbox" id="f-cost-centres" style="width:auto;" onchange="saveSettings(); toggleCostCentresUI();"> Enable cost centres
       </label>
+
+      <h2 style="margin-top:24px;">CIS (Construction Industry Scheme)</h2>
+      <div class="sub" style="margin-bottom:8px;">On automatically if you set up as a construction business — turn it on manually here if you do subcontractor work under a different business type. Off by default for everyone else, since most businesses never see a CIS deduction.</div>
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); margin:0;">
+        <input type="checkbox" id="show-cis-tools" style="width:auto;" onchange="saveSettings()"> Show CIS tools
+      </label>
     </div>
 
     <div class="panel" style="margin-top:20px;">
-      <h2>AI settings (Claude API key)</h2>
-      <div class="sub" style="margin:8px 0;">Stored against this company on the server (in this app's database). The Claude API call happens server-side — this key is never sent to or readable from your browser, including by this app's own frontend. Powers Ask Your Ledger (Dashboard) and "Analyze with AI" (Bank → Import Bank Statement).</div>
+      <h2>AI Features</h2>
+      <div class="sub" style="margin:8px 0;">Turns on: reading receipts automatically, suggesting categories for bank transactions, and "Ask Your Ledger" — asking plain-English questions about your own books. Runs on Anthropic's Claude, the same AI behind this app's own guided tour copy.</div>
+      <ol style="font-size:13px; color:var(--text); margin:0 0 10px; padding-left:20px;">
+        <li style="margin-bottom:4px;">Go to <strong>console.anthropic.com</strong> and create a free account.</li>
+        <li style="margin-bottom:4px;">Go to <strong>API Keys → Create Key</strong>, and copy it.</li>
+      </ol>
       <div class="sub" id="ai-key-status" style="margin:0 0 8px;"></div>
-      <input type="password" id="ai-api-key" placeholder="sk-ant-... (enter to set/replace)" oninput="saveSettings()">
-      <button class="btn-secondary" style="width:100%; margin-top:8px;" onclick="clearAiApiKey()">Clear key</button>
+      <input type="password" id="ai-api-key" placeholder="paste your key here to enable AI features" oninput="saveSettings()">
+      <button class="btn-secondary" style="width:100%; margin-top:8px;" onclick="clearAiApiKey()">Turn off AI features</button>
+      <div class="sub" style="margin:8px 0 0;">Stored on this app's server, never sent to or readable from your browser. Anthropic charges per use of your own key (typically a few pence per receipt/question) — there's no markup or subscription from this app.</div>
 
       <h2 style="margin-top:24px;">Clarification confidence threshold</h2>
       <div class="sub" style="margin-bottom:8px;">AI suggestions scoring below this go to the Clarification Queue (Bank page) instead of being suggested automatically. Lower = the AI guesses more often; higher = more lines get held for your review.</div>
@@ -1560,6 +1587,10 @@ async function tourStep(delta) {
 function endTour(event) {
   if (event) event.preventDefault();
   document.getElementById('tour-overlay').style.display = 'none';
+  if (currentCompany && !currentCompany.tour_completed) {
+    currentCompany.tour_completed = 1;
+    api(`/api/companies/${currentCompany.id}/tour-completed`, { method: 'POST' }).catch(() => {});
+  }
 }
 
 async function showTourStep() {
@@ -1898,6 +1929,7 @@ async function onboardingNext() {
     closeOnboarding();
     await loadCompanies();
     await openCompany(company.id);
+    startTour(); // forced, not offered — a first-time company has nothing else to orient a new user
   } catch (e) { errEl.textContent = e.message; }
 }
 
@@ -1945,6 +1977,8 @@ async function openCompany(id) {
   renderBrandLogoPreview();
   document.getElementById('notify-enabled').checked = !!currentCompany.notifications_enabled;
   document.getElementById('auto-chase-enabled').checked = !!currentCompany.auto_chase_overdue_invoices;
+  document.getElementById('show-cis-tools').checked = !!currentCompany.show_cis_tools;
+  applyCisVisibility();
   document.getElementById('notify-email').value = currentCompany.notify_email || '';
   document.getElementById('smtp-host').value = currentCompany.smtp_host || '';
   document.getElementById('smtp-port').value = currentCompany.smtp_port || 587;
@@ -2005,6 +2039,7 @@ function buildSettingsPayload(extra) {
     brandBankDetails: document.getElementById('brand-bank-details').value,
     notificationsEnabled: document.getElementById('notify-enabled').checked,
     autoChaseOverdueInvoices: document.getElementById('auto-chase-enabled').checked,
+    showCisTools: document.getElementById('show-cis-tools').checked,
     notifyEmail: document.getElementById('notify-email').value.trim(),
     smtpHost: document.getElementById('smtp-host').value.trim(),
     smtpPort: parseInt(document.getElementById('smtp-port').value, 10) || 587,
@@ -2029,6 +2064,8 @@ async function saveSettings() {
   currentCompany.locked_until = document.getElementById('f-locked-until').value;
   currentCompany.period_start_date = document.getElementById('f-period-start').value;
   currentCompany.fund_accounting_enabled = document.getElementById('f-fund-accounting').checked;
+  currentCompany.show_cis_tools = document.getElementById('show-cis-tools').checked;
+  applyCisVisibility();
   currentCompany.cost_centres_enabled = document.getElementById('f-cost-centres').checked;
   currentCompany.confidence_threshold = parseFloat(document.getElementById('f-confidence-threshold').value);
   const newKey = document.getElementById('ai-api-key').value.trim();
@@ -5675,6 +5712,21 @@ async function deleteBankConnection(id) {
 }
 
 // ---------- Fund accounting (Stage 6, opt-in) ----------
+
+function applyCisVisibility() {
+  const show = currentCompany.business_type === 'construction' || !!currentCompany.show_cis_tools;
+  const cisPanel = document.getElementById('cis-panel');
+  const cisReturnPanel = document.getElementById('cis-return-panel');
+  if (cisPanel) cisPanel.style.display = show ? '' : 'none';
+  if (cisReturnPanel) cisReturnPanel.style.display = show ? '' : 'none';
+}
+
+function toggleAccountantTools() {
+  const body = document.getElementById('accountant-tools-body');
+  const open = body.style.display !== 'none';
+  body.style.display = open ? 'none' : 'block';
+  document.getElementById('accountant-tools-chevron').textContent = open ? '▸' : '▾';
+}
 
 function toggleFundAccountingUI() {
   const on = document.getElementById('f-fund-accounting').checked;
