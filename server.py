@@ -363,6 +363,22 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- Line items refine an invoice/bill's PDF and total — they do NOT change how it posts
+        -- to the ledger (still one net amount against invoices_bills.account, same as before
+        -- line items existed). Supporting genuinely separate ledger legs per line item would
+        -- mean re-deriving send/pay's posting logic to look more like the compound-journal
+        -- multi-leg pattern; deferred since most small invoices are one VAT rate/one revenue
+        -- account, and the real complaint being fixed here is "no line items on the document,"
+        -- not "I need different accounts within one invoice."
+        CREATE TABLE IF NOT EXISTS invoice_line_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id INTEGER NOT NULL REFERENCES invoices_bills(id) ON DELETE CASCADE,
+            description TEXT NOT NULL,
+            quantity REAL NOT NULL DEFAULT 1,
+            unit_price_pence INTEGER NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        );
+
         CREATE TABLE IF NOT EXISTS attachments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -3252,11 +3268,12 @@ def delete_contact(company_id, contact_id):
 
 # ---------- invoices & bills ----------
 
-def generate_invoice_pdf(company_row, doc_row, contact_row):
-    """#6: a real, customer-facing invoice/bill PDF — logo, business address, line item,
+def generate_invoice_pdf(company_row, doc_row, contact_row, line_items=None):
+    """#6: a real, customer-facing invoice/bill PDF — logo, business address, line items,
     payment terms, and bank details, all pulled from the company's branding settings rather
     than hardcoded. fpdf2 is pure-Python (no system libs like wkhtmltopdf/Cairo needed), so this
-    runs the same in any deployment without extra setup."""
+    runs the same in any deployment without extra setup. line_items is optional — documents
+    created before line items existed fall back to the single desc/amount row they've always had."""
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=20)
@@ -3295,16 +3312,35 @@ def generate_invoice_pdf(company_row, doc_row, contact_row):
     pdf.cell(95, 6, f"Due: {doc_row['due_date']}", ln=True)
     pdf.ln(4)
 
-    pdf.set_fill_color(10, 126, 164)
-    pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(140, 8, "Description", border=0, fill=True)
-    pdf.cell(50, 8, "Amount", border=0, fill=True, align="R", ln=True)
-    pdf.set_text_color(0, 0, 0)
-    pdf.set_font("Helvetica", "", 10)
     amount = from_pence(doc_row["amount_pence"])
-    pdf.cell(140, 8, doc_row["desc"], border="B")
-    pdf.cell(50, 8, f"{amount:,.2f}", border="B", align="R", ln=True)
+    if line_items:
+        pdf.set_fill_color(10, 126, 164)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(95, 8, "Description", border=0, fill=True)
+        pdf.cell(25, 8, "Qty", border=0, fill=True, align="R")
+        pdf.cell(35, 8, "Unit price", border=0, fill=True, align="R")
+        pdf.cell(35, 8, "Amount", border=0, fill=True, align="R", ln=True)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_font("Helvetica", "", 10)
+        for li in line_items:
+            qty = li["quantity"]
+            unit_price = from_pence(li["unit_price_pence"])
+            line_total = qty * unit_price
+            pdf.cell(95, 7, li["description"], border="B")
+            pdf.cell(25, 7, f"{qty:g}", border="B", align="R")
+            pdf.cell(35, 7, f"{unit_price:,.2f}", border="B", align="R")
+            pdf.cell(35, 7, f"{line_total:,.2f}", border="B", align="R", ln=True)
+    else:
+        pdf.set_fill_color(10, 126, 164)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(140, 8, "Description", border=0, fill=True)
+        pdf.cell(50, 8, "Amount", border=0, fill=True, align="R", ln=True)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.cell(140, 8, doc_row["desc"], border="B")
+        pdf.cell(50, 8, f"{amount:,.2f}", border="B", align="R", ln=True)
     if doc_row["vat_rate"]:
         vat_amount = round(amount * doc_row["vat_rate"] / (100 + doc_row["vat_rate"]), 2)
         pdf.cell(140, 8, f"Includes VAT @ {doc_row['vat_rate']:g}%", border="B")
@@ -3357,6 +3393,29 @@ def list_invoices_bills(company_id):
     return jsonify([_serialize_invoice_bill(r, today) for r in rows])
 
 
+def _validate_line_items(raw_items):
+    """Line items refine the invoice document (and its total) — see the schema comment on
+    invoice_line_items for why they don't each post to a different ledger account. Returns
+    (line_items, total_pence) or raises ValueError with a user-facing message."""
+    items = []
+    total_pence = 0
+    for raw in raw_items:
+        description = (raw.get("description") or "").strip()
+        try:
+            quantity = float(raw.get("quantity") or 1)
+            unit_price = float(raw.get("unitPrice") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Each line item needs a numeric quantity and unit price.")
+        if not description or quantity <= 0 or unit_price <= 0:
+            raise ValueError("Each line item needs a description, a positive quantity, and a positive unit price.")
+        line_pence = round(quantity * unit_price * 100)
+        total_pence += line_pence
+        items.append({"description": description, "quantity": quantity, "unitPricePence": round(unit_price * 100)})
+    if not items:
+        raise ValueError("Add at least one line item.")
+    return items, total_pence
+
+
 @app.route("/api/companies/<int:company_id>/invoices-bills", methods=["POST"])
 @login_required
 @company_required
@@ -3369,6 +3428,17 @@ def create_invoice_bill(company_id):
     )
     if kind not in ("invoice", "bill", "credit_note"):
         return jsonify({"error": "kind must be 'invoice', 'bill', or 'credit_note'."}), 400
+
+    line_items, line_items_total_pence = None, None
+    raw_line_items = data.get("lineItems")
+    if raw_line_items:
+        try:
+            line_items, line_items_total_pence = _validate_line_items(raw_line_items)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        amount = from_pence(line_items_total_pence)
+        desc = desc or (line_items[0]["description"] if len(line_items) == 1 else f"{len(line_items)} line items")
+
     if not all([contact_id, date, due_date, desc, account]) or not amount or float(amount) <= 0:
         return jsonify({"error": "Contact, dates, description, account, and a positive amount are all required."}), 400
 
@@ -3390,8 +3460,14 @@ def create_invoice_bill(company_id):
         "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (company_id, kind, contact_id, date, due_date, desc, to_pence(amount), account, float(data.get("vatRate") or 0), linked_doc_id),
     )
+    doc_id = cur.lastrowid
+    if line_items:
+        db.executemany(
+            "INSERT INTO invoice_line_items (doc_id, description, quantity, unit_price_pence, sort_order) VALUES (?,?,?,?,?)",
+            [(doc_id, li["description"], li["quantity"], li["unitPricePence"], i) for i, li in enumerate(line_items)],
+        )
     db.commit()
-    return jsonify({"id": cur.lastrowid})
+    return jsonify({"id": doc_id})
 
 
 @app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>/send", methods=["POST"])
@@ -3577,6 +3653,63 @@ def _load_doc_and_contact(db, company_id, doc_id):
     return doc, contact
 
 
+def _load_line_items(db, doc_id):
+    rows = db.execute(
+        "SELECT description, quantity, unit_price_pence FROM invoice_line_items WHERE doc_id = ? ORDER BY sort_order",
+        (doc_id,),
+    ).fetchall()
+    return [dict(r) for r in rows] or None
+
+
+@app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>/line-items", methods=["GET"])
+@login_required
+@company_required
+def get_invoice_line_items(company_id, doc_id):
+    db = get_db()
+    doc = db.execute("SELECT id FROM invoices_bills WHERE id = ? AND company_id = ?", (doc_id, company_id)).fetchone()
+    if doc is None:
+        return jsonify({"error": "Not found."}), 404
+    items = _load_line_items(db, doc_id) or []
+    for li in items:
+        li["unitPrice"] = from_pence(li.pop("unit_price_pence"))
+    return jsonify(items)
+
+
+@app.route("/api/companies/<int:company_id>/invoices-bills/preview-pdf", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def preview_invoice_pdf(company_id):
+    """Live preview before saving anything — #6's "preview before sending." Builds the PDF from
+    whatever's currently in the on-screen form (contact, dates, line items) without writing a
+    draft to the database first just to look at it."""
+    data = request.get_json(force=True) or {}
+    db = get_db()
+    contact_id = data.get("contactId")
+    contact = db.execute("SELECT * FROM contacts WHERE id = ? AND company_id = ?", (contact_id, company_id)).fetchone()
+    if contact is None:
+        return jsonify({"error": "Pick a contact first."}), 400
+
+    raw_line_items = data.get("lineItems") or []
+    try:
+        line_items, total_pence = _validate_line_items(raw_line_items) if raw_line_items else (None, to_pence(data.get("amount") or 0))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not total_pence:
+        return jsonify({"error": "Add at least one line item or an amount."}), 400
+
+    fake_doc = {
+        "id": 0, "kind": data.get("kind") or "invoice", "date": data.get("date") or datetime.date.today().isoformat(),
+        "due_date": data.get("dueDate") or datetime.date.today().isoformat(),
+        "desc": data.get("desc") or (line_items[0]["description"] if line_items else "Preview"),
+        "amount_pence": total_pence, "vat_rate": float(data.get("vatRate") or 0), "portal_token": None,
+    }
+    pdf_line_items = [{"description": li["description"], "quantity": li["quantity"], "unit_price_pence": li["unitPricePence"]} for li in line_items] if line_items else None
+    pdf_bytes = generate_invoice_pdf(g.company, fake_doc, contact, pdf_line_items)
+    from flask import Response
+    return Response(pdf_bytes, mimetype="application/pdf")
+
+
 @app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>/pdf", methods=["GET"])
 @login_required
 @company_required
@@ -3585,7 +3718,7 @@ def download_invoice_pdf(company_id, doc_id):
     doc, contact = _load_doc_and_contact(db, company_id, doc_id)
     if doc is None or contact is None:
         return jsonify({"error": "Not found."}), 404
-    pdf_bytes = generate_invoice_pdf(g.company, doc, contact)
+    pdf_bytes = generate_invoice_pdf(g.company, doc, contact, _load_line_items(db, doc_id))
     from flask import Response
     return Response(pdf_bytes, mimetype="application/pdf", headers={
         "Content-Disposition": f"attachment; filename={doc['kind']}-{doc_id:04d}.pdf"
@@ -3608,7 +3741,7 @@ def send_invoice_email(db, company, doc, contact, reminder=False):
     if not contact["email"]:
         raise ValueError(f'"{contact["name"]}" has no email address on file — add one in Contacts first.')
     doc = _ensure_portal_token(db, doc)
-    pdf_bytes = generate_invoice_pdf(company, doc, contact)
+    pdf_bytes = generate_invoice_pdf(company, doc, contact, _load_line_items(db, doc["id"]))
     label = {"invoice": "Invoice", "bill": "Bill", "credit_note": "Credit note"}.get(doc["kind"], "Document")
     amount = from_pence(doc["amount_pence"])
     display_name = company["brand_display_name"] or company["name"]
