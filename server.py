@@ -4658,16 +4658,16 @@ def _advance_next_due(date_str, frequency):
     return datetime.date(year, month, day).isoformat()
 
 
-@app.route("/api/companies/<int:company_id>/period-close", methods=["POST"])
-@login_required
-@company_required
-@write_required
-def period_close(company_id):
+def run_recurring_journals_for_company(db, company):
     """Posts every recurring journal that's due (next_due <= today and not past its end_date),
     then advances next_due by one cadence step. Skips (and reports) anything that fails to post
     — e.g. a recurring journal whose date now falls in a locked period — rather than aborting
-    the whole run."""
-    db = get_db()
+    the whole run. Pulled out of the period-close route so the background scheduler can call it
+    too: recurring journals now post themselves automatically (hourly tick) instead of waiting
+    for someone to click "Close period" — that button still exists for on-demand use, but it's
+    no longer the only way these ever post."""
+    company_id = company["id"]
+    g.company = company  # post_ledger_transaction reads g.company; not set when called from the scheduler (no request)
     today = datetime.date.today().isoformat()
     due = db.execute(
         "SELECT * FROM recurring_journals WHERE company_id = ? AND next_due <= ? "
@@ -4714,7 +4714,15 @@ def period_close(company_id):
         db.execute("UPDATE recurring_journals SET next_due = ? WHERE id = ?", (next_due, rj["id"]))
 
     db.commit()
-    return jsonify({"posted": posted, "skipped": skipped, "queued": queued})
+    return {"posted": posted, "skipped": skipped, "queued": queued}
+
+
+@app.route("/api/companies/<int:company_id>/period-close", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def period_close(company_id):
+    return jsonify(run_recurring_journals_for_company(get_db(), g.company))
 
 
 # ---------- payroll journal wizard ----------
@@ -5445,12 +5453,17 @@ def _scheduler_tick():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     try:
-        companies = conn.execute("SELECT * FROM companies").fetchall()
-        for company in companies:
-            try:
-                run_notifications_for_company(conn, company)
-            except Exception:
-                logging.exception("Scheduler: notification check failed for company %s", company["id"])
+        with app.app_context():  # run_recurring_journals_for_company sets g.company; g needs a pushed app context outside a real request
+            companies = conn.execute("SELECT * FROM companies").fetchall()
+            for company in companies:
+                try:
+                    run_recurring_journals_for_company(conn, company)
+                except Exception:
+                    logging.exception("Scheduler: recurring journals failed for company %s", company["id"])
+                try:
+                    run_notifications_for_company(conn, company)
+                except Exception:
+                    logging.exception("Scheduler: notification check failed for company %s", company["id"])
     finally:
         conn.close()
 
