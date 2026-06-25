@@ -391,12 +391,13 @@
 
     <div class="panel" id="section-ask" style="margin-bottom:16px;">
       <h2>Ask Your Ledger</h2>
-      <div class="sub" style="margin-bottom:10px;">Ask a plain-English question — e.g. "how much did I spend on travel last quarter" or "what's my biggest expense this year". Claude reads your actual transactions to answer; needs a Claude API key set under Settings → AI settings.</div>
+      <div class="sub" style="margin-bottom:10px;">Ask a plain-English question — e.g. "how much did I spend on travel last quarter" or "what's my biggest expense this year". Conversational: follow-up questions carry context from earlier in the chat. Claude reads your actual transactions to answer; needs a Claude API key set under Settings → AI settings.</div>
       <div id="ask-history" style="max-height:260px; overflow-y:auto; margin-bottom:10px;"></div>
       <div class="row2">
         <input type="text" id="ask-question" placeholder="Ask a question about this company's ledger…" onkeydown="if(event.key==='Enter'){askLedger();}">
         <button class="btn-primary" style="margin-top:0;" onclick="askLedger()">Ask</button>
       </div>
+      <button class="btn-secondary" style="margin-top:8px;" onclick="clearAskHistory()">Clear conversation</button>
       <div id="ask-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
   </div>
@@ -3411,6 +3412,7 @@ function renderDashboard() {
   renderAttentionList();
   renderSetupChecklist();
   renderSampleDataBanners();
+  if (!askHistoryLoadedFor[currentCompany.id]) { loadAskHistory(); askHistoryLoadedFor[currentCompany.id] = true; }
   renderSpendByCategory();
   renderHealthScore();
 }
@@ -4023,18 +4025,43 @@ async function skipClarification(itemId) {
   await loadClarificationQueue();
 }
 
-// ---------- Ask Your Ledger ----------
+// ---------- Ask Your Ledger (persistent, multi-turn AI assistant panel) ----------
+// History persists per-company in localStorage (not the server) — this is a convenience cache
+// of a conversation the user already had, not a record anything else in the app depends on, so
+// a simple client-side store is enough rather than a new DB table + migration.
 
 let askHistory = [];
+let askHistoryLoadedFor = {};
+
+function askHistoryStorageKey() { return `askHistory:${currentCompany.id}`; }
+
+function loadAskHistory() {
+  try {
+    askHistory = JSON.parse(localStorage.getItem(askHistoryStorageKey()) || '[]');
+  } catch (e) {
+    askHistory = [];
+  }
+  renderAskHistory();
+}
+
+function saveAskHistory() {
+  localStorage.setItem(askHistoryStorageKey(), JSON.stringify(askHistory));
+}
+
+function clearAskHistory() {
+  askHistory = [];
+  saveAskHistory();
+  renderAskHistory();
+}
 
 function renderAskHistory() {
   const el = document.getElementById('ask-history');
-  el.innerHTML = askHistory.map(turn => `
+  el.innerHTML = askHistory.length ? askHistory.map(turn => `
     <div style="margin-bottom:10px;">
       <div style="font-weight:600;">${escapeHtml(turn.question)}</div>
       <div style="color:var(--text); white-space:pre-wrap;">${escapeHtml(turn.answer)}</div>
       ${turn.meta ? `<div class="sub" style="margin:2px 0 0;">${escapeHtml(turn.meta)}</div>` : ''}
-    </div>`).join('');
+    </div>`).join('') : '<div class="empty">Ask anything about this company\'s ledger — the conversation carries context, so follow-ups work ("and last quarter?").</div>';
   el.scrollTop = el.scrollHeight;
 }
 
@@ -4049,7 +4076,10 @@ async function askLedger() {
 
   let result;
   try {
-    result = await api(`/api/companies/${currentCompany.id}/ask`, { method: 'POST', body: JSON.stringify({ question }) });
+    result = await api(`/api/companies/${currentCompany.id}/ask`, {
+      method: 'POST',
+      body: JSON.stringify({ question, history: askHistory.map(t => ({ question: t.question, answer: t.answer })) }),
+    });
   } catch (e) { statusEl.textContent = e.message; return; }
 
   statusEl.textContent = '';
@@ -4057,6 +4087,7 @@ async function askLedger() {
     question, answer: result.answer,
     meta: `Based on ${result.transactionsConsidered} transaction(s)${result.truncated ? ' (older history was truncated)' : ''}.`
   });
+  saveAskHistory();
   renderAskHistory();
 }
 

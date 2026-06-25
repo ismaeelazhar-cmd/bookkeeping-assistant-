@@ -3273,11 +3273,15 @@ def call_plaid(company, path, payload):
 @write_required
 @rate_limit(max_attempts=20, window_seconds=3600)
 def ask_ledger(company_id):
-    """Stage 5 flagship feature: natural-language Q&A over this company's actual ledger.
-    The model only sees a compact CSV export built fresh per request — no separate index to
-    keep in sync, and the same server-side-key pattern as the rest of Stage 5."""
+    """Ask Your Ledger: natural-language Q&A over this company's actual ledger, now a real
+    multi-turn conversation rather than independent one-shot questions — the client sends back
+    the last few turns and they're threaded into the messages list as real prior conversation, so
+    a follow-up like "and last quarter?" can refer to what was just discussed. The model only
+    sees a compact CSV export built fresh per request — no separate index to keep in sync, and
+    the same server-side-key pattern as the rest of the AI features."""
     data = request.get_json(force=True) or {}
     question = (data.get("question") or "").strip()
+    history = data.get("history") or []
     if not question:
         return jsonify({"error": "Ask a question first."}), 400
     api_key = decrypt_secret(g.company["ai_api_key"])
@@ -3301,20 +3305,34 @@ def ask_ledger(company_id):
     ledger_csv = "\n".join(csv_lines)
 
     today = datetime.date.today().isoformat()
-    prompt = f"""You are a financial assistant answering a question about a small UK business's bookkeeping ledger.
-Today's date is {today}. Below is the full transaction ledger as CSV (each row is one debit/credit posting).
+    business_type = g.company["business_type"] or "general"
+    company_name = g.company["brand_display_name"] or g.company["name"]
+    system_context = f"""You are a financial assistant answering questions about {company_name}'s bookkeeping ledger — a {business_type} business. Today's date is {today}. Below is the full transaction ledger as CSV (each row is one debit/credit posting).
 {"Note: this is only the most recent " + str(MAX_ROWS) + " transactions, the ledger has more history than shown." if truncated else ""}
 
-Answer the question concisely and specifically, citing actual figures computed from this data — don't guess or
-estimate. If the data doesn't contain what's needed to answer, say so plainly rather than making something up.
+Answer concisely and specifically, citing actual figures computed from this data — don't guess or estimate. If
+the data doesn't contain what's needed to answer, say so plainly rather than making something up. This is an
+ongoing conversation — a follow-up question may refer back to something asked earlier; use that context.
 
 Ledger CSV:
-{ledger_csv}
+{ledger_csv}"""
 
-Question: {question}"""
+    # Real multi-turn conversation: each prior question/answer becomes an actual user/assistant
+    # message pair, with the ledger CSV + business context prepended to the FIRST user message
+    # only — re-sending the whole ledger on every turn would just be re-describing context the
+    # model already has in this same request; capping history keeps the payload bounded.
+    MAX_HISTORY_TURNS = 6
+    valid_history = [t for t in history if t.get("question") and t.get("answer")][-MAX_HISTORY_TURNS:]
+    messages = []
+    for i, turn in enumerate(valid_history):
+        content = f"{system_context}\n\nQuestion: {turn['question']}" if i == 0 else turn["question"]
+        messages.append({"role": "user", "content": content})
+        messages.append({"role": "assistant", "content": turn["answer"]})
+    final_content = question if valid_history else f"{system_context}\n\nQuestion: {question}"
+    messages.append({"role": "user", "content": final_content})
 
     try:
-        answer = call_claude(api_key, [{"role": "user", "content": prompt}], max_tokens=1024)
+        answer = call_claude(api_key, messages, max_tokens=1024)
     except urllib.error.HTTPError as e:
         return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
     except urllib.error.URLError as e:
