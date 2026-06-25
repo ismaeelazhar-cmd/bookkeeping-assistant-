@@ -3217,6 +3217,7 @@ function expandTransactionLines(t) {
 }
 
 async function deleteTransaction(id) {
+  if (!(await confirmAction('Delete this transaction? This voids it permanently — it cannot be undone.', 'Delete'))) return;
   try {
     await api(`/api/companies/${currentCompany.id}/transactions/${id}`, { method: 'DELETE' });
   } catch (e) { alert(e.message); return; }
@@ -4144,6 +4145,7 @@ async function addCategorizationRule() {
 }
 
 async function deleteCategorizationRuleUI(id) {
+  if (!(await confirmAction('Delete this categorization rule? Future imports matching this keyword will stop auto-categorizing.', 'Delete'))) return;
   await api(`/api/companies/${currentCompany.id}/categorization-rules/${id}`, { method: 'DELETE' });
   await loadCategorizationRules();
 }
@@ -4598,6 +4600,7 @@ async function addAccrualPrepayment() {
 }
 
 async function deleteAccrualPrepaymentUI(id) {
+  if (!(await confirmAction('Delete this accrual/prepayment record? This does not reverse the journal it already posted — void that separately in the Journal if needed.', 'Delete'))) return;
   await api(`/api/companies/${currentCompany.id}/accrual-prepayments/${id}`, { method: 'DELETE' });
   await loadAccrualPrepayments();
 }
@@ -4802,6 +4805,7 @@ async function matchBankLine(lineId, transactionId) {
 }
 
 async function deleteBrecLine(lineId) {
+  if (!(await confirmAction('Delete this statement line? Re-import it from the statement if you need it back.', 'Delete'))) return;
   await api(`/api/companies/${currentCompany.id}/bank-lines/${lineId}`, { method: 'DELETE' });
   await refreshAll();
 }
@@ -6044,6 +6048,7 @@ async function addBudget() {
 }
 
 async function deleteBudget(id) {
+  if (!(await confirmAction('Delete this budget?', 'Delete'))) return;
   await api(`/api/companies/${currentCompany.id}/budgets/${id}`, { method: 'DELETE' });
   await loadBudgets();
 }
@@ -6332,6 +6337,7 @@ function renderOpeningBalances() {
 }
 
 async function deleteOpeningBalance(id) {
+  if (!(await confirmAction('Delete this opening balance? The trial balance will change accordingly.', 'Delete'))) return;
   await api(`/api/companies/${currentCompany.id}/opening-balances/${id}`, { method: 'DELETE' });
   await refreshAll();
 }
@@ -7211,6 +7217,7 @@ async function uploadAttachment() {
 }
 
 async function deleteAttachmentItem(id) {
+  if (!(await confirmAction('Delete this attachment? The file cannot be recovered.', 'Delete'))) return;
   await api(`/api/companies/${currentCompany.id}/attachments/${id}`, { method: 'DELETE' });
   await renderAttachmentsModal();
   await refreshAll();
