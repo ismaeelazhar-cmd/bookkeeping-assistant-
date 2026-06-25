@@ -2364,7 +2364,29 @@ def set_opening_balances(company_id):
         )
         saved += 1
     db.commit()
-    return jsonify({"saved": saved})
+
+    # Unlike a normal transaction, each opening balance row is single-sided — there's nothing
+    # stopping the debit and credit sides from never being entered in matching amounts, which
+    # would leave the trial balance permanently out of balance from day one with no warning
+    # anywhere else in the app. Surface that here, the same way the dividend wizard surfaces a
+    # legal problem instead of letting it post silently.
+    totals = db.execute(
+        "SELECT side, COALESCE(SUM(amount_pence), 0) as total FROM opening_balances "
+        "WHERE company_id = ? GROUP BY side",
+        (company_id,),
+    ).fetchall()
+    by_side = {r["side"]: from_pence(r["total"]) for r in totals}
+    total_debit, total_credit = by_side.get("debit", 0), by_side.get("credit", 0)
+    difference = round(total_debit - total_credit, 2)
+    return jsonify({
+        "saved": saved,
+        "balanceCheck": {
+            "totalDebit": total_debit,
+            "totalCredit": total_credit,
+            "balanced": difference == 0,
+            "difference": difference,
+        },
+    })
 
 
 @app.route("/api/companies/<int:company_id>/opening-balances/<int:ob_id>", methods=["DELETE"])

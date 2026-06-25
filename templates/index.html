@@ -5519,7 +5519,14 @@ async function postOpeningBalances() {
   if (!items.length) { statusEl.textContent = 'Add at least one account with a positive amount.'; return; }
 
   const result = await api(`/api/companies/${currentCompany.id}/opening-balances/bulk`, { method: 'POST', body: JSON.stringify(items) });
-  statusEl.textContent = `Saved ${result.saved} opening balance(s).`;
+  const bc = result.balanceCheck;
+  if (bc && !bc.balanced) {
+    statusEl.innerHTML = `Saved ${result.saved} opening balance(s). <strong style="color:var(--danger);">⚠ Opening balances don't balance</strong> — total debits ${fmt(bc.totalDebit)} vs total credits ${fmt(bc.totalCredit)} (difference ${fmt(Math.abs(bc.difference))}). The trial balance will be out of balance until this is fixed — usually a missing offsetting entry to Opening Balance Equity.`;
+    statusEl.style.color = 'var(--danger)';
+  } else {
+    statusEl.textContent = `Saved ${result.saved} opening balance(s).` + (bc ? ' Debits and credits balance.' : '');
+    statusEl.style.color = 'var(--muted)';
+  }
   document.getElementById('ob-rows').innerHTML = '';
   obRowCount = 0;
   await refreshAll();
