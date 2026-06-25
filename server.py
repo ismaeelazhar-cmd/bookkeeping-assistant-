@@ -2585,6 +2585,13 @@ def bulk_create_transactions(company_id):
     skipped_locked = 0
     queued = 0
     for it in items:
+        # Fill in a missing/placeholder side from the user's categorization rules before
+        # deciding this row is "unsure" — the whole point of a rule is that the user shouldn't
+        # have to pick the account themselves once it's set up.
+        if any((it.get(side) or "").strip().lower() in PLACEHOLDER_ACCOUNTS for side in ("debit", "credit")):
+            rule_match = match_categorization_rule(db, company_id, it.get("desc") or "")
+            if rule_match is not None:
+                it["debit"], it["credit"] = rule_match
         if review_unsure and is_unsure(it):
             db.execute(
                 "INSERT INTO clarification_queue (company_id, source, raw_line_json, suggested_debit, "
@@ -3183,6 +3190,24 @@ def extract_receipt_fields(api_key, mime_type, file_bytes):
     return json.loads(match.group(0))
 
 
+def suggest_accounts_for_desc(db, company_id, desc):
+    """The user shouldn't have to pick debit/credit themselves after a receipt is read off —
+    check the same signals a bank feed import would: a learned preset (exact match on a
+    description seen before) first, then a categorization rule (keyword match) second."""
+    if not desc:
+        return None
+    preset = db.execute(
+        "SELECT debit, credit FROM presets WHERE company_id = ? AND desc_key = ?",
+        (company_id, desc.strip().lower()),
+    ).fetchone()
+    if preset is not None:
+        return {"debit": preset["debit"], "credit": preset["credit"]}
+    rule_match = match_categorization_rule(db, company_id, desc)
+    if rule_match is not None:
+        return {"debit": rule_match[0], "credit": rule_match[1]}
+    return None
+
+
 @app.route("/api/companies/<int:company_id>/attachments/<int:attachment_id>/extract", methods=["POST"])
 @login_required
 @company_required
@@ -3215,6 +3240,9 @@ def extract_attachment(company_id, attachment_id):
         return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
     except (ValueError, json.JSONDecodeError) as e:
         return jsonify({"error": str(e) or "Claude's response wasn't valid JSON."}), 502
+    suggestion = suggest_accounts_for_desc(get_db(), company_id, extracted.get("desc"))
+    if suggestion:
+        extracted.update(suggestion)
     return jsonify(extracted)
 
 
@@ -3247,6 +3275,9 @@ def scan_receipt(company_id):
         return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
     except (ValueError, json.JSONDecodeError) as e:
         return jsonify({"error": str(e) or "Claude's response wasn't valid JSON."}), 502
+    suggestion = suggest_accounts_for_desc(get_db(), company_id, extracted.get("desc"))
+    if suggestion:
+        extracted.update(suggestion)
     return jsonify(extracted)
 
 
@@ -3368,6 +3399,23 @@ def create_categorization_rule(company_id):
     )
     db.commit()
     return jsonify({"id": cur.lastrowid, "keyword": keyword, "debit": debit, "credit": credit})
+
+
+def match_categorization_rule(db, company_id, desc):
+    """Looks up the user's "Amazon always -> Office Supplies"-style rules for a transaction
+    description. Longest keyword wins so a more specific rule (e.g. "amazon web services")
+    beats a broader one (e.g. "amazon") on the same description. This is the one place that
+    actually applies categorization_rules — without it the rules a user sets up have no effect
+    on bank feed imports, CSV imports, or receipt scans, which is just a silent dead feature."""
+    desc_lower = (desc or "").lower()
+    rows = db.execute(
+        "SELECT keyword, debit, credit FROM categorization_rules WHERE company_id = ?", (company_id,)
+    ).fetchall()
+    matches = [r for r in rows if r["keyword"] in desc_lower]
+    if not matches:
+        return None
+    best = max(matches, key=lambda r: len(r["keyword"]))
+    return best["debit"], best["credit"]
 
 
 @app.route("/api/companies/<int:company_id>/categorization-rules/<int:rule_id>", methods=["DELETE"])
@@ -4944,17 +4992,41 @@ def delete_bank_connection(company_id, connection_id):
     return jsonify({"ok": True})
 
 
-def queue_plaid_line_if_unsure(db, company_id, cash_account, date, desc, amount):
-    """Plaid feed transactions never go through the AI suggester (that's a separate, paid call) —
-    the only signal available is whether this description has been seen before as a preset. A
-    new, never-seen description is exactly the case the clarification queue exists for: posting
-    it automatically based on nothing but the sign of the amount would be a silent guess."""
+def queue_plaid_line_if_unsure(db, company_id, cash_account, date, desc, amount, line_id=None):
+    """The user shouldn't have to pick debit/credit for every bank feed line by hand — this is
+    the automated path for that. A known description (exact match against a learned preset) is
+    left for normal bank-rec matching against an existing entry. A description matching one of
+    the user's categorization rules ("Amazon always -> Office Supplies") gets posted straight to
+    the ledger with no human step at all. Only a genuinely new, unrecognised description falls
+    through to the clarification queue — posting that one automatically based on nothing but the
+    sign of the amount would be a silent guess."""
     preset = db.execute(
         "SELECT debit, credit FROM presets WHERE company_id = ? AND desc_key = ?",
         (company_id, desc.strip().lower()),
     ).fetchone()
     if preset is not None:
         return  # a known description — confident enough to leave for normal bank-rec matching
+
+    rule_match = match_categorization_rule(db, company_id, desc)
+    if rule_match is not None:
+        debit, credit = rule_match
+        # A bank feed line is always one leg against the cash account; the rule only tells us the
+        # OTHER side, so route it onto whichever side isn't already the cash account.
+        if debit == cash_account or credit == cash_account:
+            final_debit, final_credit = debit, credit
+        else:
+            final_debit, final_credit = (cash_account, credit) if amount > 0 else (debit, cash_account)
+        try:
+            g.company = g.company if getattr(g, "company", None) else db.execute(
+                "SELECT * FROM companies WHERE id = ?", (company_id,)
+            ).fetchone()
+            tx_id = post_ledger_transaction(db, company_id, date, desc, abs(amount), final_debit, final_credit)
+        except LedgerError:
+            pass  # e.g. period locked — fall through to clarification queue below instead of losing the line
+        else:
+            if line_id is not None:
+                db.execute("UPDATE bank_lines SET matched_transaction_id = ? WHERE id = ?", (tx_id, line_id))
+            return
 
     guessed_debit, guessed_credit = (cash_account, "Uncategorized") if amount > 0 else ("Uncategorized", cash_account)
     db.execute(
@@ -4963,7 +5035,7 @@ def queue_plaid_line_if_unsure(db, company_id, cash_account, date, desc, amount)
         (
             company_id, "plaid", json.dumps({"date": date, "desc": desc, "amount": abs(amount)}),
             guessed_debit, guessed_credit, to_pence(abs(amount)), 0.2,
-            "New bank feed transaction with no matching preset — description never seen before.",
+            "New bank feed transaction with no matching preset or categorization rule — description never seen before.",
         ),
     )
 
@@ -4996,8 +5068,12 @@ def sync_bank_connection(db, company, connection_id):
                     to_pence(amount), tx["transaction_id"],
                 ),
             )
+            line_id = db.execute(
+                "SELECT id FROM bank_lines WHERE company_id = ? AND external_id = ?",
+                (conn["company_id"], tx["transaction_id"]),
+            ).fetchone()["id"]
             inserted += 1
-            queue_plaid_line_if_unsure(db, conn["company_id"], conn["cash_account"], tx["date"], desc, amount)
+            queue_plaid_line_if_unsure(db, conn["company_id"], conn["cash_account"], tx["date"], desc, amount, line_id)
         cursor = result.get("next_cursor")
         has_more = result.get("has_more", False)
     db.execute("UPDATE bank_connections SET sync_cursor = ? WHERE id = ?", (cursor, connection_id))

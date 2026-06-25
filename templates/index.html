@@ -2693,8 +2693,12 @@ async function scanReceiptForQuickEntry(event) {
     if (extracted.date) document.getElementById('f-date').value = extracted.date;
     if (extracted.desc) document.getElementById('f-desc').value = extracted.desc;
     if (extracted.amount != null) document.getElementById('f-amount').value = extracted.amount;
-    statusEl.textContent = 'Filled in from the receipt — check it over, pick a category, then post.';
-    document.getElementById('f-debit').focus();
+    if (extracted.debit) document.getElementById('f-debit').value = extracted.debit;
+    if (extracted.credit) document.getElementById('f-credit').value = extracted.credit;
+    statusEl.textContent = extracted.debit
+      ? `Filled in from the receipt — categorised as ${extracted.debit} / ${extracted.credit} from your rules. Check it over, then post.`
+      : 'Filled in from the receipt — check it over, pick a category, then post.';
+    document.getElementById(extracted.debit ? 'f-amount' : 'f-debit').focus();
   } catch (e) {
     statusEl.textContent = e.message;
   } finally {
