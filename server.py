@@ -893,6 +893,14 @@ def init_db():
         db.execute("ALTER TABLE companies ADD COLUMN brand_bank_details TEXT DEFAULT ''")
     if "brand_template" not in company_cols:
         db.execute("ALTER TABLE companies ADD COLUMN brand_template TEXT DEFAULT 'classic'")
+    if "ai_provider" not in company_cols:
+        # Free local-model alternative to the Claude API key: Ollama runs on the user's own
+        # machine (or any server they point at), no API cost ever, at the price of lower OCR/
+        # categorization accuracy than Claude. ollama_url defaults to the standard local port —
+        # works out of the box for anyone running `ollama serve` on the same machine as this app.
+        db.execute("ALTER TABLE companies ADD COLUMN ai_provider TEXT DEFAULT 'claude'")
+        db.execute("ALTER TABLE companies ADD COLUMN ollama_url TEXT DEFAULT 'http://localhost:11434'")
+        db.execute("ALTER TABLE companies ADD COLUMN ollama_model TEXT DEFAULT 'llama3.2-vision'")
     if "stripe_secret_key" not in company_cols:
         # #7: Stripe Checkout, called directly via its REST API (urllib, no SDK dependency) —
         # encrypted at rest like every other API credential here. Needs the user's own Stripe
@@ -1506,7 +1514,7 @@ def list_companies():
         "fund_accounting_enabled, plaid_client_id, plaid_secret, plaid_env, confidence_threshold, cost_centres_enabled, "
         "hmrc_client_id, hmrc_client_secret, hmrc_env, hmrc_vrn, hmrc_access_token, "
         "smtp_host, smtp_port, smtp_username, smtp_password, smtp_from_email, notifications_enabled, notify_email, "
-        "brand_logo_path, brand_color, brand_display_name, brand_address, brand_payment_terms, brand_bank_details, brand_template, "
+        "brand_logo_path, brand_color, brand_display_name, brand_address, brand_payment_terms, brand_bank_details, brand_template, ai_provider, ollama_url, ollama_model, "
         "stripe_secret_key, stripe_publishable_key, stripe_webhook_secret, stripe_payment_account, auto_chase_overdue_invoices, "
         "business_type, show_cis_tools, show_fx_tools, tour_completed, "
         "'owner' as permission "
@@ -1516,7 +1524,7 @@ def list_companies():
         "c.fund_accounting_enabled, c.plaid_client_id, c.plaid_secret, c.plaid_env, c.confidence_threshold, c.cost_centres_enabled, "
         "c.hmrc_client_id, c.hmrc_client_secret, c.hmrc_env, c.hmrc_vrn, c.hmrc_access_token, "
         "c.smtp_host, c.smtp_port, c.smtp_username, c.smtp_password, c.smtp_from_email, c.notifications_enabled, c.notify_email, "
-        "c.brand_logo_path, c.brand_color, c.brand_display_name, c.brand_address, c.brand_payment_terms, c.brand_bank_details, c.brand_template, "
+        "c.brand_logo_path, c.brand_color, c.brand_display_name, c.brand_address, c.brand_payment_terms, c.brand_bank_details, c.brand_template, c.ai_provider, c.ollama_url, c.ollama_model, "
         "c.stripe_secret_key, c.stripe_publishable_key, c.stripe_webhook_secret, c.stripe_payment_account, c.auto_chase_overdue_invoices, "
         "c.business_type, c.show_cis_tools, c.show_fx_tools, c.tour_completed, "
         "cm.permission "
@@ -1528,7 +1536,12 @@ def list_companies():
     result = []
     for r in rows:
         d = dict(r)
-        d["ai_api_key_set"] = bool(d.pop("ai_api_key"))  # Stage 5: the raw key never leaves the server
+        has_claude_key = bool(d.pop("ai_api_key"))  # Stage 5: the raw key never leaves the server
+        # ai_api_key_set is used everywhere in the UI as "is any AI feature usable" — true under
+        # either provider, not just Claude, so every existing gate (receipt scan, Ask Your Ledger,
+        # etc.) keeps working unchanged for a company configured with Ollama instead of a key.
+        d["ai_api_key_set"] = has_claude_key if d["ai_provider"] != "ollama" else bool(d["ollama_url"] and d["ollama_model"])
+        d["claude_key_set"] = has_claude_key
         d["plaid_secret_set"] = bool(d.pop("plaid_secret"))  # same write-only treatment
         d["hmrc_client_secret_set"] = bool(d.pop("hmrc_client_secret"))
         d["hmrc_connected"] = bool(d.pop("hmrc_access_token"))
@@ -1658,6 +1671,12 @@ def update_settings(company_id):
         db.execute("UPDATE companies SET ai_api_key = ? WHERE id = ?", (encrypt_secret(data["aiApiKey"]), company_id))
     elif data.get("clearAiApiKey"):
         db.execute("UPDATE companies SET ai_api_key = '' WHERE id = ?", (company_id,))
+    if "aiProvider" in data:
+        provider = data.get("aiProvider") if data.get("aiProvider") in ("claude", "ollama") else "claude"
+        db.execute(
+            "UPDATE companies SET ai_provider = ?, ollama_url = ?, ollama_model = ? WHERE id = ?",
+            (provider, data.get("ollamaUrl") or "http://localhost:11434", data.get("ollamaModel") or "llama3.2-vision", company_id),
+        )
     if data.get("plaidSecret"):
         db.execute("UPDATE companies SET plaid_secret = ? WHERE id = ?", (encrypt_secret(data["plaidSecret"]), company_id))
     elif data.get("clearPlaidSecret"):
@@ -3074,9 +3093,6 @@ def ai_categorize(company_id):
     text = (data.get("text") or "").strip()
     if not text:
         return jsonify({"error": "Nothing to analyze."}), 400
-    api_key = decrypt_secret(g.company["ai_api_key"])
-    if not api_key:
-        return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
 
     db = get_db()
     known_accounts = [r["name"] for r in db.execute(
@@ -3105,7 +3121,9 @@ Lines:
 {text}"""
 
     try:
-        raw_text = call_claude(api_key, [{"role": "user", "content": prompt}], max_tokens=4096)
+        raw_text = call_ai(g.company, [{"role": "user", "content": prompt}], max_tokens=4096)
+    except (ValueError, OllamaError) as e:
+        return jsonify({"error": str(e)}), 400
     except urllib.error.HTTPError as e:
         return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
     except urllib.error.URLError as e:
@@ -3113,7 +3131,7 @@ Lines:
 
     match = re.search(r"\[[\s\S]*\]", raw_text)
     if not match:
-        return jsonify({"error": "Claude did not return a parseable list."}), 502
+        return jsonify({"error": "The AI did not return a parseable list."}), 502
     try:
         items = json.loads(match.group(0))
     except json.JSONDecodeError:
@@ -3231,6 +3249,106 @@ def call_claude(api_key, messages, max_tokens=1024):
     return "".join(block.get("text", "") for block in body.get("content", []))
 
 
+class OllamaError(Exception):
+    def __init__(self, message, status=502):
+        self.message = message
+        self.status = status
+
+
+def call_ollama(base_url, model, messages, max_tokens=1024):
+    """Free local-model alternative to call_claude — same role-based messages shape, but Ollama
+    takes images as a separate base64 list per message rather than embedded content blocks, and
+    has no native PDF/"document" understanding the way Claude does. _claude_messages_to_ollama
+    does that conversion; PDFs are rejected there with a clear error rather than silently
+    misread, since there's no rasterization step here to turn a PDF page into an image."""
+    payload = json.dumps({
+        "model": model, "messages": messages, "stream": False,
+        "options": {"num_predict": max_tokens},
+    }).encode("utf-8")
+    url = base_url.rstrip("/") + "/api/chat"
+    req = urllib.request.Request(url, data=payload, method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError as e:
+        raise OllamaError(
+            f"Could not reach Ollama at {base_url} — is it running? (`ollama serve`, then `ollama pull {model}`). {e.reason}"
+        )
+    except urllib.error.HTTPError as e:
+        raise OllamaError(f"Ollama error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
+    return body.get("message", {}).get("content", "")
+
+
+def _claude_messages_to_ollama(messages):
+    """Claude content can be a plain string or a list of blocks ({"type":"text"/"image"/
+    "document", ...}); Ollama wants plain string content plus a separate "images" list of raw
+    base64 strings on the same message. Raises OllamaError on a "document" (PDF) block — local
+    vision models here only understand images, and there's no PDF→image conversion in this app."""
+    converted = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, str):
+            converted.append({"role": msg["role"], "content": content})
+            continue
+        text_parts, images = [], []
+        for block in content:
+            if block.get("type") == "text":
+                text_parts.append(block["text"])
+            elif block.get("type") == "image":
+                images.append(block["source"]["data"])
+            elif block.get("type") == "document":
+                raise OllamaError(
+                    "PDF reading isn't supported in local (Ollama) mode — only image receipts "
+                    "(photos/screenshots, not PDFs) can be scanned. Switch to Claude for PDF support, "
+                    "or convert the PDF to an image first."
+                )
+        entry = {"role": msg["role"], "content": "\n".join(text_parts)}
+        if images:
+            entry["images"] = images
+        converted.append(entry)
+    return converted
+
+
+def call_ai(company, messages, max_tokens=1024):
+    """Single entry point used by every AI feature (receipt OCR, bank categorization, Ask Your
+    Ledger, month-end narrative) — picks Claude or Ollama per company setting so none of those
+    call sites need to know which provider is configured."""
+    if company["ai_provider"] == "ollama":
+        return call_ollama(company["ollama_url"] or "http://localhost:11434",
+                            company["ollama_model"] or "llama3.2-vision",
+                            _claude_messages_to_ollama(messages), max_tokens)
+    api_key = decrypt_secret(company["ai_api_key"])
+    if not api_key:
+        raise ValueError("No Claude API key set for this company — add one in settings, or switch to Ollama (local, free).")
+    return call_claude(api_key, messages, max_tokens)
+
+
+@app.route("/api/companies/<int:company_id>/ollama-test", methods=["POST"])
+@login_required
+@company_required
+def test_ollama_connection(company_id):
+    """Checks the configured Ollama server is reachable and the chosen model is actually pulled
+    — a clearer failure than waiting for the first real receipt scan to discover either isn't
+    true."""
+    base_url = (g.company["ollama_url"] or "http://localhost:11434").rstrip("/")
+    model = g.company["ollama_model"] or "llama3.2-vision"
+    req = urllib.request.Request(f"{base_url}/api/tags", method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError as e:
+        return jsonify({"error": f"Could not reach Ollama at {base_url} — is it running? (`ollama serve`). {e.reason}"}), 502
+    except urllib.error.HTTPError as e:
+        return jsonify({"error": f"Ollama error {e.code}."}), 502
+    installed = [m["name"] for m in body.get("models", [])]
+    if not any(m == model or m.startswith(model + ":") for m in installed):
+        return jsonify({
+            "error": f'Connected to Ollama, but model "{model}" isn\'t pulled yet — run `ollama pull {model}`. '
+                     f"Installed models: {', '.join(installed) or '(none)'}."
+        }), 400
+    return jsonify({"model": model})
+
+
 PLAID_HOSTS = {
     "sandbox": "https://sandbox.plaid.com",
     "development": "https://development.plaid.com",
@@ -3288,9 +3406,6 @@ def ask_ledger(company_id):
     history = data.get("history") or []
     if not question:
         return jsonify({"error": "Ask a question first."}), 400
-    api_key = decrypt_secret(g.company["ai_api_key"])
-    if not api_key:
-        return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
 
     db = get_db()
     rows = db.execute(
@@ -3336,11 +3451,16 @@ Ledger CSV:
     messages.append({"role": "user", "content": final_content})
 
     try:
-        answer = call_claude(api_key, messages, max_tokens=1024)
+        answer = call_ai(g.company, messages, max_tokens=1024)
+    except (ValueError, OllamaError) as e:
+        return jsonify({"error": str(e)}), 400
     except urllib.error.HTTPError as e:
         return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
     except urllib.error.URLError as e:
         return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
+
+    return jsonify({"answer": answer.strip(), "transactionsConsidered": min(len(rows), MAX_ROWS), "truncated": truncated})
+
 
 @app.route("/api/companies/<int:company_id>/month-end-narrative", methods=["POST"])
 @login_required
@@ -3356,9 +3476,6 @@ def month_end_narrative(company_id):
     period = data.get("period") or datetime.date.today().strftime("%Y-%m")
     if not re.match(r"^\d{4}-\d{2}$", period):
         return jsonify({"error": "Period must be in YYYY-MM format."}), 400
-    api_key = decrypt_secret(g.company["ai_api_key"])
-    if not api_key:
-        return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
 
     year, month = map(int, period.split("-"))
     from_date = datetime.date(year, month, 1)
@@ -3393,7 +3510,9 @@ figures from the data above — do not invent numbers. If nothing material chang
 manufacturing a story."""
 
     try:
-        narrative = call_claude(api_key, [{"role": "user", "content": prompt}], max_tokens=512)
+        narrative = call_ai(g.company, [{"role": "user", "content": prompt}], max_tokens=512)
+    except (ValueError, OllamaError) as e:
+        return jsonify({"error": str(e)}), 400
     except urllib.error.HTTPError as e:
         return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
     except urllib.error.URLError as e:
@@ -3470,11 +3589,12 @@ def download_attachment(company_id, attachment_id):
     )
 
 
-def extract_receipt_fields(api_key, mime_type, file_bytes):
-    """Shared receipt-OCR call: send file bytes to Claude (vision for images, native document
-    support for PDFs) and ask it to read off date/description/amount. Used both by the
-    post-hoc attachment extractor and the pre-transaction quick-scan endpoint, so there's one
-    place that owns the prompt and the response parsing."""
+def extract_receipt_fields(company, mime_type, file_bytes):
+    """Shared receipt-OCR call: send file bytes to Claude or Ollama (vision for images; native
+    document/PDF support only with Claude — see _claude_messages_to_ollama) and ask the model to
+    read off date/description/amount. Used both by the post-hoc attachment extractor and the
+    pre-transaction quick-scan endpoint, so there's one place that owns the prompt and the
+    response parsing."""
     file_b64 = base64.b64encode(file_bytes).decode("ascii")
     block_type = "document" if mime_type == "application/pdf" else "image"
     prompt_text = (
@@ -3490,10 +3610,10 @@ def extract_receipt_fields(api_key, mime_type, file_bytes):
             {"type": "text", "text": prompt_text},
         ],
     }]
-    raw_text = call_claude(api_key, messages, max_tokens=1024)
+    raw_text = call_ai(company, messages, max_tokens=1024)
     match = re.search(r"\{[\s\S]*\}", raw_text)
     if not match:
-        raise ValueError("Claude did not return a parseable result.")
+        raise ValueError("The AI did not return a parseable result.")
     return json.loads(match.group(0))
 
 
@@ -3520,11 +3640,7 @@ def suggest_accounts_for_desc(db, company_id, desc):
 @company_required
 @write_required
 def extract_attachment(company_id, attachment_id):
-    """Stage 5 receipt OCR on a file already attached to a transaction."""
-    api_key = decrypt_secret(g.company["ai_api_key"])
-    if not api_key:
-        return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
-
+    """Receipt OCR on a file already attached to a transaction."""
     db = get_db()
     row = db.execute(
         "SELECT filename, mime_type, stored_path FROM attachments WHERE id = ? AND company_id = ?",
@@ -3540,13 +3656,15 @@ def extract_attachment(company_id, attachment_id):
         file_bytes = f.read()
 
     try:
-        extracted = extract_receipt_fields(api_key, row["mime_type"], file_bytes)
+        extracted = extract_receipt_fields(g.company, row["mime_type"], file_bytes)
+    except (ValueError, OllamaError) as e:
+        return jsonify({"error": str(e)}), 400
     except urllib.error.HTTPError as e:
         return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
     except urllib.error.URLError as e:
         return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
-    except (ValueError, json.JSONDecodeError) as e:
-        return jsonify({"error": str(e) or "Claude's response wasn't valid JSON."}), 502
+    except json.JSONDecodeError:
+        return jsonify({"error": "The AI's response wasn't valid JSON."}), 502
     suggestion = suggest_accounts_for_desc(get_db(), company_id, extracted.get("desc"))
     if suggestion:
         extracted.update(suggestion)
@@ -3564,10 +3682,6 @@ def scan_receipt(company_id):
     confident match, this falls back to the old behaviour (return extracted fields, post nothing,
     keep no file) rather than guessing accounts with no signal at all, the same "auto-post only
     when confident, otherwise ask" rule the bank feed importer follows."""
-    api_key = decrypt_secret(g.company["ai_api_key"])
-    if not api_key:
-        return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
-
     file = request.files.get("file")
     if file is None or not file.filename:
         return jsonify({"error": "No file uploaded."}), 400
@@ -3577,13 +3691,15 @@ def scan_receipt(company_id):
     file_bytes = file.read()
 
     try:
-        extracted = extract_receipt_fields(api_key, mime_type, file_bytes)
+        extracted = extract_receipt_fields(g.company, mime_type, file_bytes)
+    except (ValueError, OllamaError) as e:
+        return jsonify({"error": str(e)}), 400
     except urllib.error.HTTPError as e:
         return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
     except urllib.error.URLError as e:
         return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
-    except (ValueError, json.JSONDecodeError) as e:
-        return jsonify({"error": str(e) or "Claude's response wasn't valid JSON."}), 502
+    except json.JSONDecodeError:
+        return jsonify({"error": "The AI's response wasn't valid JSON."}), 502
 
     db = get_db()
     suggestion = suggest_accounts_for_desc(db, company_id, extracted.get("desc"))

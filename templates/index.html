@@ -1448,15 +1448,35 @@
 
     <div class="panel" style="margin-top:20px;">
       <h2>AI Features</h2>
-      <div class="sub" style="margin:8px 0;">Turns on: reading receipts automatically, suggesting categories for bank transactions, and "Ask Your Ledger" — asking plain-English questions about your own books. Runs on Anthropic's Claude, the same AI behind this app's own guided tour copy.</div>
-      <ol style="font-size:13px; color:var(--text); margin:0 0 10px; padding-left:20px;">
-        <li style="margin-bottom:4px;">Go to <strong>console.anthropic.com</strong> and create a free account.</li>
-        <li style="margin-bottom:4px;">Go to <strong>API Keys → Create Key</strong>, and copy it.</li>
-      </ol>
-      <div class="sub" id="ai-key-status" style="margin:0 0 8px;"></div>
-      <input type="password" id="ai-api-key" placeholder="paste your key here to enable AI features" oninput="saveSettings()">
-      <button class="btn-secondary" style="width:100%; margin-top:8px;" onclick="clearAiApiKey()">Turn off AI features</button>
-      <div class="sub" style="margin:8px 0 0;">Stored on this app's server, never sent to or readable from your browser. Anthropic charges per use of your own key (typically a few pence per receipt/question) — there's no markup or subscription from this app.</div>
+      <div class="sub" style="margin:8px 0;">Turns on: reading receipts automatically, suggesting categories for bank transactions, "Ask Your Ledger", and the month-end narrative.</div>
+      <label>Provider</label>
+      <select id="ai-provider" onchange="onAiProviderChange(); saveSettings();">
+        <option value="claude">Claude (Anthropic) — paid per use, most accurate</option>
+        <option value="ollama">Ollama (local, free) — runs on your own machine/server</option>
+      </select>
+
+      <div id="ai-provider-claude-fields">
+        <ol style="font-size:13px; color:var(--text); margin:10px 0; padding-left:20px;">
+          <li style="margin-bottom:4px;">Go to <strong>console.anthropic.com</strong> and create a free account.</li>
+          <li style="margin-bottom:4px;">Go to <strong>API Keys → Create Key</strong>, and copy it.</li>
+        </ol>
+        <div class="sub" id="ai-key-status" style="margin:0 0 8px;"></div>
+        <input type="password" id="ai-api-key" placeholder="paste your key here to enable AI features" oninput="saveSettings()">
+        <button class="btn-secondary" style="width:100%; margin-top:8px;" onclick="clearAiApiKey()">Turn off AI features</button>
+        <div class="sub" style="margin:8px 0 0;">Stored on this app's server, never sent to or readable from your browser. Anthropic charges per use of your own key (typically a few pence per receipt/question) — there's no markup or subscription from this app.</div>
+      </div>
+
+      <div id="ai-provider-ollama-fields" style="display:none;">
+        <div class="sub" style="margin:10px 0;">No API key, no cost, ever — but a local model is noticeably less accurate at reading messy receipts than Claude, and <strong>can't read PDFs</strong> in this mode (only photos/screenshots — Ollama has no native document support, only image vision). Install <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a>, then run:</div>
+        <pre style="background:var(--panel-soft); padding:10px; border-radius:6px; font-size:12px; overflow-x:auto;">ollama serve
+ollama pull llama3.2-vision</pre>
+        <div class="row2">
+          <div><label>Ollama URL</label><input type="text" id="ollama-url" placeholder="http://localhost:11434" oninput="saveSettings()"></div>
+          <div><label>Model</label><input type="text" id="ollama-model" placeholder="llama3.2-vision" oninput="saveSettings()"></div>
+        </div>
+        <button class="btn-secondary" style="margin-top:8px;" onclick="testOllamaConnection()">Test connection</button>
+        <div class="sub" id="ollama-test-status" style="margin-top:6px;"></div>
+      </div>
 
       <h2 style="margin-top:24px;">Clarification confidence threshold</h2>
       <div class="sub" style="margin-bottom:8px;">AI suggestions scoring below this go to the Clarification Queue (Bank page) instead of being suggested automatically. Lower = the AI guesses more often; higher = more lines get held for your review.</div>
@@ -2366,7 +2386,11 @@ async function openCompany(id) {
   document.title = `${currentCompany.name} — Bookkeeping`;
   showPage('dashboard');
   document.getElementById('ai-api-key').value = '';
-  document.getElementById('ai-key-status').textContent = currentCompany.ai_api_key_set ? 'A key is set.' : 'No key set yet.';
+  document.getElementById('ai-key-status').textContent = currentCompany.claude_key_set ? 'A key is set.' : 'No key set yet.';
+  document.getElementById('ai-provider').value = currentCompany.ai_provider || 'claude';
+  document.getElementById('ollama-url').value = currentCompany.ollama_url || 'http://localhost:11434';
+  document.getElementById('ollama-model').value = currentCompany.ollama_model || 'llama3.2-vision';
+  onAiProviderChange();
   document.getElementById('f-locked-until').value = currentCompany.locked_until || '';
   document.getElementById('f-period-start').value = currentCompany.period_start_date || '';
   document.getElementById('f-fund-accounting').checked = !!currentCompany.fund_accounting_enabled;
@@ -2445,6 +2469,9 @@ function buildSettingsPayload(extra) {
     fundAccountingEnabled: document.getElementById('f-fund-accounting').checked,
     costCentresEnabled: document.getElementById('f-cost-centres').checked,
     confidenceThreshold: parseFloat(document.getElementById('f-confidence-threshold').value),
+    aiProvider: document.getElementById('ai-provider').value,
+    ollamaUrl: document.getElementById('ollama-url').value.trim(),
+    ollamaModel: document.getElementById('ollama-model').value.trim(),
     plaidClientId: document.getElementById('plaid-client-id').value.trim(),
     plaidEnv: document.getElementById('plaid-env').value,
     hmrcClientId: document.getElementById('hmrc-client-id').value.trim(),
@@ -2478,6 +2505,25 @@ async function savePeriodLock() {
   showToast(lockedUntil ? `Locked up to and including ${fmtDate(lockedUntil)}.` : 'Period lock cleared.', 'success');
 }
 
+function onAiProviderChange() {
+  const isOllama = document.getElementById('ai-provider').value === 'ollama';
+  document.getElementById('ai-provider-claude-fields').style.display = isOllama ? 'none' : '';
+  document.getElementById('ai-provider-ollama-fields').style.display = isOllama ? '' : 'none';
+}
+
+async function testOllamaConnection() {
+  const statusEl = document.getElementById('ollama-test-status');
+  statusEl.textContent = 'Checking…';
+  try {
+    const result = await api(`/api/companies/${currentCompany.id}/ollama-test`, { method: 'POST' });
+    statusEl.textContent = `✓ Connected — found model "${result.model}".`;
+    statusEl.style.color = 'var(--good)';
+  } catch (e) {
+    statusEl.textContent = e.message;
+    statusEl.style.color = 'var(--bad)';
+  }
+}
+
 async function saveSettings() {
   if (!currentCompany) return;
   currentCompany.default_credit_account = document.getElementById('f-default-credit').value.trim();
@@ -2490,6 +2536,9 @@ async function saveSettings() {
   applyFxVisibility();
   currentCompany.cost_centres_enabled = document.getElementById('f-cost-centres').checked;
   currentCompany.confidence_threshold = parseFloat(document.getElementById('f-confidence-threshold').value);
+  currentCompany.ai_provider = document.getElementById('ai-provider').value;
+  currentCompany.ollama_url = document.getElementById('ollama-url').value.trim();
+  currentCompany.ollama_model = document.getElementById('ollama-model').value.trim();
   const newKey = document.getElementById('ai-api-key').value.trim();
   const smtpPassword = document.getElementById('smtp-password').value;
   const stripeSecretKey = document.getElementById('stripe-secret-key').value.trim();
@@ -2498,10 +2547,13 @@ async function saveSettings() {
     method: 'PUT', body: JSON.stringify(buildSettingsPayload({ aiApiKey: newKey, smtpPassword, stripeSecretKey, stripeWebhookSecret }))
   });
   if (newKey) {
-    currentCompany.ai_api_key_set = true;
+    currentCompany.claude_key_set = true;
     document.getElementById('ai-api-key').value = '';
     document.getElementById('ai-key-status').textContent = 'A key is set.';
   }
+  currentCompany.ai_api_key_set = currentCompany.ai_provider === 'ollama'
+    ? !!(currentCompany.ollama_url && currentCompany.ollama_model)
+    : currentCompany.claude_key_set;
   if (smtpPassword) { currentCompany.smtp_password_set = true; document.getElementById('smtp-password').value = ''; document.getElementById('smtp-password-status').textContent = '(set)'; }
   if (stripeSecretKey) { currentCompany.stripe_secret_key_set = true; document.getElementById('stripe-secret-key').value = ''; document.getElementById('stripe-secret-status').textContent = '(set)'; }
   if (stripeWebhookSecret) { currentCompany.stripe_webhook_secret_set = true; document.getElementById('stripe-webhook-secret').value = ''; document.getElementById('stripe-webhook-status').textContent = '(set)'; }
