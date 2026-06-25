@@ -139,6 +139,15 @@ def send_email(company_row, to_email, subject, body_text, attachment_bytes=None,
 app = Flask(__name__, static_folder=str(BASE_DIR / "static"))
 app.secret_key = load_or_create_secret_key()
 app.config["MAX_CONTENT_LENGTH"] = MAX_ATTACHMENT_BYTES
+# "Just log in easy and use" — without this, Flask's session cookie is browser-session-only
+# (gone the moment the browser/tab fully closes), so signing in again was needed far more often
+# than it should be. 30 days is long enough to not be a nuisance; logout still works the same.
+app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=30)
+
+
+@app.before_request
+def _make_session_permanent():
+    session.permanent = True
 
 
 def get_db():

@@ -134,6 +134,20 @@
   table.journal td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
   table.journal tr:hover { background: var(--panel-soft); }
   .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; background: var(--accent-soft); color: var(--accent-hover); font-weight: 600; }
+  /* Plain-English hover explanations for accounting terms — pure CSS (no JS, no positioning
+     library), so it works the same wherever a term shows up: table headers, panel titles,
+     labels. Static, hand-written copy, same approach as the guided tour. */
+  .term-tip { border-bottom: 1px dotted var(--muted); cursor: help; position: relative; }
+  .term-tip:hover::after {
+    content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 0;
+    background: var(--text); color: #fff; font-size: 11.5px; font-weight: 500; line-height: 1.4;
+    padding: 7px 10px; border-radius: 6px; width: 220px; white-space: normal; z-index: 90;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2); text-transform: none; letter-spacing: normal;
+  }
+  .term-tip:hover::before {
+    content: ''; position: absolute; bottom: 100%; left: 10px; border: 5px solid transparent;
+    border-top-color: var(--text); z-index: 90;
+  }
   .empty { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
   textarea { width: 100%; background: var(--panel-soft); border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 7px; font-size: 13px; font-family: inherit; resize: vertical; }
   textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
@@ -309,11 +323,11 @@
         <div id="dash-cash-vs-last-month" style="font-size:11px; margin-top:2px; min-height:14px;"></div>
       </div>
       <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--debit);">
-        <div class="sub" style="margin:0;">Outstanding receivables</div>
+        <div class="sub" style="margin:0;"><span class="term-tip" data-tip="Money customers owe you for invoices you've sent but they haven't paid yet.">Outstanding receivables</span></div>
         <div style="font-size:22px; font-weight:700; color:var(--debit);" id="dash-receivables">—</div>
       </div>
       <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--credit);">
-        <div class="sub" style="margin:0;">Outstanding payables</div>
+        <div class="sub" style="margin:0;"><span class="term-tip" data-tip="Money you owe suppliers for bills you've received but haven't paid yet.">Outstanding payables</span></div>
         <div style="font-size:22px; font-weight:700; color:var(--credit);" id="dash-payables">—</div>
       </div>
       <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--good);">
@@ -464,7 +478,7 @@
         </div>
 
         <div class="panel">
-          <h2>Journal (all transactions) <span class="pill" id="journal-count">0 transactions</span></h2>
+          <h2><span class="term-tip" data-tip="The full, chronological list of every transaction ever posted — the source everything else (T-accounts, reports) is built from.">Journal</span> (all transactions) <span class="pill" id="journal-count">0 transactions</span></h2>
           <div class="row2">
             <input type="text" id="jf-text" placeholder="Search description or account…" oninput="renderJournal()">
             <input type="number" id="jf-min-amount" step="0.01" placeholder="Min amount" oninput="renderJournal()">
@@ -475,13 +489,13 @@
           </div>
           <button class="btn-secondary" style="margin:10px 0;" onclick="clearJournalFilters()">Clear filters</button>
           <table class="journal">
-            <thead><tr><th>Date</th><th>Description</th><th>Debit</th><th>Credit</th><th class="num">Amount</th><th>VAT</th><th></th></tr></thead>
+            <thead><tr><th>Date</th><th>Description</th><th><span class="term-tip" data-tip="The left side of an entry — increases assets/expenses, decreases liabilities/income.">Debit</span></th><th><span class="term-tip" data-tip="The right side of an entry — increases liabilities/income, decreases assets/expenses.">Credit</span></th><th class="num">Amount</th><th>VAT</th><th></th></tr></thead>
             <tbody id="journal-body"></tbody>
           </table>
         </div>
 
         <div class="panel" style="margin-top:20px;">
-          <h2>Trial Balance <span class="pill" id="trial-status"></span></h2>
+          <h2><span class="term-tip" data-tip="A list of every account and its balance, used to check the books actually balance — total debits should always equal total credits.">Trial Balance</span> <span class="pill" id="trial-status"></span></h2>
           <table class="trial">
             <thead><tr><td><b>Account</b></td><td class="num"><b>Total Debit</b></td><td class="num"><b>Total Credit</b></td><td class="num"><b>Balance</b></td></tr></thead>
             <tbody id="trial-body"></tbody>
@@ -652,7 +666,7 @@
     </div>
 
     <div class="panel" style="margin-top:20px;">
-      <h2>Bank Reconciliation</h2>
+      <h2><span class="term-tip" data-tip="Checking your records against your real bank statement, line by line, so nothing's missing or duplicated.">Bank Reconciliation</span></h2>
       <div class="sub" style="margin-bottom:12px;">Import what your bank statement actually shows for an account, then match each line to a ledger transaction — or post a new one straight from the line. This is what actually catches missing/duplicate/wrong entries, not just categorization.</div>
 
       <div class="row2">
@@ -2363,6 +2377,27 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// Plain-English hover explanation for an accounting term — wraps `label` in a dotted-underline
+// span; hovering shows TERM_EXPLANATIONS[explanationKey] (or a custom string if passed
+// directly). Used wherever a term like "Credit" or "Trial Balance" appears with no other
+// context to explain it.
+const TERM_EXPLANATIONS = {
+  debit: 'The left side of an entry — increases assets/expenses, decreases liabilities/income. Every entry has a debit and a credit of the same amount.',
+  credit: 'The right side of an entry — increases liabilities/income, decreases assets/expenses. Every entry has a debit and a credit of the same amount.',
+  trialBalance: 'A list of every account and its balance, used to check the books actually balance — total debits should always equal total credits.',
+  vatControlAccount: 'A holding account for VAT collected from customers and VAT paid to suppliers — the balance is what you owe (or are owed) by HMRC.',
+  tradeReceivables: 'Money customers owe you for invoices you\'ve sent but they haven\'t paid yet.',
+  tradePayables: 'Money you owe suppliers for bills you\'ve received but haven\'t paid yet.',
+  reconciliation: 'Checking your records against your real bank statement, line by line, so nothing\'s missing or duplicated.',
+  journal: 'The full, chronological list of every transaction ever posted — the source of truth everything else (T-accounts, reports) is built from.',
+  openingBalance: 'What was already in an account before you started using this app — entered once so reports include your full history, not just what you\'ve typed in here.',
+};
+
+function tip(label, explanationKey) {
+  const text = TERM_EXPLANATIONS[explanationKey] || explanationKey;
+  return `<span class="term-tip" data-tip="${escapeHtml(text)}">${escapeHtml(label)}</span>`;
+}
+
 function confirmAction(message, actionLabel) {
   return new Promise(resolve => {
     const dialog = document.getElementById('confirm-dialog');
@@ -2812,8 +2847,8 @@ function taccountCardHtml(name, acc, clickableTitle) {
     <div class="taccount">
       <div class="taccount-title"${titleAttrs}><span>${accountTypeDot(name)}${escapeHtml(name)}</span><span class="bal">${balLabel}</span></div>
       <div class="tbody">
-        <div class="tside debit"><div class="tside-label">Debit</div>${debitLines}</div>
-        <div class="tside credit"><div class="tside-label">Credit</div>${creditLines}</div>
+        <div class="tside debit"><div class="tside-label">${tip('Debit', 'debit')}</div>${debitLines}</div>
+        <div class="tside credit"><div class="tside-label">${tip('Credit', 'credit')}</div>${creditLines}</div>
       </div>
       <div class="tfoot"><div class="debit">${fmt(debitTotal)}</div><div class="credit">${fmt(creditTotal)}</div></div>
     </div>`;
