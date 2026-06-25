@@ -1295,6 +1295,23 @@
     </div>
 
     <div class="panel" style="margin-top:20px;">
+      <h2>Categorisation Rules</h2>
+      <div class="sub" style="margin-bottom:12px;">"Amazon always → Office Supplies" — once set, any description containing the keyword auto-fills these accounts when posting manually or importing a bank statement, ahead of the built-in keyword guesses.</div>
+      <table class="inbox"><thead><tr><th>If description contains…</th><th>Debit</th><th>Credit</th><th></th></tr></thead><tbody id="categorization-rules-body"></tbody></table>
+      <div class="panel" style="background:var(--panel-soft); margin-top:14px; box-shadow:none;">
+        <h2 style="margin-top:0; font-size:13px;">Add a rule</h2>
+        <label>Keyword</label>
+        <input type="text" id="cat-rule-keyword" placeholder="e.g. amazon">
+        <div class="row2">
+          <div><label>Debit account</label><input type="text" id="cat-rule-debit" list="account-list" placeholder="e.g. Office Supplies"></div>
+          <div><label>Credit account</label><input type="text" id="cat-rule-credit" list="account-list" placeholder="e.g. Cash"></div>
+        </div>
+        <button class="btn-primary" onclick="addCategorizationRule()">Add rule</button>
+        <div id="cat-rule-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
       <h2>Bank feed credentials (Plaid)</h2>
       <div class="sub" style="margin:8px 0;">From a free account at <span style="color:var(--text);">dashboard.plaid.com</span>. Secret is write-only — encrypted at rest, never sent back to this browser. Connect or sync the actual bank account under the Bank page once these are set.</div>
       <div class="row2">
@@ -2518,6 +2535,7 @@ async function refreshAll() {
   await loadReconciliationHistory();
   await loadRecurringJournals();
   await loadRecurringInvoices();
+  await loadCategorizationRules();
   renderCashFlowForecast();
   renderMonthlyPnL();
   await loadStockItems();
@@ -3468,6 +3486,46 @@ function categorize(desc) {
     if (hit) return { debit: rule.debit, credit: rule.credit, confidence: 'high', reason: `Matched the keyword rule "${hit}" → ${rule.debit} / ${rule.credit}.` };
   }
   return { debit: 'Uncategorized', credit: currentCompany.default_credit_account || 'Cash', confidence: 'low', reason: 'No previous entry or keyword rule matched this description — needs manual review.' };
+}
+
+// ---------- user-defined categorisation rules ("Amazon always -> Office Supplies") ----------
+async function loadCategorizationRules() {
+  categorizationRules = await api(`/api/companies/${currentCompany.id}/categorization-rules`);
+  renderCategorizationRules();
+}
+
+function renderCategorizationRules() {
+  const body = document.getElementById('categorization-rules-body');
+  if (!body) return;
+  body.innerHTML = categorizationRules.length ? categorizationRules.map(r => `
+    <tr>
+      <td>${escapeHtml(r.keyword)}</td>
+      <td>${escapeHtml(r.debit)}</td>
+      <td>${escapeHtml(r.credit)}</td>
+      <td><button class="btn-danger" onclick="deleteCategorizationRuleUI(${r.id})">✕</button></td>
+    </tr>`).join('') : '<tr><td colspan="4" class="empty">No rules yet — descriptions fall back to keyword/preset matching.</td></tr>';
+}
+
+async function addCategorizationRule() {
+  const statusEl = document.getElementById('cat-rule-status');
+  const keyword = document.getElementById('cat-rule-keyword').value.trim();
+  const debit = document.getElementById('cat-rule-debit').value.trim();
+  const credit = document.getElementById('cat-rule-credit').value.trim();
+  if (!keyword || !debit || !credit) { statusEl.textContent = 'Enter a keyword and both accounts.'; return; }
+  try {
+    await api(`/api/companies/${currentCompany.id}/categorization-rules`, { method: 'POST', body: JSON.stringify({ keyword, debit, credit }) });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = '';
+  document.getElementById('cat-rule-keyword').value = '';
+  document.getElementById('cat-rule-debit').value = '';
+  document.getElementById('cat-rule-credit').value = '';
+  await loadCategorizationRules();
+  showToast('Rule added — it\'ll apply to new entries and bank imports from now on.', 'success');
+}
+
+async function deleteCategorizationRuleUI(id) {
+  await api(`/api/companies/${currentCompany.id}/categorization-rules/${id}`, { method: 'DELETE' });
+  await loadCategorizationRules();
 }
 
 let candidates = [];
