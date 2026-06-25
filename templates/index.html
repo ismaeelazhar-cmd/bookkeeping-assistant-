@@ -301,6 +301,19 @@
   <div id="toast-container" style="position:fixed; top:16px; right:16px; z-index:200; display:flex; flex-direction:column; gap:8px; max-width:340px;"></div>
 
   <div class="page" data-page="dashboard">
+    <div class="panel" id="sample-data-banner" style="margin-bottom:16px; display:none; background:var(--panel-soft);">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span>🧪 You're exploring with sample data — none of this is real. Clear it whenever you're ready to enter your own.</span>
+        <button class="btn-danger" onclick="clearSampleData()">Clear sample data</button>
+      </div>
+    </div>
+    <div class="panel" id="try-sample-data-card" style="margin-bottom:16px; display:none;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span>New here? Explore the app with realistic fake data before entering your own books.</span>
+        <button class="btn-secondary" onclick="seedSampleData()">Try with sample data</button>
+      </div>
+    </div>
+
     <div class="panel" id="setup-checklist-card" style="margin-bottom:16px; display:none;">
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <h2 style="margin:0;">Get set up <span class="pill" id="setup-checklist-progress"></span></h2>
@@ -3397,6 +3410,7 @@ function renderDashboard() {
 
   renderAttentionList();
   renderSetupChecklist();
+  renderSampleDataBanners();
   renderSpendByCategory();
   renderHealthScore();
 }
@@ -3473,6 +3487,31 @@ function setupChecklistDismissKey() { return `setupChecklistDismissed:${currentC
 function dismissSetupChecklist() {
   localStorage.setItem(setupChecklistDismissKey(), '1');
   document.getElementById('setup-checklist-card').style.display = 'none';
+}
+
+// ---------- sample data exploration mode ----------
+function renderSampleDataBanners() {
+  const banner = document.getElementById('sample-data-banner');
+  const tryCard = document.getElementById('try-sample-data-card');
+  if (!banner || !tryCard) return;
+  const hasSampleData = transactions.some(t => t.isSample);
+  banner.style.display = hasSampleData ? '' : 'none';
+  tryCard.style.display = (!hasSampleData && transactions.length === 0) ? '' : 'none';
+}
+
+async function seedSampleData() {
+  try {
+    await api(`/api/companies/${currentCompany.id}/sample-data/seed`, { method: 'POST' });
+  } catch (e) { showToast(e.message, 'error'); return; }
+  await refreshAll();
+  showToast('Sample data loaded — explore around, then clear it whenever you\'re ready.', 'success');
+}
+
+async function clearSampleData() {
+  if (!(await confirmAction('Clear all sample data? This removes every fake transaction so you can start entering your own.'))) return;
+  const result = await api(`/api/companies/${currentCompany.id}/sample-data/clear`, { method: 'POST' });
+  await refreshAll();
+  showToast(`Cleared ${result.deleted} sample transaction(s).`, 'success');
 }
 
 function renderSetupChecklist() {

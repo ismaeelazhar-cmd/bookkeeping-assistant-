@@ -287,6 +287,7 @@ def init_db():
             journal_id TEXT DEFAULT NULL,
             voided_at TEXT DEFAULT NULL,
             voided_by TEXT DEFAULT NULL,
+            is_sample INTEGER NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -738,6 +739,8 @@ def init_db():
     if "reviewed_by" not in tx_cols:
         db.execute("ALTER TABLE transactions ADD COLUMN reviewed_by TEXT DEFAULT NULL")
         db.execute("ALTER TABLE transactions ADD COLUMN reviewed_at TEXT DEFAULT NULL")
+    if "is_sample" not in tx_cols:
+        db.execute("ALTER TABLE transactions ADD COLUMN is_sample INTEGER NOT NULL DEFAULT 0")
     user_cols = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
     if "totp_secret" not in user_cols:
         db.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT NULL")
@@ -1319,21 +1322,24 @@ DEMO_TRANSACTIONS = [
 ]
 
 
-def seed_demo_data(db, company_id):
+def seed_demo_data(db, company_id, is_sample=False):
     """Backfills ~6 months of realistic plumbing-business transactions for demo mode — varied
     enough (invoiced jobs, materials, van costs, rent, drawings) to make the dashboard, reports,
-    and reconciliation pages all show something rather than being empty on first look."""
+    and reconciliation pages all show something rather than being empty on first look.
+    is_sample=True is the "explore with sample data" path on a real (not throwaway) company —
+    every row gets tagged is_sample so it can be cleanly removed later without learning presets
+    from fake descriptions."""
     today = datetime.date.today()
     opening_date = today - datetime.timedelta(days=6 * 30)
     try:
-        post_ledger_transaction(db, company_id, opening_date.isoformat(), "Capital introduced", 8000.00, "Cash", "Capital Introduced")
+        post_ledger_transaction(db, company_id, opening_date.isoformat(), "Capital introduced", 8000.00, "Cash", "Capital Introduced", is_sample=is_sample)
     except LedgerError:
         pass
     for month_offset in range(6, 0, -1):
         for days_ago, desc, amount, debit, credit in DEMO_TRANSACTIONS:
             date = today - datetime.timedelta(days=month_offset * 30 - days_ago)
             try:
-                post_ledger_transaction(db, company_id, date.isoformat(), desc, amount, debit, credit)
+                post_ledger_transaction(db, company_id, date.isoformat(), desc, amount, debit, credit, is_sample=is_sample)
             except LedgerError:
                 continue
 
@@ -1364,6 +1370,40 @@ def start_demo():
     session["user_id"] = user_id
     session["email"] = demo_email
     return jsonify({"id": company_id, "email": demo_email})
+
+
+@app.route("/api/companies/<int:company_id>/sample-data/seed", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def seed_sample_data(company_id):
+    """Lets a user explore their OWN (real, signed-up) company with fake pre-populated data
+    before entering anything themselves — distinct from /api/demo's throwaway account. Only
+    allowed on a genuinely empty company (no transactions yet) so this never gets used to pad
+    out a company that already has real entries mixed in with fake ones."""
+    db = get_db()
+    existing = db.execute(
+        "SELECT 1 FROM transactions WHERE company_id = ? LIMIT 1", (company_id,)
+    ).fetchone()
+    if existing:
+        return jsonify({"error": "This company already has transactions — sample data is only for a brand-new, empty company."}), 400
+    seed_demo_data(db, company_id, is_sample=True)
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/sample-data/clear", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def clear_sample_data(company_id):
+    """Removes every sample-tagged transaction so the company is back to genuinely empty —
+    a hard delete (not a void) since these were never real economic events, not something that
+    needs an audit trail of having been reversed."""
+    db = get_db()
+    deleted = db.execute("DELETE FROM transactions WHERE company_id = ? AND is_sample = 1", (company_id,)).rowcount
+    db.commit()
+    return jsonify({"deleted": deleted})
 
 
 @app.route("/api/login/2fa", methods=["POST"])
@@ -2489,6 +2529,8 @@ def _serialize_transaction(row):
     d["amount"] = from_pence(d.pop("amountPence"))
     if "foreignAmountPence" in d:
         d["foreignAmount"] = from_pence(d.pop("foreignAmountPence")) if d["foreignAmountPence"] is not None else None
+    if "isSample" in d:
+        d["isSample"] = bool(d["isSample"])
     return d
 
 
@@ -2504,6 +2546,7 @@ def list_transactions(company_id):
         f"t.vat_rate as vatRate, t.vat_direction as vatDirection, t.confidence, t.journal_id as journalId, "
         f"t.voided_at as voidedAt, t.voided_by as voidedBy, t.reviewed_by as reviewedBy, t.reviewed_at as reviewedAt, "
         f"f.name as fund, d.name as department, t.currency, t.foreign_amount_pence as foreignAmountPence, t.exchange_rate as exchangeRate, "
+        f"t.is_sample as isSample, "
         f"(SELECT COUNT(*) FROM attachments a WHERE a.transaction_id = t.id) as attachmentCount, "
         f"(SELECT COUNT(*) FROM transaction_comments c WHERE c.transaction_id = t.id) as commentCount "
         f"FROM transactions t LEFT JOIN funds f ON f.id = t.fund_id LEFT JOIN departments d ON d.id = t.department_id "
@@ -2552,7 +2595,7 @@ class LedgerError(Exception):
 
 def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit,
                              vat_rate=0, vat_direction="", confidence="high", journal_id=None, fund_id=None,
-                             department_id=None, currency=None, exchange_rate=None):
+                             department_id=None, currency=None, exchange_rate=None, is_sample=False):
     """Shared insert path for anything that writes to the ledger — manual entries, bulk
     imports, invoice/bill send-and-pay postings, and (Stage 2) compound journal legs — so
     they all get the same account resolution, locking check, preset learning, and audit trail.
@@ -2603,9 +2646,9 @@ def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit,
     leg_journal_id = journal_id or (uuid.uuid4().hex if vat_pence else None)
 
     cur = db.execute(
-        "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id, department_id, currency, foreign_amount_pence, exchange_rate) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (company_id, date, desc, net_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, leg_journal_id, fund_id, department_id, currency, foreign_pence, exchange_rate),
+        "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id, department_id, currency, foreign_amount_pence, exchange_rate, is_sample) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (company_id, date, desc, net_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, leg_journal_id, fund_id, department_id, currency, foreign_pence, exchange_rate, int(is_sample)),
     )
     main_id = cur.lastrowid
 
@@ -2616,16 +2659,20 @@ def post_ledger_transaction(db, company_id, date, desc, amount, debit, credit,
         else:  # output: sale, VAT is owed to HMRC, sits as a credit
             vat_debit, vat_credit = debit, vat_account
         db.execute(
-            "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id, department_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (company_id, date, f"{desc} (VAT)", vat_pence, vat_debit, vat_credit, tax_year, vat_rate, vat_direction, confidence, leg_journal_id, fund_id, department_id),
+            "INSERT INTO transactions (company_id, date, desc, amount_pence, debit, credit, tax_year, vat_rate, vat_direction, confidence, journal_id, fund_id, department_id, is_sample) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (company_id, date, f"{desc} (VAT)", vat_pence, vat_debit, vat_credit, tax_year, vat_rate, vat_direction, confidence, leg_journal_id, fund_id, department_id, int(is_sample)),
         )
 
-    db.execute(
-        "INSERT INTO presets (company_id, desc_key, debit, credit) VALUES (?,?,?,?) "
-        "ON CONFLICT(company_id, desc_key) DO UPDATE SET debit = excluded.debit, credit = excluded.credit",
-        (company_id, desc.strip().lower(), debit, credit),
-    )
+    # Sample data shouldn't teach the auto-categorizer anything — it's fake, and a preset learned
+    # from it would keep suggesting accounts for the user's real future entries even after the
+    # sample data is cleared.
+    if not is_sample:
+        db.execute(
+            "INSERT INTO presets (company_id, desc_key, debit, credit) VALUES (?,?,?,?) "
+            "ON CONFLICT(company_id, desc_key) DO UPDATE SET debit = excluded.debit, credit = excluded.credit",
+            (company_id, desc.strip().lower(), debit, credit),
+        )
     log_audit(db, company_id, "create", "transaction", main_id, after={
         "date": date, "desc": desc, "amount": amount, "debit": debit, "credit": credit
     })
