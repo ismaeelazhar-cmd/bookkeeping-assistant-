@@ -3210,13 +3210,15 @@ function render() {
   renderAccounts(); renderJournal(); renderTrialBalance();
   renderChartOfAccounts(); renderFinancialStatements(); renderBrecTable(); renderFixedAssets();
   renderOpeningBalances(); renderContacts(); renderInvoicesBills(); renderAgingReport();
-  renderDashboard(); renderAnomalies(); renderPurchaseOrders(); renderBudgetVsActual(); renderDeptPnl(); renderRatios(); renderPettyCash(); renderCisReturn();
+  computeAnomalies(); renderDashboard(); renderAnomalies(); renderPurchaseOrders(); renderBudgetVsActual(); renderDeptPnl(); renderRatios(); renderPettyCash(); renderCisReturn();
   renderCisStatements();
   renderLedgersPage();
   applyFxVisibility();
 }
 
-function renderAnomalies() {
+let anomaliesCache = [];
+
+function computeAnomalies() {
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
   const anomalies = [];
 
@@ -3331,6 +3333,12 @@ function renderAnomalies() {
   }
 
   anomalies.sort((a, b) => b.date.localeCompare(a.date));
+  anomaliesCache = anomalies;
+  return anomalies;
+}
+
+function renderAnomalies() {
+  const anomalies = computeAnomalies();
   document.getElementById('anomaly-count').textContent = `${anomalies.length} flagged`;
   const body = document.getElementById('anomaly-body');
   body.innerHTML = anomalies.length ? anomalies.map(a => `
@@ -3516,6 +3524,17 @@ function renderAttentionList() {
   }
   if (clarificationQueue.length) {
     items.push({ text: `${clarificationQueue.length} item${clarificationQueue.length === 1 ? '' : 's'} in the clarification queue`, action: () => showPage('bank'), tone: 'warn' });
+  }
+
+  // Anomalies were previously only visible by going to Reports → Anomalies — surface the
+  // higher-signal ones (skip "No recent movement", which the detector itself calls "likely
+  // fine, worth a glance" — not dashboard-urgent) here too instead of making the user go find them.
+  const urgentAnomalies = anomaliesCache.filter(a => a.type !== 'No recent movement');
+  if (urgentAnomalies.length) {
+    const byType = {};
+    urgentAnomalies.forEach(a => { byType[a.type] = (byType[a.type] || 0) + 1; });
+    const summary = Object.entries(byType).map(([type, n]) => `${n} ${type.toLowerCase()}`).join(', ');
+    items.push({ text: `${urgentAnomalies.length} anomal${urgentAnomalies.length === 1 ? 'y' : 'ies'} flagged: ${summary}`, action: () => showPage('reports'), tone: 'warn' });
   }
 
   const listEl = document.getElementById('dash-attention-list');
