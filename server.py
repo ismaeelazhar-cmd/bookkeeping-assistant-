@@ -4360,6 +4360,134 @@ def download_invoice_pdf(company_id, doc_id):
     })
 
 
+def generate_accountant_pack_pdf(company_row, financials, aging):
+    """P&L, balance sheet, trial balance, and aged debtors/creditors as ONE PDF instead of six
+    separate exports — what "send me the figures" usually means when an accountant asks for
+    them. Built entirely from compute_company_financials/compute_aging_report (server-computed,
+    same source every other statement in the app uses), not from client-supplied numbers, so the
+    document is self-contained and trustworthy on its own."""
+    pdf = FPDF()
+    display_name = company_row["brand_display_name"] or company_row["name"]
+    today = datetime.date.today().isoformat()
+
+    def header(title):
+        pdf.add_page()
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.cell(0, 9, display_name, ln=True)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.cell(0, 8, title, ln=True)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(120, 120, 120)
+        pdf.cell(0, 5, f"Generated {today} - all figures all-time unless stated otherwise", ln=True)
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(4)
+
+    def line(label, amount=None, bold=False, indent=0):
+        pdf.set_font("Helvetica", "B" if bold else "", 10)
+        pdf.cell(8 * indent)
+        if amount is None:
+            pdf.cell(0, 6, label, ln=True)
+        else:
+            pdf.cell(140 - 8 * indent, 6, label)
+            pdf.cell(40, 6, f"{amount:,.2f}", align="R", ln=True)
+
+    accounts = financials["accounts"]
+    totals = financials["totals"]
+    by_type = {}
+    for a in accounts:
+        by_type.setdefault(a["type"], []).append(a)
+
+    # --- Profit & Loss ---
+    header("Profit & Loss")
+    line("Revenue", totals["revenue"])
+    if totals["cogs"]:
+        line("Cost of sales", -totals["cogs"])
+        line("Gross profit", totals["revenue"] - totals["cogs"], bold=True)
+    for a in by_type.get("expense", []):
+        line(a["name"], -a["balance"], indent=1)
+    line("Net profit" if financials["netProfit"] >= 0 else "Net loss", financials["netProfit"], bold=True)
+
+    # --- Balance Sheet ---
+    header("Statement of Financial Position")
+    line("Non-current assets", bold=True)
+    for a in by_type.get("noncurrent_asset", []):
+        line(a["name"], a["balance"], indent=1)
+    line("Current assets", bold=True)
+    for a in by_type.get("current_asset", []) + by_type.get("cash", []):
+        line(a["name"], a["balance"], indent=1)
+    line("Total assets", financials["totalAssets"], bold=True)
+    line("Current liabilities", bold=True)
+    for a in by_type.get("current_liability", []):
+        line(a["name"], a["balance"], indent=1)
+    line("Non-current liabilities", bold=True)
+    for a in by_type.get("noncurrent_liability", []):
+        line(a["name"], a["balance"], indent=1)
+    line("Total liabilities", financials["totalLiabilities"], bold=True)
+    line("Total equity", financials["totalEquity"], bold=True)
+
+    # --- Trial Balance ---
+    header("Trial Balance")
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(100, 6, "Account")
+    pdf.cell(45, 6, "Debit", align="R")
+    pdf.cell(45, 6, "Credit", align="R", ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    total_debit = total_credit = 0
+    for a in accounts:
+        pdf.cell(100, 6, a["name"])
+        pdf.cell(45, 6, f"{a['debit']:,.2f}" if a["debit"] else "", align="R")
+        pdf.cell(45, 6, f"{a['credit']:,.2f}" if a["credit"] else "", align="R", ln=True)
+        total_debit += a["debit"]
+        total_credit += a["credit"]
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(100, 6, "Total")
+    pdf.cell(45, 6, f"{total_debit:,.2f}", align="R")
+    pdf.cell(45, 6, f"{total_credit:,.2f}", align="R", ln=True)
+
+    # --- Aged debtors / creditors ---
+    for kind, title in (("invoice", "Aged Debtors"), ("bill", "Aged Creditors")):
+        header(title)
+        buckets = ["current", "1-30", "31-60", "61-90", "90+"]
+        contacts = aging.get(kind, {})
+        if not contacts:
+            line("Nothing outstanding.")
+            continue
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(60, 6, "Contact")
+        for b in buckets:
+            pdf.cell(26, 6, b, align="R")
+        pdf.ln(6)
+        pdf.set_font("Helvetica", "", 9)
+        col_totals = {b: 0 for b in buckets}
+        for contact_name, vals in contacts.items():
+            pdf.cell(60, 6, contact_name)
+            for b in buckets:
+                pdf.cell(26, 6, f"{vals.get(b, 0):,.2f}" if vals.get(b, 0) else "", align="R")
+                col_totals[b] += vals.get(b, 0)
+            pdf.ln(6)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(60, 6, "Total")
+        for b in buckets:
+            pdf.cell(26, 6, f"{col_totals[b]:,.2f}", align="R")
+        pdf.ln(6)
+
+    return bytes(pdf.output())
+
+
+@app.route("/api/companies/<int:company_id>/accountant-pack/pdf", methods=["GET"])
+@login_required
+@company_required
+def download_accountant_pack(company_id):
+    db = get_db()
+    financials = compute_company_financials(db, company_id)
+    aging = compute_aging_report(db, company_id)
+    pdf_bytes = generate_accountant_pack_pdf(g.company, financials, aging)
+    from flask import Response
+    return Response(pdf_bytes, mimetype="application/pdf", headers={
+        "Content-Disposition": f"attachment; filename=accountant-pack-{datetime.date.today().isoformat()}.pdf"
+    })
+
+
 def _ensure_portal_token(db, doc):
     if doc["kind"] != "invoice" or doc["portal_token"]:
         return doc
@@ -4839,11 +4967,56 @@ def cis_statements(company_id):
     return jsonify(out)
 
 
-@app.route("/api/companies/<int:company_id>/aging-report", methods=["GET"])
-@login_required
-@company_required
-def aging_report(company_id):
-    db = get_db()
+def compute_company_financials(db, company_id):
+    """All-time trial balance + P&L + balance sheet for one company, computed server-side from
+    the same transactions+opening_balances data the consolidation report and every other
+    statement in this app already use. Pulled out as its own function (rather than duplicated
+    inline) so the accountant pack's PDF can build a self-contained, server-trusted document
+    instead of relying on whatever numbers a client POSTs."""
+    types_by_name = {r["name"]: r["type"] for r in db.execute(
+        "SELECT name, type FROM accounts WHERE company_id = ?", (company_id,)
+    ).fetchall()}
+    combined = {}
+    for tx in db.execute(
+        "SELECT amount_pence, debit, credit FROM transactions WHERE company_id = ? AND voided_at IS NULL", (company_id,)
+    ).fetchall():
+        amount = from_pence(tx["amount_pence"])
+        for account, side in ((tx["debit"], "debit"), (tx["credit"], "credit")):
+            entry = combined.setdefault(account, {"type": types_by_name.get(account, "expense"), "debit": 0, "credit": 0})
+            entry[side] += amount
+    for ob in db.execute(
+        "SELECT ob.amount_pence, ob.side, a.name as account FROM opening_balances ob "
+        "JOIN accounts a ON a.id = ob.account_id WHERE ob.company_id = ?", (company_id,)
+    ).fetchall():
+        amount = from_pence(ob["amount_pence"])
+        entry = combined.setdefault(ob["account"], {"type": types_by_name.get(ob["account"], "expense"), "debit": 0, "credit": 0})
+        entry[ob["side"]] += amount
+
+    debit_normal_types = {"cash", "cogs", "expense", "current_asset", "noncurrent_asset", "drawings"}
+    totals = {"revenue": 0, "cogs": 0, "expense": 0, "current_asset": 0, "noncurrent_asset": 0,
+              "current_liability": 0, "noncurrent_liability": 0, "equity": 0, "drawings": 0, "cash": 0}
+    accounts_out = []
+    for name, entry in combined.items():
+        t = entry["type"]
+        balance = (entry["debit"] - entry["credit"]) if t in debit_normal_types else (entry["credit"] - entry["debit"])
+        totals[t] = totals.get(t, 0) + balance
+        accounts_out.append({"name": name, "type": t, "debit": entry["debit"], "credit": entry["credit"], "balance": balance})
+
+    net_profit = totals["revenue"] - totals["cogs"] - totals["expense"]
+    total_assets = totals["cash"] + totals["current_asset"] + totals["noncurrent_asset"]
+    total_liabilities = totals["current_liability"] + totals["noncurrent_liability"]
+    total_equity = totals["equity"] + net_profit - totals["drawings"]
+    return {
+        "accounts": sorted(accounts_out, key=lambda a: a["name"]),
+        "totals": totals,
+        "netProfit": net_profit,
+        "totalAssets": total_assets,
+        "totalLiabilities": total_liabilities,
+        "totalEquity": total_equity,
+    }
+
+
+def compute_aging_report(db, company_id):
     today = datetime.date.today()
     rows = db.execute(
         "SELECT ib.id, ib.kind, ib.contact_id as contactId, c.name as contactName, ib.due_date as dueDate, "
@@ -4886,7 +5059,14 @@ def aging_report(company_id):
             "current": 0, "1-30": 0, "31-60": 0, "61-90": 0, "90+": 0
         })
         contact_bucket[bucket] += from_pence(outstanding_pence)
-    return jsonify(result)
+    return result
+
+
+@app.route("/api/companies/<int:company_id>/aging-report", methods=["GET"])
+@login_required
+@company_required
+def aging_report(company_id):
+    return jsonify(compute_aging_report(get_db(), company_id))
 
 
 # ---------- fixed assets ----------

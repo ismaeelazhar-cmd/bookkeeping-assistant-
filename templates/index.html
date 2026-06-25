@@ -1132,6 +1132,7 @@
         <div><label>To <span style="color:var(--muted); font-weight:400;">(blank = today)</span></label><input type="date" id="fs-to"></div>
       </div>
       <button class="btn-primary" onclick="renderFinancialStatements()">Generate</button>
+      <a class="btn-secondary" style="display:inline-block; text-decoration:none;" href="/api/companies/0/accountant-pack/pdf" id="accountant-pack-link" target="_blank" title="P&amp;L, balance sheet, trial balance, and aged debtors/creditors — all in one PDF">📄 Download accountant pack (all-time)</a>
       <div class="sub" id="fs-build-summary" style="margin:10px 0 12px;"></div>
       <div class="row2" style="align-items:start;">
         <div><h2 style="margin-top:0;">Statement of Profit or Loss</h2><table class="trial"><tbody id="pnl-body"></tbody></table></div>
@@ -5016,6 +5017,7 @@ function accountHasUnreviewedEntries(acc) {
 }
 
 function renderFinancialStatements() {
+  document.getElementById('accountant-pack-link').href = `/api/companies/${currentCompany.id}/accountant-pack/pdf`;
   // From/To bound the Profit or Loss and Cash Flow statements (flow for the period selected).
   // The Statement of Financial Position is always cumulative as of the To date (or today/all-time
   // if blank) — a balance sheet is a snapshot, not a range — same convention real accounting
