@@ -4906,6 +4906,16 @@ function renderComparativePeriod() {
   table.innerHTML = html;
 }
 
+// Static, illustrative industry averages — not live market data, just a reasonable reference
+// point so "your gross margin is 62%" has something to compare against. Update these figures if
+// a real benchmark data source is ever connected; until then this is clearly a static table, not
+// a claim about current market conditions.
+const INDUSTRY_BENCHMARKS = {
+  retail:       { grossMargin: 45, netMargin: 8,  currentRatio: 1.5, debtorDays: 5 },
+  service:      { grossMargin: 65, netMargin: 15, currentRatio: 1.8, debtorDays: 35 },
+  construction: { grossMargin: 20, netMargin: 6,  currentRatio: 1.3, debtorDays: 45 },
+};
+
 function renderRatios() {
   const table = document.getElementById('ratios-table');
   if (!table) return;
@@ -4940,14 +4950,22 @@ function renderRatios() {
   const fmtPct = v => v === null ? 'n/a' : `${v.toFixed(1)}%`;
   const fmtDays = v => v === null ? 'n/a' : `${v.toFixed(0)} days`;
 
-  table.innerHTML = [
-    ['Current ratio', fmtRatio(ratio(currentAssets, currentLiabilities)), 'Current assets ÷ current liabilities — can short-term obligations be covered?'],
-    ['Quick ratio', fmtRatio(ratio(quickAssets, currentLiabilities)), 'Like current ratio, excluding stock/inventory accounts.'],
-    ['Gross margin', fmtPct(pct(grossProfit, revenue)), 'Gross profit ÷ revenue.'],
-    ['Net margin', fmtPct(pct(netProfit, revenue)), 'Net profit ÷ revenue.'],
-    ['Debtor days', fmtDays(days(receivables, revenue)), 'Trade Receivables balance ÷ revenue × 365 — roughly how long customers take to pay.'],
-    ['Creditor days', fmtDays(days(payables, purchases)), 'Trade Payables balance ÷ (COGS + expenses) × 365 — roughly how long you take to pay suppliers.'],
-  ].map(([label, value, hint]) => `<tr><td>${label}</td><td class="num">${value}</td><td style="color:var(--muted); font-size:12px;">${hint}</td></tr>`).join('');
+  const benchmark = INDUSTRY_BENCHMARKS[currentCompany.business_type];
+  const benchmarkNote = benchmark
+    ? `<div class="sub" style="margin-top:10px;">"vs industry" is a static, illustrative reference figure for ${escapeHtml(currentCompany.business_type)} businesses — not live market data.</div>`
+    : `<div class="sub" style="margin-top:10px;">No industry benchmark available for business type "general" — set a specific business type (retail, service, construction) under Settings to see a comparison.</div>`;
+
+  const rows = [
+    { label: 'Current ratio', value: ratio(currentAssets, currentLiabilities), fmt: fmtRatio, hint: 'Current assets ÷ current liabilities — can short-term obligations be covered?', bench: benchmark?.currentRatio, benchFmt: fmtRatio },
+    { label: 'Quick ratio', value: ratio(quickAssets, currentLiabilities), fmt: fmtRatio, hint: 'Like current ratio, excluding stock/inventory accounts.' },
+    { label: 'Gross margin', value: pct(grossProfit, revenue), fmt: fmtPct, hint: 'Gross profit ÷ revenue.', bench: benchmark?.grossMargin, benchFmt: fmtPct },
+    { label: 'Net margin', value: pct(netProfit, revenue), fmt: fmtPct, hint: 'Net profit ÷ revenue.', bench: benchmark?.netMargin, benchFmt: fmtPct },
+    { label: 'Debtor days', value: days(receivables, revenue), fmt: fmtDays, hint: 'Trade Receivables balance ÷ revenue × 365 — roughly how long customers take to pay.', bench: benchmark?.debtorDays, benchFmt: fmtDays },
+    { label: 'Creditor days', value: days(payables, purchases), fmt: fmtDays, hint: 'Trade Payables balance ÷ (COGS + expenses) × 365 — roughly how long you take to pay suppliers.' },
+  ];
+  table.innerHTML = '<tr><td><b>Metric</b></td><td class="num"><b>Your figure</b></td><td class="num"><b>vs industry</b></td><td></td></tr>'
+    + rows.map(r => `<tr><td>${r.label}</td><td class="num">${r.fmt(r.value)}</td><td class="num" style="color:var(--muted);">${r.bench != null ? r.benchFmt(r.bench) : '—'}</td><td style="color:var(--muted); font-size:12px;">${r.hint}</td></tr>`).join('')
+    + `<tr><td colspan="4">${benchmarkNote}</td></tr>`;
 }
 
 function lineRow(label, value, opts) {
