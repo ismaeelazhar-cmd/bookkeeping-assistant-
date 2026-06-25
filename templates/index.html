@@ -448,10 +448,12 @@
         <h2 style="margin-top:24px;">Data</h2>
         <div class="toolbar">
           <button class="btn-secondary" onclick="exportCSV()">Export CSV</button>
+          <button class="btn-secondary" onclick="emailJournalCSV()">✉ Email CSV</button>
           <button class="btn-secondary" onclick="document.getElementById('import-file').click()">Import CSV</button>
           <input type="file" id="import-file" accept=".csv" style="display:none" onchange="importCSV(event)">
         </div>
         <button class="btn-secondary" style="width:100%; margin-bottom:10px;" onclick="exportFullBackup()">Full backup (JSON — everything)</button>
+        <button class="btn-secondary" style="width:100%; margin-bottom:10px;" onclick="emailFullBackup()">✉ Email full backup</button>
         <button class="btn-secondary" style="width:100%; color:var(--bad);" onclick="confirmAction('Clear all transactions for this company? This cannot be undone.', 'Clear all data').then(ok => ok && clearAll())">Clear all data</button>
       </div>
 
@@ -851,6 +853,7 @@
       <div class="toolbar" style="margin-bottom:14px;">
         <button class="btn-secondary" onclick="exportLedgersCSV()">Export CSV (Excel)</button>
         <button class="btn-secondary" onclick="exportLedgersPDF()">Export PDF</button>
+        <button class="btn-secondary" onclick="emailLedgersCSV()">✉ Email CSV</button>
       </div>
       <div id="ledgers-grid" class="accounts-grid"></div>
     </div>
@@ -948,6 +951,47 @@
     </div>
 
     <div class="panel" style="margin-top:20px;">
+      <h2>Recurring Invoices &amp; Bills</h2>
+      <div class="sub" style="margin-bottom:12px;">Retainers, rent, subscriptions — set one up once and a new draft (or sent invoice, if auto-send is on) is generated automatically on schedule, no manual re-entry each month.</div>
+      <table class="inbox">
+        <thead><tr><th>Contact</th><th>Description</th><th class="num">Amount</th><th>Frequency</th><th>Next due</th><th></th></tr></thead>
+        <tbody id="recurring-invoices-body"></tbody>
+      </table>
+      <div class="panel" style="background:var(--panel-soft); margin-top:14px; box-shadow:none;">
+        <h2 style="margin-top:0; font-size:13px;">Set up a recurring invoice/bill</h2>
+        <div class="row2">
+          <div><label>Kind</label><select id="ri-kind"><option value="invoice">Invoice (to a customer)</option><option value="bill">Bill (from a supplier)</option></select></div>
+          <div><label>Contact</label><select id="ri-contact"></select></div>
+        </div>
+        <label>Description</label>
+        <input type="text" id="ri-desc" placeholder="e.g. Monthly retainer">
+        <div class="row2">
+          <div><label>Amount (gross)</label><input type="number" id="ri-amount" step="0.01" min="0" placeholder="0.00"></div>
+          <div><label>VAT rate</label>
+            <select id="ri-vat-rate"><option value="0">No VAT</option><option value="20">20%</option><option value="5">5%</option><option value="0.001">0% (Zero-rated)</option></select>
+          </div>
+        </div>
+        <label>Account</label>
+        <select id="ri-account"></select>
+        <div class="row2">
+          <div><label>Frequency</label>
+            <select id="ri-frequency"><option value="weekly">Weekly</option><option value="monthly" selected>Monthly</option><option value="quarterly">Quarterly</option><option value="annually">Annually</option></select>
+          </div>
+          <div><label>First due date</label><input type="date" id="ri-next-due"></div>
+        </div>
+        <div class="row2">
+          <div><label>Payment terms <span style="color:var(--muted); font-weight:400;">(days after each issue date)</span></label><input type="number" id="ri-due-offset" min="0" value="30"></div>
+          <div><label>Ends <span style="color:var(--muted); font-weight:400;">(optional)</span></label><input type="date" id="ri-end-date"></div>
+        </div>
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text);">
+          <input type="checkbox" id="ri-auto-send" style="width:auto;"> Send automatically (otherwise each one is created as a draft to review first)
+        </label>
+        <button class="btn-primary" onclick="addRecurringInvoice()">Set up recurring invoice/bill</button>
+        <div id="ri-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
       <h2>Aging Report</h2>
       <div class="sub" style="margin-bottom:12px;">Outstanding (sent but not paid) invoices and bills, bucketed by how overdue they are.</div>
       <h2 style="margin-top:0; color:var(--debit);">Receivables (money owed to you)</h2>
@@ -1003,6 +1047,7 @@
     <div class="panel" style="margin-top:20px;">
       <div class="report-actions">
         <button class="btn-secondary" onclick="exportCSV()">Export CSV</button>
+        <button class="btn-secondary" onclick="emailJournalCSV()">✉ Email CSV</button>
         <button class="btn-secondary" onclick="window.print()">Export PDF</button>
       </div>
       <h2>Financial Statements <span class="pill" id="period-label"></span></h2>
@@ -1413,6 +1458,24 @@
     </div>
   </div>
 </dialog>
+
+<div id="compose-email-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:55; align-items:center; justify-content:center;" onclick="if(event.target===this) closeComposeEmail()">
+  <div class="panel" style="width:480px; max-height:85vh; overflow:auto;">
+    <h2 id="compose-email-title">Compose email</h2>
+    <label>To</label>
+    <input type="email" id="ce-to" placeholder="recipient@example.com">
+    <label>Subject</label>
+    <input type="text" id="ce-subject">
+    <label>Message</label>
+    <textarea id="ce-body" rows="9"></textarea>
+    <div id="ce-attachment-note" class="sub" style="margin:6px 0 0;"></div>
+    <div class="toolbar" style="margin-top:12px; justify-content:space-between;">
+      <button class="btn-secondary" onclick="closeComposeEmail()">Cancel</button>
+      <button class="btn-primary" id="ce-send-btn" style="margin-top:0;" onclick="sendComposeEmail()">Send</button>
+    </div>
+    <div id="ce-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+  </div>
+</div>
 
 <div id="contact-modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.45); z-index:50; align-items:center; justify-content:center;" onclick="if(event.target===this) closeContactModal()">
   <div class="panel" style="width:520px; max-height:85vh; overflow:auto;">
@@ -2397,7 +2460,7 @@ function getAccountType(name) {
 function populateAccountSelects() {
   const sorted = [...chartAccounts].sort((a, b) => a.name.localeCompare(b.name));
   const optionsHtml = sorted.map(a => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)} (${a.code})</option>`).join('');
-  ['f-default-credit', 'brec-account', 'fa-account', 'ib-account', 'cj-pivot-account', 'po-account', 'budget-new-account'].forEach(id => {
+  ['f-default-credit', 'brec-account', 'fa-account', 'ib-account', 'cj-pivot-account', 'po-account', 'budget-new-account', 'ri-account'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     const prev = el.value;
@@ -2453,6 +2516,7 @@ async function refreshAll() {
   await loadBudgets();
   await loadReconciliationHistory();
   await loadRecurringJournals();
+  await loadRecurringInvoices();
   renderCashFlowForecast();
   renderMonthlyPnL();
   await loadStockItems();
@@ -2757,7 +2821,7 @@ function renderLedgersPage() {
   container.innerHTML = names.map(name => taccountCardHtml(name, accounts[name], true)).join('');
 }
 
-function exportLedgersCSV() {
+function buildLedgersCSV() {
   const accounts = buildAccounts();
   const rows = [['Account', 'Date', 'Description', 'Debit', 'Credit']];
   for (const name of Object.keys(accounts).sort()) {
@@ -2765,11 +2829,26 @@ function exportLedgersCSV() {
     for (const t of acc.debits) rows.push([name, fmtDate(t.date), t.desc, t.amount.toFixed(2), '']);
     for (const t of acc.credits) rows.push([name, fmtDate(t.date), t.desc, '', t.amount.toFixed(2)]);
   }
-  const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
-  const blob = new Blob([csv], { type: 'text/csv' });
+  return rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
+}
+
+function exportLedgersCSV() {
+  const blob = new Blob([buildLedgersCSV()], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href = url; a.download = `${currentCompany.name.replace(/\s+/g,'_')}_all_ledgers.csv`; a.click();
   URL.revokeObjectURL(url);
+}
+
+function emailLedgersCSV() {
+  const filename = `${currentCompany.name.replace(/\s+/g,'_')}_all_ledgers.csv`;
+  openComposeEmail({
+    title: 'Email all ledgers (CSV)', to: '', subject: `${currentCompany.name} — all ledgers`,
+    body: `Attached: every account's ledger for ${currentCompany.name}, exported just now.`,
+    attachmentNote: `📎 ${filename} will be attached.`,
+    onSend: (payload) => api(`/api/companies/${currentCompany.id}/email-export`, {
+      method: 'POST', body: JSON.stringify({ ...payload, filename, content: buildLedgersCSV() }),
+    }),
+  });
 }
 
 function exportLedgersPDF() {
@@ -3236,16 +3315,42 @@ function renderSpendByCategory() {
     </div>`).join('');
 }
 
-function exportCSV() {
+function buildJournalCSV() {
   const header = 'Bank Transaction Date,Debit,Credit,Description,Debit (Cat),Credit (Cat),TaxYear';
   const lines = transactions.map(t => {
     const desc = `"${String(t.desc).replace(/"/g, '""')}"`;
     return `${fmtDate(t.date)},${t.amount},${t.amount},${desc},${t.debit},${t.credit},${t.taxYear || ''}`;
   });
-  const blob = new Blob([[header, ...lines].join('\r\n')], { type: 'text/csv' });
+  return [header, ...lines].join('\r\n');
+}
+
+function exportCSV() {
+  const blob = new Blob([buildJournalCSV()], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href = url; a.download = `${currentCompany.name.replace(/\s+/g,'_')}_ledger.csv`; a.click();
   URL.revokeObjectURL(url);
+}
+
+function emailJournalCSV() {
+  const filename = `${currentCompany.name.replace(/\s+/g,'_')}_ledger.csv`;
+  openComposeEmail({
+    title: 'Email transaction ledger (CSV)', to: '', subject: `${currentCompany.name} — transaction ledger`,
+    body: `Attached: the full transaction ledger for ${currentCompany.name}, exported just now.`,
+    attachmentNote: `📎 ${filename} will be attached.`,
+    onSend: (payload) => api(`/api/companies/${currentCompany.id}/email-export`, {
+      method: 'POST', body: JSON.stringify({ ...payload, filename, content: buildJournalCSV() }),
+    }),
+  });
+}
+
+function emailFullBackup() {
+  const filename = `${currentCompany.name.replace(/\s+/g, '_')}_full_backup_${new Date().toISOString().slice(0, 10)}.json`;
+  openComposeEmail({
+    title: 'Email full backup', to: '', subject: `${currentCompany.name} — full backup`,
+    body: `Attached: a full JSON backup of ${currentCompany.name}'s data, exported just now.`,
+    attachmentNote: `📎 ${filename} will be attached.`,
+    onSend: (payload) => api(`/api/companies/${currentCompany.id}/export/email`, { method: 'POST', body: JSON.stringify(payload) }),
+  });
 }
 
 async function exportFullBackup() {
@@ -3699,6 +3804,76 @@ let recurringJournals = [];
 
 async function loadRecurringJournals() {
   recurringJournals = await api(`/api/companies/${currentCompany.id}/recurring-journals`);
+}
+
+// ---------- recurring invoices/bills ----------
+let recurringInvoices = [];
+
+async function loadRecurringInvoices() {
+  recurringInvoices = await api(`/api/companies/${currentCompany.id}/recurring-invoices`);
+  renderRecurringInvoices();
+}
+
+function renderRecurringInvoices() {
+  const body = document.getElementById('recurring-invoices-body');
+  if (!body) return;
+  body.innerHTML = recurringInvoices.length ? recurringInvoices.map(r => `
+    <tr style="${r.paused ? 'opacity:0.5;' : ''}">
+      <td>${escapeHtml(r.contactName)}</td>
+      <td>${escapeHtml(r.desc)}${r.autoSend ? ' <span class="pill" title="Sends automatically, no review step">auto-send</span>' : ''}</td>
+      <td class="num">${fmt(r.amount)}</td>
+      <td>${escapeHtml(r.frequency)}</td>
+      <td>${fmtDate(r.nextDue)}</td>
+      <td>
+        <button class="btn-secondary" onclick="toggleRecurringInvoicePause(${r.id})">${r.paused ? 'Resume' : 'Pause'}</button>
+        <button class="btn-danger" onclick="deleteRecurringInvoiceUI(${r.id})">✕</button>
+      </td>
+    </tr>`).join('') : '<tr><td colspan="6" class="empty">No recurring invoices/bills set up yet.</td></tr>';
+}
+
+async function addRecurringInvoice() {
+  const statusEl = document.getElementById('ri-status');
+  const kind = document.getElementById('ri-kind').value;
+  const contactId = parseInt(document.getElementById('ri-contact').value, 10);
+  const desc = document.getElementById('ri-desc').value.trim();
+  const amount = parseFloat(document.getElementById('ri-amount').value);
+  let vatRate = parseFloat(document.getElementById('ri-vat-rate').value);
+  vatRate = vatRate === 0.001 ? 0 : vatRate;
+  const account = document.getElementById('ri-account').value;
+  const frequency = document.getElementById('ri-frequency').value;
+  const nextDue = document.getElementById('ri-next-due').value;
+  const dueDayOffset = parseInt(document.getElementById('ri-due-offset').value, 10) || 0;
+  const endDate = document.getElementById('ri-end-date').value;
+  const autoSend = document.getElementById('ri-auto-send').checked;
+
+  if (!contactId || !desc || !amount || amount <= 0 || !account || !nextDue) {
+    statusEl.textContent = 'Fill in contact, description, a positive amount, account, and a first due date.'; return;
+  }
+  try {
+    await api(`/api/companies/${currentCompany.id}/recurring-invoices`, {
+      method: 'POST',
+      body: JSON.stringify({ kind, contactId, desc, amount, account, vatRate, frequency, nextDue, dueDayOffset, endDate, autoSend }),
+    });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = '';
+  document.getElementById('ri-desc').value = '';
+  document.getElementById('ri-amount').value = '';
+  document.getElementById('ri-next-due').value = '';
+  document.getElementById('ri-end-date').value = '';
+  document.getElementById('ri-auto-send').checked = false;
+  await loadRecurringInvoices();
+  showToast('Recurring invoice/bill set up.', 'success');
+}
+
+async function toggleRecurringInvoicePause(id) {
+  await api(`/api/companies/${currentCompany.id}/recurring-invoices/${id}/pause`, { method: 'POST' });
+  await loadRecurringInvoices();
+}
+
+async function deleteRecurringInvoiceUI(id) {
+  if (!(await confirmAction('Delete this recurring invoice/bill template? Already-generated invoices/bills are unaffected.'))) return;
+  await api(`/api/companies/${currentCompany.id}/recurring-invoices/${id}`, { method: 'DELETE' });
+  await loadRecurringInvoices();
 }
 
 async function loadReconciliationHistory() {
@@ -5136,7 +5311,7 @@ function applyContactPaymentTerms() {
 }
 
 function populateContactSelect() {
-  ['ib-contact', 'po-contact'].forEach(id => {
+  ['ib-contact', 'po-contact', 'ri-contact'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     const prev = el.value;
@@ -5385,17 +5560,25 @@ async function sendInvoiceBill(id) {
 }
 
 async function emailInvoiceBill(id) {
-  try {
-    const result = await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/email`, { method: 'POST' });
-    showToast(`Emailed to ${result.sentTo}.`, 'success');
-  } catch (e) { showToast(e.message, 'error'); }
+  let draft;
+  try { draft = await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/email-draft`); }
+  catch (e) { showToast(e.message, 'error'); return; }
+  openComposeEmail({
+    title: 'Email invoice/bill', to: draft.to, subject: draft.subject, body: draft.body,
+    attachmentNote: '📎 A PDF copy of the document will be attached automatically.',
+    onSend: (payload) => api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/email`, { method: 'POST', body: JSON.stringify(payload) }),
+  });
 }
 
 async function remindInvoiceBill(id) {
-  try {
-    const result = await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/send-reminder`, { method: 'POST' });
-    showToast(`Reminder sent to ${result.sentTo}.`, 'success');
-  } catch (e) { showToast(e.message, 'error'); }
+  let draft;
+  try { draft = await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/email-draft?reminder=1`); }
+  catch (e) { showToast(e.message, 'error'); return; }
+  openComposeEmail({
+    title: 'Send overdue reminder', to: draft.to, subject: draft.subject, body: draft.body,
+    attachmentNote: '📎 A PDF copy of the document will be attached automatically.',
+    onSend: (payload) => api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/send-reminder`, { method: 'POST', body: JSON.stringify(payload) }),
+  });
 }
 
 function copyPortalLink(id) {
@@ -5748,6 +5931,46 @@ function showSourceModal(txId) {
 }
 
 function closeSourceModal() { document.getElementById('source-overlay').style.display = 'none'; }
+
+// ---------- shared "compose email" modal — used by invoice emails/reminders AND by "email me
+// this export" everywhere a CSV/backup export exists, so there's one editable-before-sending
+// UI instead of every send button firing an email with no chance to review it first. ----------
+let composeEmailOnSend = null;
+
+function openComposeEmail({ title, to, subject, body, attachmentNote, onSend }) {
+  document.getElementById('compose-email-title').textContent = title || 'Compose email';
+  document.getElementById('ce-to').value = to || '';
+  document.getElementById('ce-subject').value = subject || '';
+  document.getElementById('ce-body').value = body || '';
+  document.getElementById('ce-attachment-note').textContent = attachmentNote || '';
+  document.getElementById('ce-status').textContent = '';
+  composeEmailOnSend = onSend;
+  document.getElementById('compose-email-overlay').style.display = 'flex';
+}
+
+function closeComposeEmail() {
+  document.getElementById('compose-email-overlay').style.display = 'none';
+  composeEmailOnSend = null;
+}
+
+async function sendComposeEmail() {
+  const statusEl = document.getElementById('ce-status');
+  const to = document.getElementById('ce-to').value.trim();
+  if (!to) { statusEl.textContent = 'Enter a recipient email address.'; return; }
+  const payload = { to, subject: document.getElementById('ce-subject').value.trim(), body: document.getElementById('ce-body').value };
+  const sendBtn = document.getElementById('ce-send-btn');
+  sendBtn.disabled = true;
+  statusEl.textContent = 'Sending…';
+  try {
+    await composeEmailOnSend(payload);
+    showToast(`Emailed to ${to}.`, 'success');
+    closeComposeEmail();
+  } catch (e) {
+    statusEl.textContent = e.message;
+  } finally {
+    sendBtn.disabled = false;
+  }
+}
 
 // ---------- Attachments ----------
 
