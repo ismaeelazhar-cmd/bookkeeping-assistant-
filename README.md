@@ -18,7 +18,8 @@ A multi-tenant double-entry bookkeeping web app: log in, create one or more comp
 - **Live bank feed (Plaid)**: link a real bank account or card. This is the "buy don't build" Open Banking piece — actual connections go through Plaid's regulated infrastructure (the same approach Xero/FreeAgent use), not custom bank scraping. Transactions sync via cursor-based incremental sync straight into the same `bank_lines` the Bank Reconciliation screen already uses. A webhook gives real-time push updates once deployed somewhere reachable; a manual "Sync now" button covers local/sandbox use where Plaid's servers can't reach `localhost`. The access token is encrypted at rest with the same key used for the AI API key, and is never returned to the browser.
 - **Movements Inbox**: drop a bank statement PDF or freeform text; keyword rules (or an AI pass) propose the debit/credit pair for review before posting. Every entry carries a `confidence` flag, surfaced as an "unreviewed" warning on any financial statement line built from it.
 - **Bank Reconciliation**: import or paste a statement, match each line to a posted transaction or post a new one directly, with a running ledger-vs-statement balance check.
-- **Receipt OCR**: attach a receipt/invoice (PDF/PNG/JPEG/HEIC/WEBP) to any transaction; Claude reads the date/description/amount off it.
+- **Receipt OCR**: attach a receipt/invoice (PDF/PNG/JPEG/HEIC/WEBP) to any transaction; Claude or Ollama (see AI integration below) reads the date/description/amount off it. The pre-transaction "scan a receipt" flow in Quick Entry auto-posts the transaction directly (and attaches the file) when a categorization rule or learned preset confidently identifies the accounts, instead of only ever pre-filling the form.
+- **Categorization rules** ("Amazon always → Office Supplies") apply automatically across every entry point — bank feed sync, CSV import, and receipt scans — not just a settings list with no effect.
 
 ## Tax & compliance
 
@@ -31,7 +32,9 @@ A multi-tenant double-entry bookkeeping web app: log in, create one or more comp
 ## Sales & purchases
 
 - **Contacts** (customers/suppliers) and real **Invoices/Bills** with a draft → sent → paid lifecycle. Sending posts to Trade Receivables/Payables (with VAT if set); paying settles it. Deleting one voids its linked ledger postings rather than leaving orphans.
-- **Invoice PDFs**: a real PDF (logo, business address, payment terms, bank details — all from Settings → Branding) generated with `fpdf2` (pure-Python, no system libraries), downloadable per invoice/bill and emailable as an attachment.
+- **Invoice PDFs**: a real PDF (logo, business address, payment terms, bank details — all from Settings → Branding) generated with `fpdf2` (pure-Python, no system libraries), downloadable per invoice/bill and emailable as an attachment. Three template designs (classic/modern/minimal), picked per company.
+- **Invoice status timeline**: drafted/sent/opened/paid timestamps per document — "opened" is stamped on the customer portal's first real visit, not just inferred.
+- **Auto-chase cadence**: 3 days before due, due today, 7 days after, 14 days after — each stage fires once, with wording that matches what's actually happening (not a flat "overdue" message before the due date has even passed).
 - **Customer payment portal**: every sent invoice gets an unguessable `/portal/<token>` link — a public, read-only page showing the invoice, with a "Pay now" button once Stripe keys are configured (falls back to read-only if not). Paying through Stripe Checkout auto-posts the payment and marks the invoice paid via a signature-verified webhook.
 - **Aging report** bucketing outstanding invoices/bills by days overdue.
 
@@ -46,11 +49,16 @@ A multi-tenant double-entry bookkeeping web app: log in, create one or more comp
 ## Fund accounting & consolidation (opt-in)
 
 - **Fund accounting**: off by default per company — turning it on changes nothing else about how that company works. When on: tag transactions with a fund (restricted/designated/unrestricted) and get a **Statement of Financial Activities** segmenting incoming resources and resources expended by fund type. Funds don't auto-create like accounts do; they need a deliberate type, so referencing an unknown fund is a hard error, not a guess.
-- **Multi-entity consolidation**: group companies you own (e.g. a charity plus its trading subsidiary) and view a combined P&L/SOFP summary. This is a plain aggregation across entities by matching account name — there's no intercompany elimination, so it's not true consolidation accounting if the grouped companies trade with each other.
+- **Multi-entity consolidation**: group companies you own (e.g. a charity plus its trading subsidiary) and view a combined P&L/SOFP summary, aggregated across entities by matching account name. Balances in accounts named "Intercompany..."/"Due from/to..." are automatically eliminated between members (netted up to the matched amount, with any unmatched residual flagged) so a loan or trade balance between group members isn't double-counted — still no minority-interest handling, so it's not a substitute for a real consolidation engine on complex group structures.
 
 ## AI integration
 
-The Claude API key is **write-only** — once set, it's never serialized back to the browser in any API response, and the actual Anthropic API call happens server-side (`server.py`'s `call_claude`), not from client-side JavaScript. Used for: Movements Inbox categorization, receipt OCR (including a pre-transaction "scan a receipt" flow in Quick Entry that pre-fills the form before anything is posted), and Ask Your Ledger.
+Two providers, picked per company in Settings → AI Features:
+
+- **Claude (Anthropic)**: the API key is **write-only** — once set, it's never serialized back to the browser in any API response, and the actual API call happens server-side (`server.py`'s `call_claude`), not from client-side JavaScript. Most accurate; paid per use.
+- **Ollama (local, free)**: points at a self-hosted Ollama server (default `http://localhost:11434`), no API key or cost at all. Lower OCR/categorization accuracy than Claude, and **no PDF support** — only image receipts (photos/screenshots), since Ollama has no native document understanding the way Claude does; that limitation surfaces as a clear error rather than mis-reading a PDF as garbage.
+
+Both go through one dispatcher (`call_ai`) so every AI feature works under either provider: Movements Inbox categorization, receipt OCR (including a pre-transaction "scan a receipt" flow in Quick Entry that auto-posts the transaction directly when a categorization rule/preset confidently matches), Ask Your Ledger (now a real multi-turn conversation, persisted per company in the browser), and an AI-generated month-end narrative (period-over-period deltas computed server-side; the model only writes them up, never computes the figures itself).
 
 ## Business health & automation
 
@@ -107,6 +115,6 @@ Set the `SECRET_KEY` env var to hand the session secret to the app via your depl
 
 Hardened so far: persistent session secret, basic rate limiting on auth endpoints, CSRF protection (Origin/Referer validation on state-changing requests), AI API key encrypted at rest (separate key file from the session secret), a full JSON backup endpoint, and server-side-only AI key handling (the key is write-only — never serialized back to the browser in any response). **Still not built**: 2FA backup/recovery codes (losing your authenticator device currently means losing account access — there's no recovery flow), and a built-in automated backup schedule (the export endpoint exists; nothing calls it on a timer).
 
-**Deliberately not built**: real consolidation accounting (intercompany eliminations, minority interest) — the multi-entity consolidation feature is a plain aggregation, documented as such; fund-level opening balances and cumulative funds-carried-forward across periods for the SOFA report; a background job scheduler/event bus/data warehouse or any other heavy platform infrastructure — this is a single Flask+SQLite app, and that scale of architecture would be scaffolding with nothing real behind it, not a feature.
+**Deliberately not built**: minority-interest handling in multi-entity consolidation (intercompany balances ARE now eliminated — see above — but a partly-owned subsidiary isn't modelled); fund-level opening balances and cumulative funds-carried-forward across periods for the SOFA report; a background job scheduler/event bus/data warehouse or any other heavy platform infrastructure — this is a single Flask+SQLite app, and that scale of architecture would be scaffolding with nothing real behind it, not a feature.
 
 **Unverified against real third-party accounts** (the code path is real and tested with fake/local data, but needs the user's own credentials to confirm end-to-end): Making Tax Digital submission needs a real HMRC Developer Hub application; the Stripe customer-payment portal needs a real Stripe account and API keys; SMTP-based emails/notifications need real mail server credentials. Stripe Checkout session creation, the PDF generator, and the public portal page are all verified working with placeholder/no credentials — only the actual money-moving and email-sending steps are unverified.
