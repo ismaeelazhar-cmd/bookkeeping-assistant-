@@ -1327,6 +1327,17 @@
     </div>
 
     <div class="panel" style="margin-top:20px;">
+      <h2>Charts</h2>
+      <div class="sub" style="margin-bottom:14px;">Revenue trend, expense breakdown, and cash runway — visual, board-ready versions of the figures above.</div>
+      <div class="row2" style="align-items:start;">
+        <div><h3 style="font-size:13px; margin:0 0 8px;">Revenue trend (last 12 months)</h3><div id="chart-revenue-trend"></div></div>
+        <div><h3 style="font-size:13px; margin:0 0 8px;">Expense breakdown (last 90 days)</h3><div id="chart-expense-breakdown"></div></div>
+      </div>
+      <h3 style="font-size:13px; margin:18px 0 8px;">Cash runway (last 12 months, cash balance at month end)</h3>
+      <div id="chart-cash-runway"></div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
       <h2>Ratio Analysis</h2>
       <div class="sub" style="margin-bottom:12px;">Auto-calculated from the ledger, all-time. Debtor/creditor days use the closing balance against all-time revenue/purchases as a rough proxy — for a precise figure, an accountant would use average balances over the period in question.</div>
       <table class="trial" id="ratios-table"></table>
@@ -3254,6 +3265,7 @@ function render() {
   renderChartOfAccounts(); renderFinancialStatements(); renderBrecTable(); renderFixedAssets();
   renderOpeningBalances(); renderContacts(); renderInvoicesBills(); renderAgingReport();
   computeAnomalies(); renderDashboard(); renderAnomalies(); renderPurchaseOrders(); renderBudgetVsActual(); renderDeptPnl(); renderRatios(); renderPettyCash(); renderCisReturn();
+  renderRevenueTrendChart(); renderExpenseBreakdownChart(); renderCashRunwayChart();
   renderCisStatements();
   renderLedgersPage();
   applyFxVisibility();
@@ -4828,7 +4840,7 @@ function renderMonthlyPnL() {
   cursor.setDate(1);
   for (let i = numMonths - 1; i >= 0; i--) {
     const d = new Date(cursor.getFullYear(), cursor.getMonth() - i, 1);
-    months.push(d.toISOString().slice(0, 7));
+    months.push(localMonthKey(d));
   }
 
   // totals[accountName][month] = net balance contribution for that account in that month,
@@ -5035,6 +5047,157 @@ const INDUSTRY_BENCHMARKS = {
   service:      { grossMargin: 65, netMargin: 15, currentRatio: 1.8, debtorDays: 35 },
   construction: { grossMargin: 20, netMargin: 6,  currentRatio: 1.3, debtorDays: 45 },
 };
+
+// ---------- Board-ready charts (inline SVG, no external library) ----------
+
+function svgBarChart(rows, opts) {
+  // rows: [{label, value}]; renders a simple vertical bar chart with value labels.
+  opts = opts || {};
+  const width = opts.width || 420, height = opts.height || 180, color = opts.color || 'var(--accent)';
+  const padBottom = 28, padTop = 10;
+  if (!rows.length) return '<div class="empty">No data for this period.</div>';
+  const max = Math.max(...rows.map(r => r.value), 0.01);
+  const barW = width / rows.length;
+  const bars = rows.map((r, i) => {
+    const h = Math.max(2, (r.value / max) * (height - padBottom - padTop));
+    const x = i * barW + barW * 0.15;
+    const w = barW * 0.7;
+    const y = height - padBottom - h;
+    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" fill="${color}" rx="2">
+      <title>${escapeHtml(r.label)}: ${fmt(r.value)}</title></rect>
+      <text x="${(x + w / 2).toFixed(1)}" y="${height - padBottom + 12}" font-size="9" text-anchor="middle" fill="var(--muted)">${escapeHtml(r.label)}</text>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${width} ${height}" style="width:100%; height:${height}px;">${bars}</svg>`;
+}
+
+function svgLineChart(rows, opts) {
+  // rows: [{label, value}]; renders a line+area chart over evenly-spaced x positions.
+  opts = opts || {};
+  const width = opts.width || 860, height = opts.height || 180, color = opts.color || 'var(--accent)';
+  const padBottom = 24, padTop = 10, padX = 8;
+  if (rows.length < 2) return '<div class="empty">Not enough history yet to chart a trend.</div>';
+  const values = rows.map(r => r.value);
+  const max = Math.max(...values, 0.01), min = Math.min(...values, 0);
+  const range = (max - min) || 1;
+  const plotW = width - padX * 2, plotH = height - padBottom - padTop;
+  const xAt = i => padX + (i / (rows.length - 1)) * plotW;
+  const yAt = v => padTop + plotH - ((v - min) / range) * plotH;
+  const points = rows.map((r, i) => `${xAt(i).toFixed(1)},${yAt(r.value).toFixed(1)}`).join(' ');
+  const areaPoints = `${padX},${(padTop + plotH).toFixed(1)} ${points} ${(width - padX).toFixed(1)},${(padTop + plotH).toFixed(1)}`;
+  const dots = rows.map((r, i) => `<circle cx="${xAt(i).toFixed(1)}" cy="${yAt(r.value).toFixed(1)}" r="2.5" fill="${color}"><title>${escapeHtml(r.label)}: ${fmt(r.value)}</title></circle>`).join('');
+  const labels = rows.map((r, i) => `<text x="${xAt(i).toFixed(1)}" y="${height - 6}" font-size="9" text-anchor="middle" fill="var(--muted)">${escapeHtml(r.label)}</text>`).join('');
+  const zeroY = (min < 0 && max > 0) ? `<line x1="${padX}" y1="${yAt(0).toFixed(1)}" x2="${width - padX}" y2="${yAt(0).toFixed(1)}" stroke="var(--border)" stroke-dasharray="3,3"/>` : '';
+  return `<svg viewBox="0 0 ${width} ${height}" style="width:100%; height:${height}px;">
+    <polygon points="${areaPoints}" fill="${color}" opacity="0.12"/>
+    ${zeroY}
+    <polyline points="${points}" fill="none" stroke="${color}" stroke-width="2"/>
+    ${dots}${labels}
+  </svg>`;
+}
+
+function svgDonutChart(rows, opts) {
+  // rows: [{label, value}]; renders a donut with a side legend, top N + "Other" rolled up by caller.
+  opts = opts || {};
+  const size = opts.size || 160, stroke = opts.stroke || 26;
+  if (!rows.length) return '<div class="empty">No spending in this period.</div>';
+  const palette = ['#0A7EA4', '#E07A5F', '#81B29A', '#F2CC8F', '#3D405B', '#9A8C98', '#C9CBA3'];
+  const total = rows.reduce((s, r) => s + r.value, 0) || 1;
+  const r = (size - stroke) / 2, cx = size / 2, cy = size / 2, circumference = 2 * Math.PI * r;
+  let offset = 0;
+  const segments = rows.map((row, i) => {
+    const frac = row.value / total;
+    const dash = frac * circumference;
+    const seg = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${palette[i % palette.length]}" stroke-width="${stroke}"
+      stroke-dasharray="${dash.toFixed(1)} ${(circumference - dash).toFixed(1)}" stroke-dashoffset="${(-offset).toFixed(1)}" transform="rotate(-90 ${cx} ${cy})">
+      <title>${escapeHtml(row.label)}: ${fmt(row.value)} (${(frac * 100).toFixed(0)}%)</title></circle>`;
+    offset += dash;
+    return seg;
+  }).join('');
+  const legend = rows.map((row, i) => `
+    <div style="display:flex; align-items:center; gap:6px; font-size:11.5px; margin-bottom:4px;">
+      <span style="width:9px; height:9px; border-radius:2px; background:${palette[i % palette.length]}; flex-shrink:0;"></span>
+      <span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(row.label)}</span>
+      <span style="font-family:var(--font-mono); color:var(--muted);">${fmt(row.value)}</span>
+    </div>`).join('');
+  return `<div style="display:flex; gap:18px; align-items:center;">
+    <svg viewBox="0 0 ${size} ${size}" style="width:${size}px; height:${size}px; flex-shrink:0;">${segments}</svg>
+    <div style="flex:1; min-width:0;">${legend}</div>
+  </div>`;
+}
+
+function monthLabel(date) { return date.toLocaleDateString(undefined, { month: 'short' }); }
+
+// toISOString() converts to UTC first, which can shift a local midnight Date across a day (or
+// month) boundary — e.g. the 1st of the month at local midnight can render as the last day of
+// the PREVIOUS month in UTC, silently dropping the current month's data from a chart bucketed by
+// this key. These build the key/date string from the Date object's own local fields instead.
+function localMonthKey(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+function localDateStr(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function renderRevenueTrendChart() {
+  const el = document.getElementById('chart-revenue-trend');
+  if (!el) return;
+  const months = [];
+  const now = new Date();
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    months.push({ key: localMonthKey(d), label: monthLabel(d) });
+  }
+  const byMonth = {};
+  for (const t of transactions) {
+    if (getAccountType(t.credit) !== 'revenue') continue;
+    const key = t.date.slice(0, 7);
+    byMonth[key] = (byMonth[key] || 0) + t.amount;
+  }
+  // a debit to a revenue account is a reversal (credit note, refund) — nets it back out
+  for (const t of transactions) {
+    if (getAccountType(t.debit) !== 'revenue') continue;
+    const key = t.date.slice(0, 7);
+    byMonth[key] = (byMonth[key] || 0) - t.amount;
+  }
+  const rows = months.map(m => ({ label: m.label, value: byMonth[m.key] || 0 }));
+  el.innerHTML = rows.some(r => r.value) ? svgBarChart(rows) : '<div class="empty">No revenue posted yet.</div>';
+}
+
+function renderExpenseBreakdownChart() {
+  const el = document.getElementById('chart-expense-breakdown');
+  if (!el) return;
+  const since = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+  const totals = {};
+  for (const t of transactions) {
+    if (t.date < since) continue;
+    const type = getAccountType(t.debit);
+    if (type !== 'expense' && type !== 'cogs') continue;
+    totals[t.debit] = (totals[t.debit] || 0) + t.amount;
+  }
+  const sorted = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+  const top = sorted.slice(0, 6).map(([label, value]) => ({ label, value }));
+  const otherTotal = sorted.slice(6).reduce((s, [, v]) => s + v, 0);
+  if (otherTotal > 0) top.push({ label: 'Other', value: otherTotal });
+  el.innerHTML = svgDonutChart(top);
+}
+
+function renderCashRunwayChart() {
+  const el = document.getElementById('chart-cash-runway');
+  if (!el) return;
+  const months = [];
+  const now = new Date();
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i + 1, 0); // last day of that month
+    months.push({ date: localDateStr(d), label: monthLabel(d) });
+  }
+  const rows = months.map(m => {
+    const accs = buildAccountsFromTx(transactions.filter(t => t.date <= m.date), true);
+    const cash = Object.keys(accs).filter(n => getAccountType(n) === 'cash')
+      .reduce((s, n) => s + accountNetBalance(accs[n], 'cash'), 0);
+    return { label: m.label, value: cash };
+  });
+  el.innerHTML = rows.some(r => r.value) ? svgLineChart(rows) : '<div class="empty">No cash activity yet.</div>';
+}
 
 function renderRatios() {
   const table = document.getElementById('ratios-table');
