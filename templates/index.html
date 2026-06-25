@@ -46,6 +46,11 @@
      [data-theme="dark"] attribute on <html>, toggled by the button in the sidebar and persisted
      to localStorage — not prefers-color-scheme alone, so the user's explicit choice always wins
      over (and survives independently of) their OS setting. */
+  /* Simple view: hides accountant/technical panels (chart of accounts editing, compound
+     journals, VAT/CIS/SA103 filing tools, integration credentials, etc.) for whoever's currently
+     viewing — defaults by permission (owner -> simple, invited accountant -> full) but either can
+     switch and the explicit choice is what persists from then on, not the default. */
+  html[data-view-mode="simple"] [data-advanced] { display: none !important; }
   html[data-theme="dark"] {
     --bg: #15161F;
     --panel: #1E2030;
@@ -330,6 +335,7 @@
         MyAccountingPal
         <button id="theme-toggle-btn" onclick="toggleTheme()" title="Toggle dark mode" style="background:none; border:none; color:inherit; cursor:pointer; font-size:15px; padding:2px 6px;">🌙</button>
       </div>
+      <button id="view-mode-toggle-btn" onclick="toggleViewMode()" style="background:rgba(255,255,255,0.06); border:none; color:var(--sidebar-text); cursor:pointer; font-size:11.5px; font-weight:600; padding:6px 10px; border-radius:7px; margin:0 10px 14px; text-align:left;"></button>
       <nav class="page-tabs">
         <a href="#page-dashboard" data-page="dashboard">Dashboard</a>
         <a href="#page-transactions" data-page="transactions">Transactions</a>
@@ -339,7 +345,7 @@
         <a href="#page-invoices" data-page="invoices">Invoices</a>
         <a href="#page-reports" data-page="reports">Reports</a>
         <a href="#page-settings" data-page="settings">Settings</a>
-        <a href="#page-audit" data-page="audit">Audit</a>
+        <a href="#page-audit" data-page="audit" data-advanced="1">Audit</a>
       </nav>
     </aside>
     <div id="mobile-sidebar-backdrop" onclick="closeMobileSidebar()"></div>
@@ -562,7 +568,7 @@
       </div>
 
       <div>
-        <div class="panel" style="margin-bottom:20px;">
+        <div class="panel" style="margin-bottom:20px;" data-advanced="1">
           <h2>T-Accounts <span class="pill" id="tx-count">0 transactions</span></h2>
           <div id="accounts" class="accounts-grid"><div class="empty">No transactions yet — post one on the left.</div></div>
         </div>
@@ -624,7 +630,7 @@
           </div>
         </div>
 
-        <div class="panel" style="margin-top:20px;">
+        <div class="panel" style="margin-top:20px;" data-advanced="1">
           <h2><span class="term-tip" data-tip="A list of every account and its balance, used to check the books actually balance — total debits should always equal total credits.">Trial Balance</span> <span class="pill" id="trial-status"></span></h2>
           <table class="trial">
             <thead><tr><td><b>Account</b></td><td class="num"><b>Total Debit</b></td><td class="num"><b>Total Credit</b></td><td class="num"><b>Balance</b></td></tr></thead>
@@ -643,7 +649,7 @@
         <div class="sub" style="margin:4px 0 0;">Compound journals, payroll, dividends, and mileage — less-common entries, tucked away so the everyday workflow stays clean.</div>
       </div>
       <div id="accountant-tools-body" style="display:none;">
-    <div class="panel" style="margin-top:12px;">
+    <div class="panel" style="margin-top:12px;" data-advanced="1">
       <h2>Compound Journal Entry</h2>
       <div class="sub" style="margin-bottom:12px;">For one payment or receipt that splits across several accounts (e.g. a BACS run covering Rent + Utilities + Insurance from one bank line). Pick the one account every line below shares — and add a line per other account. This posts as linked entries sharing one journal ID, with the exact same net ledger effect as a single multi-line posting.</div>
 
@@ -673,7 +679,7 @@
       <div id="cj-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" style="margin-top:20px;" data-advanced="1">
       <h2>Payroll Journal</h2>
       <div class="sub" style="margin-bottom:12px;">Enter the figures from your payroll run (or payslip) — this posts DR Salary Expense against CR NI Payable / PAYE Payable / Pension Payable / Net Pay Payable in one linked journal. Net pay is calculated, not entered.</div>
       <div class="row2">
@@ -855,7 +861,7 @@
   </div>
 
   <div class="page" data-page="accounts" style="display:none;">
-    <div class="panel">
+    <div class="panel" data-advanced="1">
       <h2>Chart of Accounts</h2>
       <div class="sub" style="margin-bottom:12px;">The single list of accounts this company can use — every debit/credit field elsewhere is chosen from here, not typed, so "Cash" and "cash" can never silently become two different accounts. The type drives the Statement of Profit or Loss / Statement of Financial Position / Cash Flow Statement.</div>
       <input type="text" id="coa-filter" placeholder="Filter accounts…" oninput="renderChartOfAccounts()" style="margin-bottom:10px;">
@@ -872,7 +878,7 @@
       </div>
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" style="margin-top:20px;" data-advanced="1">
       <h2>Opening Balances</h2>
       <div class="sub" style="margin-bottom:12px;">Onboarding a business that already has history? Set each account's balance as of a chosen date instead of starting from zero. These live in their own record (not as disguised transactions) and are added on top of the ledger when building the trial balance, Statement of Financial Position, and the Cash Flow Statement's brought-forward cash figure.</div>
 
@@ -894,7 +900,7 @@
       <div id="ob-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" style="margin-top:20px;" data-advanced="1">
       <h2>Fixed Asset Register</h2>
       <div class="sub" style="margin-bottom:12px;">Register a non-current asset to track its depreciation. "Run Depreciation" posts one month's charge per registered asset as a normal Dr Depreciation Expense / Cr Accumulated Depreciation transaction — so it flows straight into the P&L and reduces net book value on the Statement of Financial Position.</div>
 
@@ -930,7 +936,7 @@
       <div id="fa-run-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
 
-    <div class="panel" id="fx-revaluation-panel" style="margin-top:20px; display:none;">
+    <div class="panel" id="fx-revaluation-panel" style="margin-top:20px; display:none;" data-advanced="1">
       <h2>FX Revaluation</h2>
       <div class="sub" style="margin-bottom:12px;">Revalues an account's foreign-currency transactions at a new rate and posts the GBP difference to Unrealised FX Gain/Loss. Only affects accounts with at least one transaction originally posted as a foreign currency (the "Foreign currency" checkbox on Post Transaction).</div>
       <div class="row2">
@@ -943,7 +949,7 @@
       <div id="fx-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" style="margin-top:20px;" data-advanced="1">
       <h2>Stock / Inventory (FIFO)</h2>
       <div class="sub" style="margin-bottom:12px;">For product-based businesses: register an item, record purchases (each one a FIFO cost layer), then record sales — COGS is calculated by consuming the oldest layers first and posted automatically alongside the sale.</div>
       <table class="inbox">
@@ -1249,14 +1255,14 @@
       </div>
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" style="margin-top:20px;" data-advanced="1">
       <h2>Comparative Period</h2>
       <div class="sub" style="margin-bottom:12px;">This period's P&amp;L vs. the same dates one year earlier (the From/To above shifted back exactly 365 days), with £ and % variance. Uses the same period set in Financial Statements above — Generate that first.</div>
       <button class="btn-secondary" onclick="renderComparativePeriod()">Compare to last year</button>
       <table class="trial" id="comparative-table" style="margin-top:10px;"></table>
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" style="margin-top:20px;" data-advanced="1">
       <h2>P&amp;L by Month</h2>
       <div class="sub" style="margin-bottom:12px;">One row per income/expense account, one column per month — the fastest way to spot a trend (a cost creeping up, a sales dip) without opening an accountant's report.</div>
       <label>Months to show</label>
@@ -1287,7 +1293,7 @@
 
     </div>
     <div data-subpage="tax">
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" style="margin-top:20px;" data-advanced="1">
       <h2>Tax Computation (estimate)</h2>
       <div class="sub" style="margin-bottom:12px;">A working estimate only — uses the Financial Statements period above (Generate that first). Depreciation is added back (it isn't tax-deductible) and capital allowances are deducted instead; enter your own capital allowances figure since this app doesn't track AIA/WDA pools.</div>
       <div class="row2">
@@ -1305,7 +1311,7 @@
       <table class="trial" id="tax-computation-table" style="margin-top:10px;"></table>
     </div>
 
-    <div class="panel" id="cis-return-panel" style="margin-top:20px; display:none;">
+    <div class="panel" id="cis-return-panel" style="margin-top:20px; display:none;" data-advanced="1">
       <h2>CIS Monthly Return</h2>
       <div class="sub" style="margin-bottom:12px;">CIS suffered (deductions withheld from your invoices, recoverable against your tax bill) and CIS deducted on bills you've paid to subcontractors (owed to HMRC) — using the Financial Statements period above. Record a CIS deduction when marking an invoice/bill paid.</div>
       <table class="trial" id="cis-table" style="margin-top:10px;"></table>
@@ -1320,7 +1326,7 @@
 
     </div>
     <div data-subpage="funds-depts">
-    <div class="panel" id="fund-accounting-panels" style="margin-top:20px; display:none;">
+    <div class="panel" id="fund-accounting-panels" style="margin-top:20px; display:none;" data-advanced="1">
       <h2>Funds</h2>
       <div class="sub" style="margin-bottom:12px;">Restricted/designated funds need a deliberate type — they don't auto-create from typing like accounts do.</div>
       <table class="inbox"><thead><tr><th>Name</th><th>Type</th><th></th></tr></thead><tbody id="funds-body"></tbody></table>
@@ -1351,7 +1357,7 @@
       <table class="trial" id="sofa-columnar-table" style="margin-top:10px;"></table>
     </div>
 
-    <div class="panel" id="cost-centres-panels" style="margin-top:20px; display:none;">
+    <div class="panel" id="cost-centres-panels" style="margin-top:20px; display:none;" data-advanced="1">
       <h2>Departments</h2>
       <div class="sub" style="margin-bottom:12px;">Departments need a deliberate creation step — they don't auto-create from typing like accounts do.</div>
       <table class="inbox"><thead><tr><th>Name</th><th></th></tr></thead><tbody id="departments-body"></tbody></table>
@@ -1368,7 +1374,7 @@
 
     </div>
     <div data-subpage="tax">
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" style="margin-top:20px;" data-advanced="1">
       <h2>VAT Return</h2>
       <div class="sub" style="margin-bottom:12px;">Simplified UK VAT return boxes, calculated from transactions tagged with Input/Output VAT in the period below. This is a working figure for review with your accountant/MTD software, not a filing in itself.</div>
       <div class="row2">
@@ -1423,7 +1429,7 @@
 
     </div>
     <div data-subpage="health">
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" style="margin-top:20px;" data-advanced="1">
       <h2>Ratio Analysis</h2>
       <div class="sub" style="margin-bottom:12px;">Auto-calculated from the ledger, all-time. Debtor/creditor days use the closing balance against all-time revenue/purchases as a rough proxy — for a precise figure, an accountant would use average balances over the period in question.</div>
       <table class="trial" id="ratios-table"></table>
@@ -1538,7 +1544,7 @@ ollama pull llama3.2-vision</pre>
       </select>
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" style="margin-top:20px;" data-advanced="1">
       <h2>Categorisation Rules</h2>
       <div class="sub" style="margin-bottom:12px;">"Amazon always → Office Supplies" — once set, any description containing the keyword auto-fills these accounts when posting manually or importing a bank statement, ahead of the built-in keyword guesses.</div>
       <table class="inbox"><thead><tr><th>If description contains…</th><th>Debit</th><th>Credit</th><th></th></tr></thead><tbody id="categorization-rules-body"></tbody></table>
@@ -1557,7 +1563,7 @@ ollama pull llama3.2-vision</pre>
 
     </div>
     <div data-settings-subpage="integrations">
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" style="margin-top:20px;" data-advanced="1">
       <h2>Bank feed credentials (Plaid)</h2>
       <div class="sub" style="margin:8px 0;">From a free account at <span style="color:var(--text);">dashboard.plaid.com</span>. Secret is write-only — encrypted at rest, never sent back to this browser. Connect or sync the actual bank account under the Bank page once these are set.</div>
       <div class="row2">
@@ -1574,7 +1580,7 @@ ollama pull llama3.2-vision</pre>
       <input type="password" id="plaid-secret" placeholder="enter to set/replace" oninput="savePlaidSettings()">
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" style="margin-top:20px;" data-advanced="1">
       <h2>Making Tax Digital — HMRC (VAT)</h2>
       <div class="sub" style="margin:8px 0;">Register an application at <span style="color:var(--text);">developer.service.hmrc.gov.uk</span> first — this needs its own Client ID/Secret and your redirect URI added there before "Connect" will work. Client Secret is write-only, encrypted at rest. Submitting a return needs an active connection (below) and a VAT registration number.</div>
       <div class="row2">
@@ -1951,6 +1957,32 @@ function syncThemeToggleIcon() {
   btn.textContent = isDark ? '☀️' : '🌙';
 }
 syncThemeToggleIcon();
+
+// ---------- view mode (simple vs full) ----------
+// Hides accountant/technical panels for whoever's viewing right now. Defaults by permission the
+// FIRST time a given company is opened (owner -> simple, invited accountant -> full), but once
+// either explicitly toggles it, that choice persists (per company) and stops re-defaulting —
+// it's a viewer preference, not a fixed role restriction.
+function viewModeStorageKey() { return `viewMode:${currentCompany.id}`; }
+
+function applyViewMode(mode) {
+  document.documentElement.setAttribute('data-view-mode', mode);
+  const btn = document.getElementById('view-mode-toggle-btn');
+  if (btn) btn.textContent = mode === 'simple' ? '👤 Simple view (click for full)' : '🧮 Full view (click for simple)';
+}
+
+function toggleViewMode() {
+  const current = document.documentElement.getAttribute('data-view-mode') || 'simple';
+  const next = current === 'simple' ? 'full' : 'simple';
+  localStorage.setItem(viewModeStorageKey(), next);
+  applyViewMode(next);
+}
+
+function initViewModeForCompany() {
+  const stored = localStorage.getItem(viewModeStorageKey());
+  const mode = stored || (currentCompany.permission === 'owner' ? 'simple' : 'full');
+  applyViewMode(mode);
+}
 
 let inFlightRequestCount = 0;
 function beginRequest() {
@@ -2455,6 +2487,7 @@ async function openCompany(id) {
   currentCompany = companies.find(c => c.id === id);
   document.getElementById('company-name-header').textContent = `${currentCompany.name} — Ledger`;
   document.title = `${currentCompany.name} — Bookkeeping`;
+  initViewModeForCompany();
   showPage('dashboard');
   document.getElementById('ai-api-key').value = '';
   document.getElementById('ai-key-status').textContent = currentCompany.claude_key_set ? 'A key is set.' : 'No key set yet.';
