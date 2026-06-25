@@ -714,6 +714,13 @@
       </div>
       <label>Or paste statement lines (one per line — prefix outgoing amounts with a minus, e.g. "21/06/2026 -79.45 EON")</label>
       <textarea id="brec-text" rows="3" placeholder="01/06/2026 -389.95 Card payment Laptop&#10;03/06/2026 500.00 Faster payment received"></textarea>
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text);">
+        <input type="checkbox" id="brec-foreign-currency" style="width:auto;" onchange="toggleBrecForeignRow()"> These lines are in a foreign currency (account above is foreign-currency)
+      </label>
+      <div id="brec-foreign-row" class="row2" style="display:none;">
+        <div><label>Currency code</label><input type="text" id="brec-currency" placeholder="e.g. USD" maxlength="3" style="text-transform:uppercase;"></div>
+        <div><label>Exchange rate <span style="color:var(--muted); font-weight:400;">(1 unit = ? GBP)</span></label><input type="number" id="brec-exchange-rate" step="0.0001" min="0" placeholder="0.0000"></div>
+      </div>
       <button class="btn-primary" onclick="parseBrecLines()">Import lines</button>
       <div id="brec-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
 
@@ -734,6 +741,13 @@
       </div>
       <label>Statement closing balance</label>
       <input type="number" id="rec-closing-balance" step="0.01" placeholder="0.00">
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text);">
+        <input type="checkbox" id="rec-foreign-currency" style="width:auto;" onchange="toggleRecForeignRow()"> Foreign currency account
+      </label>
+      <div id="rec-foreign-row" class="row2" style="display:none;">
+        <div><label>Currency code</label><input type="text" id="rec-currency" placeholder="e.g. USD" maxlength="3" style="text-transform:uppercase;"></div>
+        <div><label>Exchange rate <span style="color:var(--muted); font-weight:400;">(1 unit = ? GBP)</span></label><input type="number" id="rec-exchange-rate" step="0.0001" min="0" placeholder="0.0000"></div>
+      </div>
       <button class="btn-secondary" onclick="createReconciliation()">Start a reconciliation</button>
       <div id="rec-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
       <table class="inbox" style="margin-top:14px;">
@@ -3894,6 +3908,10 @@ function parseBrecLine(line, account) {
   return { cashAccount: account, date, desc, amount };
 }
 
+function toggleBrecForeignRow() {
+  document.getElementById('brec-foreign-row').style.display = document.getElementById('brec-foreign-currency').checked ? '' : 'none';
+}
+
 async function parseBrecLines() {
   const account = document.getElementById('brec-account').value.trim();
   const statusEl = document.getElementById('brec-status');
@@ -3901,6 +3919,13 @@ async function parseBrecLines() {
   const lines = document.getElementById('brec-text').value.split('\n').map(l => l.trim()).filter(Boolean);
   if (!lines.length) { statusEl.textContent = 'Nothing to import — paste statement lines first.'; return; }
   const items = lines.map(l => parseBrecLine(l, account)).filter(Boolean);
+  const isForeign = document.getElementById('brec-foreign-currency').checked;
+  if (isForeign) {
+    const currency = document.getElementById('brec-currency').value.trim().toUpperCase();
+    const exchangeRate = parseFloat(document.getElementById('brec-exchange-rate').value);
+    if (!currency || !exchangeRate) { statusEl.textContent = 'Enter a currency code and exchange rate for these foreign-currency lines.'; return; }
+    items.forEach(it => { it.currency = currency; it.exchangeRate = exchangeRate; });
+  }
   const result = await api(`/api/companies/${currentCompany.id}/bank-lines/bulk`, { method: 'POST', body: JSON.stringify(items) });
   statusEl.textContent = `Imported ${result.inserted} of ${lines.length} line(s).`;
   document.getElementById('brec-text').value = '';
@@ -4102,10 +4127,14 @@ function renderReconciliationHistory() {
     <tr>
       <td>${escapeHtml(r.account)}</td>
       <td>${fmtDate(r.statementDate)}</td>
-      <td class="num">${fmt(r.statementClosingBalance)}</td>
+      <td class="num">${fmt(r.statementClosingBalance)}${r.currency ? ` <span class="pill" title="Converted from ${r.foreignClosingBalance} ${escapeHtml(r.currency)} at ${r.exchangeRate}">${r.foreignClosingBalance} ${escapeHtml(r.currency)}</span>` : ''}</td>
       <td><span class="badge badge-${r.status === 'closed' ? 'paid' : 'sent'}">${escapeHtml(r.status)}</span></td>
       <td>${r.status === 'open' ? `<button class="btn-secondary" onclick="closeReconciliationRow(${r.id})">Close</button>` : ''}</td>
     </tr>`).join('') : '<tr><td colspan="5" class="empty">No reconciliations yet.</td></tr>';
+}
+
+function toggleRecForeignRow() {
+  document.getElementById('rec-foreign-row').style.display = document.getElementById('rec-foreign-currency').checked ? '' : 'none';
 }
 
 async function createReconciliation() {
@@ -4116,10 +4145,15 @@ async function createReconciliation() {
   if (!account || !statementDate || isNaN(closingBalance)) {
     statusEl.textContent = 'Fill in account, statement date, and closing balance.'; return;
   }
+  const isForeign = document.getElementById('rec-foreign-currency').checked;
+  const body = { account, statementDate, statementClosingBalance: closingBalance };
+  if (isForeign) {
+    body.currency = document.getElementById('rec-currency').value.trim().toUpperCase();
+    body.exchangeRate = parseFloat(document.getElementById('rec-exchange-rate').value);
+    if (!body.currency || !body.exchangeRate) { statusEl.textContent = 'Enter a currency code and exchange rate.'; return; }
+  }
   try {
-    await api(`/api/companies/${currentCompany.id}/reconciliations`, {
-      method: 'POST', body: JSON.stringify({ account, statementDate, statementClosingBalance: closingBalance })
-    });
+    await api(`/api/companies/${currentCompany.id}/reconciliations`, { method: 'POST', body: JSON.stringify(body) });
   } catch (e) { statusEl.textContent = e.message; return; }
   statusEl.textContent = '';
   document.getElementById('rec-closing-balance').value = '';
@@ -4171,7 +4205,7 @@ function renderBrecTable() {
       return `<tr>
         <td>${fmtDate(l.date)}</td>
         <td>${escapeHtml(l.desc)}</td>
-        <td class="num" style="color:${l.amount >= 0 ? 'var(--good)' : 'var(--bad)'}">${fmt(l.amount)}</td>
+        <td class="num" style="color:${l.amount >= 0 ? 'var(--good)' : 'var(--bad)'}">${fmt(l.amount)}${l.currency ? ` <span class="pill" title="Converted from ${l.foreignAmount} ${escapeHtml(l.currency)} at ${l.exchangeRate}">${l.foreignAmount} ${escapeHtml(l.currency)}</span>` : ''}</td>
         <td><span class="confidence ${statusClass}" title="${escapeHtml(reason)}">${statusLabel} ⓘ</span></td>
         <td><select onchange="matchBankLine(${l.id}, this.value)">${options}</select></td>
         <td>

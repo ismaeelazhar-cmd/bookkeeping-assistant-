@@ -311,6 +311,13 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- amount_pence is always base-currency, same convention as transactions.amount_pence —
+        -- everything else in this app (trial balance, P&L, etc.) sums that column directly, so a
+        -- foreign-currency statement line still has to convert before it can be stored. currency
+        -- + foreign_amount_pence + exchange_rate preserve what the statement actually showed, the
+        -- same way transactions does, so a multi-currency account's reconciliation can still show
+        -- and compare against the real foreign-currency figures instead of only ever the
+        -- converted ones.
         CREATE TABLE IF NOT EXISTS bank_lines (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -318,6 +325,9 @@ def init_db():
             date TEXT NOT NULL,
             desc TEXT NOT NULL,
             amount_pence INTEGER NOT NULL,
+            currency TEXT DEFAULT NULL,
+            foreign_amount_pence INTEGER DEFAULT NULL,
+            exchange_rate REAL DEFAULT NULL,
             matched_transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
@@ -586,12 +596,20 @@ def init_db():
         -- separate from bank_lines (the individual imported statement rows), which already
         -- existed. This adds the higher-level open/close workflow: a rec is open while lines are
         -- being matched, then closed once the cleared balance ties to the statement.
+        -- statement_closing_balance_pence is always base-currency (matches every other balance
+        -- figure in this app). currency + exchange_rate are set when the account is held in a
+        -- foreign currency: the user enters the closing balance as it actually appears on the
+        -- real statement (foreign_closing_balance_pence), and this table converts it once at
+        -- reconciliation-open time so the close check stays a plain base-currency comparison.
         CREATE TABLE IF NOT EXISTS bank_reconciliations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
             account TEXT NOT NULL,
             statement_date TEXT NOT NULL,
             statement_closing_balance_pence INTEGER NOT NULL,
+            currency TEXT DEFAULT NULL,
+            foreign_closing_balance_pence INTEGER DEFAULT NULL,
+            exchange_rate REAL DEFAULT NULL,
             status TEXT NOT NULL DEFAULT 'open',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
@@ -764,6 +782,15 @@ def init_db():
     bank_line_cols = {row[1] for row in db.execute("PRAGMA table_info(bank_lines)").fetchall()}
     if "external_id" not in bank_line_cols:
         db.execute("ALTER TABLE bank_lines ADD COLUMN external_id TEXT DEFAULT NULL")
+    if "currency" not in bank_line_cols:
+        db.execute("ALTER TABLE bank_lines ADD COLUMN currency TEXT DEFAULT NULL")
+        db.execute("ALTER TABLE bank_lines ADD COLUMN foreign_amount_pence INTEGER DEFAULT NULL")
+        db.execute("ALTER TABLE bank_lines ADD COLUMN exchange_rate REAL DEFAULT NULL")
+    bank_rec_cols = {row[1] for row in db.execute("PRAGMA table_info(bank_reconciliations)").fetchall()}
+    if "currency" not in bank_rec_cols:
+        db.execute("ALTER TABLE bank_reconciliations ADD COLUMN currency TEXT DEFAULT NULL")
+        db.execute("ALTER TABLE bank_reconciliations ADD COLUMN foreign_closing_balance_pence INTEGER DEFAULT NULL")
+        db.execute("ALTER TABLE bank_reconciliations ADD COLUMN exchange_rate REAL DEFAULT NULL")
     # partial index (not a full UNIQUE constraint) so manually-pasted lines, which never set
     # external_id, don't collide with each other — only Plaid-synced lines need de-duplication
     db.execute(
@@ -5205,6 +5232,7 @@ def list_bank_lines(company_id):
     db = get_db()
     rows = db.execute(
         "SELECT id, cash_account as cashAccount, date, desc, amount_pence as amountPence, "
+        "currency, foreign_amount_pence as foreignAmountPence, exchange_rate as exchangeRate, "
         "matched_transaction_id as matchedTransactionId "
         "FROM bank_lines WHERE company_id = ? ORDER BY date",
         (company_id,),
@@ -5213,6 +5241,8 @@ def list_bank_lines(company_id):
     for r in rows:
         d = dict(r)
         d["amount"] = from_pence(d.pop("amountPence"))
+        foreign_pence = d.pop("foreignAmountPence")
+        d["foreignAmount"] = from_pence(foreign_pence) if foreign_pence is not None else None
         result.append(d)
     return jsonify(result)
 
@@ -5230,10 +5260,24 @@ def bulk_create_bank_lines(company_id):
         if not all([cash_account, date, desc]) or amount is None or float(amount) == 0:
             continue
         cash_account = resolve_account(db, company_id, cash_account, "cash")
-        db.execute(
-            "INSERT INTO bank_lines (company_id, cash_account, date, desc, amount_pence) VALUES (?,?,?,?,?)",
-            (company_id, cash_account, date, desc, to_pence(amount)),
-        )
+        currency, exchange_rate = it.get("currency"), it.get("exchangeRate")
+        # A foreign-currency statement line: amount is read as the FOREIGN figure printed on the
+        # actual statement (matches how the user reads it off the page), converted to base
+        # currency here before storage — same convention post_ledger_transaction already uses for
+        # foreign-currency transactions, so this stays consistent with the rest of the ledger.
+        if currency and exchange_rate:
+            foreign_pence = to_pence(amount)
+            base_amount = amount * float(exchange_rate)
+            db.execute(
+                "INSERT INTO bank_lines (company_id, cash_account, date, desc, amount_pence, currency, "
+                "foreign_amount_pence, exchange_rate) VALUES (?,?,?,?,?,?,?,?)",
+                (company_id, cash_account, date, desc, to_pence(base_amount), currency, foreign_pence, float(exchange_rate)),
+            )
+        else:
+            db.execute(
+                "INSERT INTO bank_lines (company_id, cash_account, date, desc, amount_pence) VALUES (?,?,?,?,?)",
+                (company_id, cash_account, date, desc, to_pence(amount)),
+            )
         inserted += 1
     db.commit()
     return jsonify({"inserted": inserted})
@@ -5278,6 +5322,9 @@ def _serialize_reconciliation(row):
     d = dict(row)
     d["statementClosingBalance"] = from_pence(d.pop("statement_closing_balance_pence"))
     d["statementDate"] = d.pop("statement_date")
+    foreign_pence = d.pop("foreign_closing_balance_pence", None)
+    d["foreignClosingBalance"] = from_pence(foreign_pence) if foreign_pence is not None else None
+    d["exchangeRate"] = d.pop("exchange_rate", None)
     return d
 
 
@@ -5287,7 +5334,8 @@ def _serialize_reconciliation(row):
 def list_reconciliations(company_id):
     db = get_db()
     rows = db.execute(
-        "SELECT id, account, statement_date, statement_closing_balance_pence, status, created_at "
+        "SELECT id, account, statement_date, statement_closing_balance_pence, currency, "
+        "foreign_closing_balance_pence, exchange_rate, status, created_at "
         "FROM bank_reconciliations WHERE company_id = ? ORDER BY statement_date DESC",
         (company_id,),
     ).fetchall()
@@ -5303,14 +5351,30 @@ def create_reconciliation(company_id):
     account = (data.get("account") or "").strip()
     statement_date = data.get("statementDate")
     statement_balance = data.get("statementClosingBalance")
+    currency = data.get("currency")
+    exchange_rate = data.get("exchangeRate")
     if not account or not statement_date or statement_balance is None:
         return jsonify({"error": "Account, statement date, and closing balance are required."}), 400
+    if currency and not exchange_rate:
+        return jsonify({"error": "A foreign currency needs an exchange rate to convert the closing balance."}), 400
     db = get_db()
-    cur = db.execute(
-        "INSERT INTO bank_reconciliations (company_id, account, statement_date, statement_closing_balance_pence) "
-        "VALUES (?,?,?,?)",
-        (company_id, account, statement_date, to_pence(statement_balance)),
-    )
+    if currency and exchange_rate:
+        # statement_closing_balance_pence stays base-currency so close_reconciliation's check
+        # against cleared_pence (always base-currency, summed from bank_lines.amount_pence) keeps
+        # working unchanged; foreign_closing_balance_pence preserves what the real statement said.
+        foreign_pence = to_pence(statement_balance)
+        base_balance = float(statement_balance) * float(exchange_rate)
+        cur = db.execute(
+            "INSERT INTO bank_reconciliations (company_id, account, statement_date, statement_closing_balance_pence, "
+            "currency, foreign_closing_balance_pence, exchange_rate) VALUES (?,?,?,?,?,?,?)",
+            (company_id, account, statement_date, to_pence(base_balance), currency, foreign_pence, float(exchange_rate)),
+        )
+    else:
+        cur = db.execute(
+            "INSERT INTO bank_reconciliations (company_id, account, statement_date, statement_closing_balance_pence) "
+            "VALUES (?,?,?,?)",
+            (company_id, account, statement_date, to_pence(statement_balance)),
+        )
     db.commit()
     return jsonify({"id": cur.lastrowid})
 
