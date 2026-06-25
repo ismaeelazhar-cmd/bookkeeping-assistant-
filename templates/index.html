@@ -301,6 +301,14 @@
   <div id="toast-container" style="position:fixed; top:16px; right:16px; z-index:200; display:flex; flex-direction:column; gap:8px; max-width:340px;"></div>
 
   <div class="page" data-page="dashboard">
+    <div class="panel" id="setup-checklist-card" style="margin-bottom:16px; display:none;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h2 style="margin:0;">Get set up <span class="pill" id="setup-checklist-progress"></span></h2>
+        <button class="btn-secondary" onclick="dismissSetupChecklist()">Dismiss</button>
+      </div>
+      <div id="setup-checklist-body" style="margin-top:10px;"></div>
+    </div>
+
     <div class="panel" id="health-score-card" style="margin-bottom:16px;">
       <div style="display:flex; align-items:center; gap:20px;">
         <div style="text-align:center; flex:0 0 auto;">
@@ -3373,6 +3381,7 @@ function renderDashboard() {
   profitEl.style.color = profit >= 0 ? 'var(--good)' : 'var(--bad)';
 
   renderAttentionList();
+  renderSetupChecklist();
   renderSpendByCategory();
   renderHealthScore();
 }
@@ -3438,6 +3447,46 @@ function renderHealthScore() {
   document.getElementById('health-score-breakdown').innerHTML = components.map(c =>
     `<span><strong style="color:var(--text);">${escapeHtml(c.value)}</strong> ${escapeHtml(c.label)}</span>`
   ).join('');
+}
+
+// ---------- first-run setup checklist ----------
+// Dismissal is per-company, stored client-side only — there's no server-side "onboarding done"
+// flag on companies, and adding a migration just for a dismiss flag isn't worth it when
+// localStorage already does the job for a single-browser owner.
+function setupChecklistDismissKey() { return `setupChecklistDismissed:${currentCompany.id}`; }
+
+function dismissSetupChecklist() {
+  localStorage.setItem(setupChecklistDismissKey(), '1');
+  document.getElementById('setup-checklist-card').style.display = 'none';
+}
+
+function renderSetupChecklist() {
+  const card = document.getElementById('setup-checklist-card');
+  if (!card) return;
+  if (localStorage.getItem(setupChecklistDismissKey())) { card.style.display = 'none'; return; }
+
+  // DEFAULT_SEED_ACCOUNT_COUNT: every new company is seeded with 5 starter accounts (Cash, VAT
+  // Control Account, Opening Balance Equity, Sales, Depreciation Expense) — "add chart of
+  // accounts" only counts as done once the user has added something beyond those defaults.
+  const DEFAULT_SEED_ACCOUNT_COUNT = 5;
+  const items = [
+    { label: 'Connect a bank account (or import statement lines manually)', done: bankConnections.length > 0 || bankLines.length > 0, page: 'bank' },
+    { label: 'Add your chart of accounts', done: chartAccounts.length > DEFAULT_SEED_ACCOUNT_COUNT, page: 'accounts' },
+    { label: 'Set your opening balances', done: openingBalances.length > 0, page: 'settings' },
+    { label: 'Create your first invoice', done: invoicesBills.some(d => d.kind === 'invoice'), page: 'invoices' },
+    { label: 'Invite your accountant', done: teamMembers.length > 1, page: 'settings' },
+  ];
+  const doneCount = items.filter(i => i.done).length;
+  if (doneCount === items.length) { card.style.display = 'none'; return; }
+
+  card.style.display = '';
+  document.getElementById('setup-checklist-progress').textContent = `${doneCount}/${items.length}`;
+  document.getElementById('setup-checklist-body').innerHTML = items.map(i => `
+    <div style="display:flex; align-items:center; gap:10px; padding:5px 0;">
+      <span style="color:${i.done ? 'var(--good)' : 'var(--muted)'};">${i.done ? '✓' : '○'}</span>
+      <span style="flex:1; ${i.done ? 'color:var(--muted); text-decoration:line-through;' : ''}">${escapeHtml(i.label)}</span>
+      ${!i.done ? `<button class="btn-secondary" onclick="showPage('${i.page}')">Go</button>` : ''}
+    </div>`).join('');
 }
 
 function renderAttentionList() {
