@@ -118,6 +118,18 @@
   }
   nav.page-tabs a:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.85); }
   nav.page-tabs a.nav-active { background: var(--sidebar-active-bg); color: var(--sidebar-text-active); font-weight: 700; }
+  /* Sub-page tabs: a page with several distinct, unrelated panels (Reports has 16+) shows one
+     group at a time instead of one long scroll — same idea as the main nav, one level down. */
+  .subpage-tabs {
+    display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .subpage-tabs a {
+    color: var(--muted); text-decoration: none; padding: 9px 14px; font-size: 13px; font-weight: 600;
+    border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color .12s ease, border-color .12s ease;
+  }
+  .subpage-tabs a:hover { color: var(--text); }
+  .subpage-tabs a.subpage-active { color: var(--accent); border-bottom-color: var(--accent); }
   .kpi-card { transition: box-shadow .12s ease; }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
 
@@ -1182,6 +1194,13 @@
   </div>
 
   <div class="page" data-page="reports" style="display:none;">
+    <div class="subpage-tabs">
+      <a href="#" data-subpage-tab="statements" onclick="showReportsSubpage('statements'); return false;">Statements &amp; Forecast</a>
+      <a href="#" data-subpage-tab="tax" onclick="showReportsSubpage('tax'); return false;">Tax &amp; VAT</a>
+      <a href="#" data-subpage-tab="funds-depts" onclick="showReportsSubpage('funds-depts'); return false;">Funds, Departments &amp; Budget</a>
+      <a href="#" data-subpage-tab="health" onclick="showReportsSubpage('health'); return false;">Health &amp; Close</a>
+    </div>
+    <div data-subpage="health">
     <div class="panel">
       <h2>Month-End Checklist</h2>
       <div class="sub" style="margin-bottom:12px;">A guided close: each item is checked automatically against your data where possible. VAT review is a manual confirmation — there's nothing in the ledger that can tell us you've actually looked at it.</div>
@@ -1201,6 +1220,8 @@
       <div id="narrative-body" style="margin-top:10px; white-space:pre-wrap;"></div>
     </div>
 
+    </div>
+    <div data-subpage="statements">
     <div class="panel" style="margin-top:20px;">
       <div class="report-actions">
         <button class="btn-secondary" onclick="exportCSV()">Export CSV</button>
@@ -1264,6 +1285,8 @@
       <div id="whatif-list" style="margin-top:10px;"></div>
     </div>
 
+    </div>
+    <div data-subpage="tax">
     <div class="panel" style="margin-top:20px;">
       <h2>Tax Computation (estimate)</h2>
       <div class="sub" style="margin-bottom:12px;">A working estimate only — uses the Financial Statements period above (Generate that first). Depreciation is added back (it isn't tax-deductible) and capital allowances are deducted instead; enter your own capital allowances figure since this app doesn't track AIA/WDA pools.</div>
@@ -1295,6 +1318,8 @@
       <table class="trial" id="sa103-table" style="margin-top:10px;"></table>
     </div>
 
+    </div>
+    <div data-subpage="funds-depts">
     <div class="panel" id="fund-accounting-panels" style="margin-top:20px; display:none;">
       <h2>Funds</h2>
       <div class="sub" style="margin-bottom:12px;">Restricted/designated funds need a deliberate type — they don't auto-create from typing like accounts do.</div>
@@ -1341,6 +1366,8 @@
       <table class="trial" id="dept-pnl-table" style="margin-top:10px;"></table>
     </div>
 
+    </div>
+    <div data-subpage="tax">
     <div class="panel" style="margin-top:20px;">
       <h2>VAT Return</h2>
       <div class="sub" style="margin-bottom:12px;">Simplified UK VAT return boxes, calculated from transactions tagged with Input/Output VAT in the period below. This is a working figure for review with your accountant/MTD software, not a filing in itself.</div>
@@ -1358,6 +1385,8 @@
       <table class="inbox"><thead><tr><th>Period</th><th class="num">Net VAT due</th><th>Submitted</th><th>By</th><th>Receipt</th></tr></thead><tbody id="vat-filings-body"></tbody></table>
     </div>
 
+    </div>
+    <div data-subpage="funds-depts">
     <div class="panel" style="margin-top:20px;">
       <h2>Budget vs Actual</h2>
       <div class="sub" style="margin-bottom:12px;">Set a monthly budget per revenue/expense account, see the variance against what actually posted.</div>
@@ -1379,6 +1408,8 @@
       <div id="budget-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
 
+    </div>
+    <div data-subpage="statements">
     <div class="panel" style="margin-top:20px;">
       <h2>Charts</h2>
       <div class="sub" style="margin-bottom:14px;">Revenue trend, expense breakdown, and cash runway — visual, board-ready versions of the figures above.</div>
@@ -1390,6 +1421,8 @@
       <div id="chart-cash-runway"></div>
     </div>
 
+    </div>
+    <div data-subpage="health">
     <div class="panel" style="margin-top:20px;">
       <h2>Ratio Analysis</h2>
       <div class="sub" style="margin-bottom:12px;">Auto-calculated from the ledger, all-time. Debtor/creditor days use the closing balance against all-time revenue/purchases as a rough proxy — for a precise figure, an accountant would use average balances over the period in question.</div>
@@ -1400,6 +1433,7 @@
       <h2>Anomalies <span class="pill" id="anomaly-count"></span></h2>
       <div class="sub" style="margin-bottom:12px;">Computed live from your ledger: accounts used for the first time recently, and transactions whose amount is far outside that account's usual range. Not AI — plain statistics, so it works without an API key.</div>
       <table class="journal"><thead><tr><th>Type</th><th>Account</th><th>Date</th><th>Description</th><th class="num">Amount</th><th>Why</th></tr></thead><tbody id="anomaly-body"></tbody></table>
+    </div>
     </div>
   </div>
 
@@ -2714,25 +2748,44 @@ function showToast(message, kind) {
 
 const PAGE_NAMES = ['dashboard', 'transactions', 'bank', 'accounts', 'ledgers', 'invoices', 'reports', 'settings', 'audit'];
 
-function showPage(name) {
+const REPORTS_SUBPAGES = ['statements', 'tax', 'funds-depts', 'health'];
+
+function showPage(name, subpage) {
   if (!PAGE_NAMES.includes(name)) name = 'dashboard';
   document.querySelectorAll('.page').forEach(el => { el.style.display = el.dataset.page === name ? '' : 'none'; });
   document.querySelectorAll('nav.page-tabs a').forEach(a => a.classList.toggle('nav-active', a.dataset.page === name));
-  if (location.hash !== `#page-${name}`) history.replaceState(null, '', `#page-${name}`);
+  let hash = `#page-${name}`;
+  if (name === 'reports') {
+    if (!REPORTS_SUBPAGES.includes(subpage)) subpage = 'statements';
+    showReportsSubpage(subpage, /*skipHash=*/true);
+    hash += `/${subpage}`;
+  }
+  if (location.hash !== hash) history.replaceState(null, '', hash);
   window.scrollTo(0, 0);
 }
 
+function showReportsSubpage(subpage, skipHash) {
+  if (!REPORTS_SUBPAGES.includes(subpage)) subpage = 'statements';
+  document.querySelectorAll('[data-subpage]').forEach(el => { el.style.display = el.dataset.subpage === subpage ? '' : 'none'; });
+  document.querySelectorAll('[data-subpage-tab]').forEach(a => a.classList.toggle('subpage-active', a.dataset.subpageTab === subpage));
+  if (!skipHash) {
+    const hash = `#page-reports/${subpage}`;
+    if (location.hash !== hash) history.replaceState(null, '', hash);
+  }
+}
+
 function pageFromHash() {
-  const m = location.hash.match(/^#page-(.+)$/);
-  return m ? m[1] : 'dashboard';
+  const m = location.hash.match(/^#page-([^/]+)(?:\/(.+))?$/);
+  return m ? { page: m[1], subpage: m[2] } : { page: 'dashboard', subpage: null };
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('nav.page-tabs a').forEach(a => {
     a.addEventListener('click', e => { e.preventDefault(); showPage(a.dataset.page); closeMobileSidebar(); });
   });
-  window.addEventListener('hashchange', () => showPage(pageFromHash()));
-  showPage(pageFromHash());
+  window.addEventListener('hashchange', () => { const r = pageFromHash(); showPage(r.page, r.subpage); });
+  const initial = pageFromHash();
+  showPage(initial.page, initial.subpage);
 });
 
 function toggleMobileSidebar() {
