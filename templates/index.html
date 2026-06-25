@@ -2443,6 +2443,7 @@ function normalizeDesc(s) { return s.trim().toLowerCase(); }
 // ---------- per-company state, loaded from server ----------
 let transactions = [];
 let presets = {};
+let categorizationRules = [];
 let chartAccounts = [];      // [{id, code, name, type}]
 let openingBalances = [];    // [{id, account, accountType, amount, side, asOfDate}]
 let bankLines = [];
@@ -2539,14 +2540,23 @@ function suggestFromDescription() {
   const hint = document.getElementById('suggest-hint');
   const key = normalizeDesc(desc);
   if (!key) { hint.textContent = ''; return; }
-  const match = presets[key];
   const debitEl = document.getElementById('f-debit');
   const creditEl = document.getElementById('f-credit');
+  const match = presets[key];
   if (match) {
     if (!debitEl.value) debitEl.value = match.debit;
     if (!creditEl.value) creditEl.value = match.credit;
     hint.textContent = `Auto-filled from a previous "${desc}" entry`;
-  } else hint.textContent = '';
+    return;
+  }
+  const rule = (categorizationRules || []).find(r => key.includes(r.keyword));
+  if (rule) {
+    if (!debitEl.value) debitEl.value = rule.debit;
+    if (!creditEl.value) creditEl.value = rule.credit;
+    hint.textContent = `Auto-filled from your rule: "${rule.keyword}" → ${rule.debit}`;
+    return;
+  }
+  hint.textContent = '';
 }
 
 // ---------- quick-entry mode: hides VAT/FX/fund/department + credit account for the common
@@ -3448,6 +3458,10 @@ function categorize(desc) {
     if (key.includes(presetDesc) || presetDesc.includes(key)) {
       return { debit: pair.debit, credit: pair.credit, confidence: 'high', reason: `Partial match to a previous entry described "${presetDesc}".` };
     }
+  }
+  const userRule = (categorizationRules || []).find(r => key.includes(r.keyword));
+  if (userRule) {
+    return { debit: userRule.debit, credit: userRule.credit, confidence: 'high', reason: `Matched your rule: "${userRule.keyword}" → ${userRule.debit} / ${userRule.credit}.` };
   }
   for (const rule of KEYWORD_RULES) {
     const hit = rule.kws.find(kw => key.includes(kw));

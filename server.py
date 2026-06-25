@@ -289,6 +289,19 @@ def init_db():
             PRIMARY KEY (company_id, desc_key)
         );
 
+        -- User-defined categorisation rules ("Amazon always -> Office Supplies") — distinct
+        -- from presets (which learn silently from an exact-description match on something
+        -- already posted): a rule is deliberately created once by the user and matches any
+        -- description CONTAINING the keyword, not just an exact repeat.
+        CREATE TABLE IF NOT EXISTS categorization_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            keyword TEXT NOT NULL,
+            debit TEXT NOT NULL,
+            credit TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS bank_lines (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -3272,6 +3285,51 @@ def list_presets(company_id):
         "SELECT desc_key, debit, credit FROM presets WHERE company_id = ?", (company_id,)
     ).fetchall()
     return jsonify({r["desc_key"]: {"debit": r["debit"], "credit": r["credit"]} for r in rows})
+
+
+# ---------- categorisation rules ("Amazon always -> Office Supplies") ----------
+
+@app.route("/api/companies/<int:company_id>/categorization-rules", methods=["GET"])
+@login_required
+@company_required
+def list_categorization_rules(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, keyword, debit, credit FROM categorization_rules WHERE company_id = ? ORDER BY keyword",
+        (company_id,),
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/categorization-rules", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def create_categorization_rule(company_id):
+    data = request.get_json(force=True) or {}
+    keyword = (data.get("keyword") or "").strip().lower()
+    debit = (data.get("debit") or "").strip()
+    credit = (data.get("credit") or "").strip()
+    if not keyword or not debit or not credit:
+        return jsonify({"error": "A keyword, debit account, and credit account are all required."}), 400
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO categorization_rules (company_id, keyword, debit, credit) VALUES (?,?,?,?)",
+        (company_id, keyword, debit, credit),
+    )
+    db.commit()
+    return jsonify({"id": cur.lastrowid, "keyword": keyword, "debit": debit, "credit": credit})
+
+
+@app.route("/api/companies/<int:company_id>/categorization-rules/<int:rule_id>", methods=["DELETE"])
+@login_required
+@company_required
+@write_required
+def delete_categorization_rule(company_id, rule_id):
+    db = get_db()
+    db.execute("DELETE FROM categorization_rules WHERE id = ? AND company_id = ?", (rule_id, company_id))
+    db.commit()
+    return jsonify({"ok": True})
 
 
 # ---------- contacts ----------
