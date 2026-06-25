@@ -4,6 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bookkeeping — T-Account Ledger</title>
+<script>
+  // Applied before any CSS/content paints, to avoid a flash of the wrong theme on load.
+  (function () {
+    if (localStorage.getItem('theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+  })();
+</script>
 <link rel="stylesheet" href="/static/css/tokens.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -31,6 +37,34 @@
     --sidebar-text: rgba(255,255,255,0.52);
     --sidebar-text-active: #FFFFFF;
     --sidebar-active-bg: rgba(10,126,164,0.22);
+    --tooltip-bg: #1A1B2E;   /* always dark, in both themes — var(--text) flips light in dark
+                                mode, which would otherwise make white tooltip text vanish */
+  }
+  /* Dark mode: same token names, dark values — every component already reads colour exclusively
+     through these variables (no component has its own hardcoded hex), so flipping the palette
+     here is enough to retheme the whole app with no per-component changes. Applied via a
+     [data-theme="dark"] attribute on <html>, toggled by the button in the sidebar and persisted
+     to localStorage — not prefers-color-scheme alone, so the user's explicit choice always wins
+     over (and survives independently of) their OS setting. */
+  html[data-theme="dark"] {
+    --bg: #15161F;
+    --panel: #1E2030;
+    --panel-soft: #262838;
+    --border: #343650;
+    --text: #ECECF1;
+    --muted: #9498B3;
+    --accent: #2DA8D8;
+    --accent-hover: #4DB8E0;
+    --accent-soft: #1C3A47;
+    --debit: #7FA8CC;
+    --credit: #2DA8D8;
+    --good: #3ABC7A;
+    --bad: #E0605F;
+    --bad-soft: #3A1F1F;
+    --sidebar-bg: #0E0F18;
+    --sidebar-text: rgba(255,255,255,0.55);
+    --sidebar-text-active: #FFFFFF;
+    --sidebar-active-bg: rgba(45,168,216,0.22);
   }
   * { box-sizing: border-box; }
   body {
@@ -140,13 +174,13 @@
   .term-tip { border-bottom: 1px dotted var(--muted); cursor: help; position: relative; }
   .term-tip:hover::after {
     content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 0;
-    background: var(--text); color: #fff; font-size: 11.5px; font-weight: 500; line-height: 1.4;
+    background: var(--tooltip-bg); color: #fff; font-size: 11.5px; font-weight: 500; line-height: 1.4;
     padding: 7px 10px; border-radius: 6px; width: 220px; white-space: normal; z-index: 90;
     box-shadow: 0 4px 12px rgba(0,0,0,0.2); text-transform: none; letter-spacing: normal;
   }
   .term-tip:hover::before {
     content: ''; position: absolute; bottom: 100%; left: 10px; border: 5px solid transparent;
-    border-top-color: var(--text); z-index: 90;
+    border-top-color: var(--tooltip-bg); z-index: 90;
   }
   .empty { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
   textarea { width: 100%; background: var(--panel-soft); border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 7px; font-size: 13px; font-family: inherit; resize: vertical; }
@@ -265,7 +299,10 @@
 <div id="app-screen" style="display:none;">
   <div class="app-shell">
     <aside class="sidebar">
-      <div class="brand">MyAccountingPal</div>
+      <div class="brand" style="display:flex; align-items:center; justify-content:space-between;">
+        MyAccountingPal
+        <button id="theme-toggle-btn" onclick="toggleTheme()" title="Toggle dark mode" style="background:none; border:none; color:inherit; cursor:pointer; font-size:15px; padding:2px 6px;">🌙</button>
+      </div>
       <nav class="page-tabs">
         <a href="#page-dashboard" data-page="dashboard">Dashboard</a>
         <a href="#page-transactions" data-page="transactions">Transactions</a>
@@ -1790,6 +1827,26 @@ let currentUser = null;
 let companies = [];
 let currentCompany = null;
 let authMode = 'login';
+
+function toggleTheme() {
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  if (isDark) {
+    document.documentElement.removeAttribute('data-theme');
+    localStorage.removeItem('theme');
+  } else {
+    document.documentElement.setAttribute('data-theme', 'dark');
+    localStorage.setItem('theme', 'dark');
+  }
+  syncThemeToggleIcon();
+}
+
+function syncThemeToggleIcon() {
+  const btn = document.getElementById('theme-toggle-btn');
+  if (!btn) return;
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  btn.textContent = isDark ? '☀️' : '🌙';
+}
+syncThemeToggleIcon();
 
 async function api(path, opts) {
   opts = opts || {};
