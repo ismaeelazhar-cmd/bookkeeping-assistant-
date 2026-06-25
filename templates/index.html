@@ -1464,6 +1464,12 @@
         <div><label>Display name <span style="color:var(--muted); font-weight:400;">(blank = company name)</span></label><input type="text" id="brand-display-name" oninput="saveSettings()"></div>
         <div><label>Accent colour</label><input type="color" id="brand-color" oninput="saveSettings()" style="height:38px; padding:4px;"></div>
       </div>
+      <label>Invoice template</label>
+      <select id="brand-template" onchange="saveSettings()">
+        <option value="classic">Classic — logo top-left, accent-coloured table header</option>
+        <option value="modern">Modern — full-width accent header band</option>
+        <option value="minimal">Minimal — plain text, accent colour used sparingly</option>
+      </select>
       <label>Business address</label>
       <textarea id="brand-address" rows="2" oninput="saveSettings()"></textarea>
       <label>Payment terms <span style="color:var(--muted); font-weight:400;">(shown on invoices)</span></label>
@@ -2261,6 +2267,7 @@ async function openCompany(id) {
   renderHmrcConnectionStatus();
   document.getElementById('brand-display-name').value = currentCompany.brand_display_name || '';
   document.getElementById('brand-color').value = currentCompany.brand_color || '#0A7EA4';
+  document.getElementById('brand-template').value = currentCompany.brand_template || 'classic';
   document.getElementById('brand-address').value = currentCompany.brand_address || '';
   document.getElementById('brand-payment-terms').value = currentCompany.brand_payment_terms || '';
   document.getElementById('brand-bank-details').value = currentCompany.brand_bank_details || '';
@@ -2326,6 +2333,7 @@ function buildSettingsPayload(extra) {
     hmrcVrn: document.getElementById('hmrc-vrn').value.trim(),
     brandDisplayName: document.getElementById('brand-display-name').value.trim(),
     brandColor: document.getElementById('brand-color').value,
+    brandTemplate: document.getElementById('brand-template').value,
     brandAddress: document.getElementById('brand-address').value,
     brandPaymentTerms: document.getElementById('brand-payment-terms').value,
     brandBankDetails: document.getElementById('brand-bank-details').value,

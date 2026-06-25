@@ -891,6 +891,8 @@ def init_db():
         db.execute("ALTER TABLE companies ADD COLUMN brand_address TEXT DEFAULT ''")
         db.execute("ALTER TABLE companies ADD COLUMN brand_payment_terms TEXT DEFAULT ''")
         db.execute("ALTER TABLE companies ADD COLUMN brand_bank_details TEXT DEFAULT ''")
+    if "brand_template" not in company_cols:
+        db.execute("ALTER TABLE companies ADD COLUMN brand_template TEXT DEFAULT 'classic'")
     if "stripe_secret_key" not in company_cols:
         # #7: Stripe Checkout, called directly via its REST API (urllib, no SDK dependency) —
         # encrypted at rest like every other API credential here. Needs the user's own Stripe
@@ -1504,7 +1506,7 @@ def list_companies():
         "fund_accounting_enabled, plaid_client_id, plaid_secret, plaid_env, confidence_threshold, cost_centres_enabled, "
         "hmrc_client_id, hmrc_client_secret, hmrc_env, hmrc_vrn, hmrc_access_token, "
         "smtp_host, smtp_port, smtp_username, smtp_password, smtp_from_email, notifications_enabled, notify_email, "
-        "brand_logo_path, brand_color, brand_display_name, brand_address, brand_payment_terms, brand_bank_details, "
+        "brand_logo_path, brand_color, brand_display_name, brand_address, brand_payment_terms, brand_bank_details, brand_template, "
         "stripe_secret_key, stripe_publishable_key, stripe_webhook_secret, stripe_payment_account, auto_chase_overdue_invoices, "
         "business_type, show_cis_tools, show_fx_tools, tour_completed, "
         "'owner' as permission "
@@ -1514,7 +1516,7 @@ def list_companies():
         "c.fund_accounting_enabled, c.plaid_client_id, c.plaid_secret, c.plaid_env, c.confidence_threshold, c.cost_centres_enabled, "
         "c.hmrc_client_id, c.hmrc_client_secret, c.hmrc_env, c.hmrc_vrn, c.hmrc_access_token, "
         "c.smtp_host, c.smtp_port, c.smtp_username, c.smtp_password, c.smtp_from_email, c.notifications_enabled, c.notify_email, "
-        "c.brand_logo_path, c.brand_color, c.brand_display_name, c.brand_address, c.brand_payment_terms, c.brand_bank_details, "
+        "c.brand_logo_path, c.brand_color, c.brand_display_name, c.brand_address, c.brand_payment_terms, c.brand_bank_details, c.brand_template, "
         "c.stripe_secret_key, c.stripe_publishable_key, c.stripe_webhook_secret, c.stripe_payment_account, c.auto_chase_overdue_invoices, "
         "c.business_type, c.show_cis_tools, c.show_fx_tools, c.tour_completed, "
         "cm.permission "
@@ -1628,7 +1630,7 @@ def update_settings(company_id):
         "cost_centres_enabled = ?, hmrc_client_id = ?, hmrc_env = ?, hmrc_vrn = ?, "
         "smtp_host = ?, smtp_port = ?, smtp_username = ?, smtp_from_email = ?, "
         "notifications_enabled = ?, notify_email = ?, "
-        "brand_color = ?, brand_display_name = ?, brand_address = ?, brand_payment_terms = ?, brand_bank_details = ?, "
+        "brand_color = ?, brand_display_name = ?, brand_address = ?, brand_payment_terms = ?, brand_bank_details = ?, brand_template = ?, "
         "stripe_payment_account = ?, auto_chase_overdue_invoices = ?, show_cis_tools = ?, show_fx_tools = ? "
         "WHERE id = ?",
         (
@@ -1641,6 +1643,7 @@ def update_settings(company_id):
             1 if data.get("notificationsEnabled") else 0, data.get("notifyEmail", ""),
             data.get("brandColor") or "#0A7EA4", data.get("brandDisplayName", ""), data.get("brandAddress", ""),
             data.get("brandPaymentTerms", ""), data.get("brandBankDetails", ""),
+            data.get("brandTemplate") if data.get("brandTemplate") in ("classic", "modern", "minimal") else "classic",
             data.get("stripePaymentAccount") or "Cash",
             1 if data.get("autoChaseOverdueInvoices") else 0,
             1 if data.get("showCisTools") else 0,
@@ -3846,26 +3849,74 @@ def delete_contact(company_id, contact_id):
 
 # ---------- invoices & bills ----------
 
-def generate_invoice_pdf(company_row, doc_row, contact_row, line_items=None):
-    """#6: a real, customer-facing invoice/bill PDF — logo, business address, line items,
-    payment terms, and bank details, all pulled from the company's branding settings rather
-    than hardcoded. fpdf2 is pure-Python (no system libs like wkhtmltopdf/Cairo needed), so this
-    runs the same in any deployment without extra setup. line_items is optional — documents
-    created before line items existed fall back to the single desc/amount row they've always had."""
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_auto_page_break(auto=True, margin=20)
+def _hex_to_rgb(hex_color):
+    hex_color = (hex_color or "#0A7EA4").lstrip("#")
+    if len(hex_color) != 6:
+        hex_color = "0A7EA4"
+    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
 
+
+def _invoice_pdf_line_items_table(pdf, doc_row, line_items, accent_rgb, header_text_rgb=(255, 255, 255)):
+    """Shared across all three templates — only the surrounding chrome (header band, logo
+    placement, colour scheme) differs between them, not how the line items themselves render."""
+    amount = from_pence(doc_row["amount_pence"])
+    pdf.set_fill_color(*accent_rgb)
+    pdf.set_text_color(*header_text_rgb)
+    pdf.set_font("Helvetica", "B", 10)
+    if line_items:
+        pdf.cell(95, 8, "Description", border=0, fill=True)
+        pdf.cell(25, 8, "Qty", border=0, fill=True, align="R")
+        pdf.cell(35, 8, "Unit price", border=0, fill=True, align="R")
+        pdf.cell(35, 8, "Amount", border=0, fill=True, align="R", ln=True)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_font("Helvetica", "", 10)
+        for li in line_items:
+            qty = li["quantity"]
+            unit_price = from_pence(li["unit_price_pence"])
+            line_total = qty * unit_price
+            pdf.cell(95, 7, li["description"], border="B")
+            pdf.cell(25, 7, f"{qty:g}", border="B", align="R")
+            pdf.cell(35, 7, f"{unit_price:,.2f}", border="B", align="R")
+            pdf.cell(35, 7, f"{line_total:,.2f}", border="B", align="R", ln=True)
+    else:
+        pdf.cell(140, 8, "Description", border=0, fill=True)
+        pdf.cell(50, 8, "Amount", border=0, fill=True, align="R", ln=True)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.cell(140, 8, doc_row["desc"], border="B")
+        pdf.cell(50, 8, f"{amount:,.2f}", border="B", align="R", ln=True)
+    if doc_row["vat_rate"]:
+        vat_amount = round(amount * doc_row["vat_rate"] / (100 + doc_row["vat_rate"]), 2)
+        pdf.cell(140, 8, f"Includes VAT @ {doc_row['vat_rate']:g}%", border="B")
+        pdf.cell(50, 8, f"{vat_amount:,.2f}", border="B", align="R", ln=True)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(140, 9, "Total")
+    pdf.cell(50, 9, f"{amount:,.2f}", align="R", ln=True)
+    pdf.ln(8)
+
+
+def _invoice_pdf_terms_and_bank(pdf, company_row):
+    if company_row["brand_payment_terms"]:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(0, 6, "Payment terms", ln=True)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.multi_cell(0, 5, company_row["brand_payment_terms"])
+        pdf.ln(2)
+    if company_row["brand_bank_details"]:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(0, 6, "Bank details", ln=True)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.multi_cell(0, 5, company_row["brand_bank_details"])
+
+
+def _generate_invoice_pdf_classic(pdf, company_row, doc_row, contact_row, line_items, accent_rgb, display_name, label):
+    """Original layout: logo top-left, document label top-right, accent-coloured table header."""
     logo_path = company_row["brand_logo_path"]
-    if logo_path:
-        full_path = UPLOADS_DIR / logo_path
-        if full_path.exists():
-            pdf.image(str(full_path), x=10, y=10, w=35)
-            pdf.set_xy(10, 45)
+    if logo_path and (UPLOADS_DIR / logo_path).exists():
+        pdf.image(str(UPLOADS_DIR / logo_path), x=10, y=10, w=35)
+        pdf.set_xy(10, 45)
 
-    display_name = company_row["brand_display_name"] or company_row["name"]
     pdf.set_font("Helvetica", "B", 18)
-    label = {"invoice": "INVOICE", "bill": "BILL", "credit_note": "CREDIT NOTE", "quote": "QUOTE"}.get(doc_row["kind"], "DOCUMENT")
     pdf.cell(0, 10, f"{label} #{doc_row['id']:04d}", ln=True, align="R")
 
     pdf.set_font("Helvetica", "B", 14)
@@ -3890,16 +3941,96 @@ def generate_invoice_pdf(company_row, doc_row, contact_row, line_items=None):
     pdf.cell(95, 6, f"Due: {doc_row['due_date']}", ln=True)
     pdf.ln(4)
 
-    amount = from_pence(doc_row["amount_pence"])
+    _invoice_pdf_line_items_table(pdf, doc_row, line_items, accent_rgb)
+    _invoice_pdf_terms_and_bank(pdf, company_row)
+
+
+def _generate_invoice_pdf_modern(pdf, company_row, doc_row, contact_row, line_items, accent_rgb, display_name, label):
+    """Full-width accent band across the top of the page, logo and business name reversed out of
+    it in white, document label and dates right-aligned within the same band."""
+    pdf.set_fill_color(*accent_rgb)
+    pdf.rect(0, 0, 210, 38, "F")
+    logo_path = company_row["brand_logo_path"]
+    if logo_path and (UPLOADS_DIR / logo_path).exists():
+        pdf.image(str(UPLOADS_DIR / logo_path), x=10, y=8, w=22)
+        text_x = 38
+    else:
+        text_x = 10
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_xy(text_x, 10)
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 8, display_name, ln=True)
+    pdf.set_x(text_x)
+    pdf.set_font("Helvetica", "", 9)
+    if company_row["brand_address"]:
+        pdf.set_x(text_x)
+        pdf.cell(0, 5, company_row["brand_address"].splitlines()[0], ln=True)
+
+    pdf.set_xy(120, 10)
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(80, 8, f"{label} #{doc_row['id']:04d}", align="R", ln=True)
+    pdf.set_x(120)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(80, 5, f"Date: {doc_row['date']}", align="R", ln=True)
+    pdf.set_x(120)
+    pdf.cell(80, 5, f"Due: {doc_row['due_date']}", align="R", ln=True)
+
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_xy(10, 48)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 6, "Bill to:" if doc_row["kind"] != "bill" else "From:", ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 5, contact_row["name"], ln=True)
+    for line in [contact_row["address_line1"], contact_row["address_city"], contact_row["address_postcode"], contact_row["address_country"]]:
+        if line:
+            pdf.cell(0, 5, line, ln=True)
+    pdf.ln(6)
+
+    _invoice_pdf_line_items_table(pdf, doc_row, line_items, accent_rgb)
+    _invoice_pdf_terms_and_bank(pdf, company_row)
+
+
+def _generate_invoice_pdf_minimal(pdf, company_row, doc_row, contact_row, line_items, accent_rgb, display_name, label):
+    """No colour fills at all — a thin accent-coloured rule under the header is the only colour
+    on the page, logo small and top-left, everything else black text on white. For a business
+    that wants the document to read as plain and understated rather than branded."""
+    logo_path = company_row["brand_logo_path"]
+    if logo_path and (UPLOADS_DIR / logo_path).exists():
+        pdf.image(str(UPLOADS_DIR / logo_path), x=10, y=10, w=20)
+        pdf.set_xy(35, 12)
+    else:
+        pdf.set_xy(10, 12)
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(0, 7, display_name, ln=True)
+    pdf.set_x(35 if logo_path else 10)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(110, 110, 110)
+    pdf.cell(0, 5, f"{label} #{doc_row['id']:04d}  ·  Date {doc_row['date']}  ·  Due {doc_row['due_date']}", ln=True)
+    pdf.set_text_color(0, 0, 0)
+
+    pdf.set_y(32)
+    pdf.set_draw_color(*accent_rgb)
+    pdf.set_line_width(0.8)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(8)
+
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 6, "Bill to:" if doc_row["kind"] != "bill" else "From:", ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 5, contact_row["name"], ln=True)
+    for line in [contact_row["address_line1"], contact_row["address_city"], contact_row["address_postcode"], contact_row["address_country"]]:
+        if line:
+            pdf.cell(0, 5, line, ln=True)
+    pdf.ln(6)
+
+    # No fill colour on the table header in this template — a plain bottom-border row, with the
+    # accent colour reserved for the rule under the header and the total figure only.
+    pdf.set_font("Helvetica", "B", 10)
     if line_items:
-        pdf.set_fill_color(10, 126, 164)
-        pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(95, 8, "Description", border=0, fill=True)
-        pdf.cell(25, 8, "Qty", border=0, fill=True, align="R")
-        pdf.cell(35, 8, "Unit price", border=0, fill=True, align="R")
-        pdf.cell(35, 8, "Amount", border=0, fill=True, align="R", ln=True)
-        pdf.set_text_color(0, 0, 0)
+        pdf.cell(95, 7, "Description", border="B")
+        pdf.cell(25, 7, "Qty", border="B", align="R")
+        pdf.cell(35, 7, "Unit price", border="B", align="R")
+        pdf.cell(35, 7, "Amount", border="B", align="R", ln=True)
         pdf.set_font("Helvetica", "", 10)
         for li in line_items:
             qty = li["quantity"]
@@ -3910,35 +4041,51 @@ def generate_invoice_pdf(company_row, doc_row, contact_row, line_items=None):
             pdf.cell(35, 7, f"{unit_price:,.2f}", border="B", align="R")
             pdf.cell(35, 7, f"{line_total:,.2f}", border="B", align="R", ln=True)
     else:
-        pdf.set_fill_color(10, 126, 164)
-        pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(140, 8, "Description", border=0, fill=True)
-        pdf.cell(50, 8, "Amount", border=0, fill=True, align="R", ln=True)
-        pdf.set_text_color(0, 0, 0)
+        amount = from_pence(doc_row["amount_pence"])
+        pdf.cell(140, 7, "Description", border="B")
+        pdf.cell(50, 7, "Amount", border="B", align="R", ln=True)
         pdf.set_font("Helvetica", "", 10)
-        pdf.cell(140, 8, doc_row["desc"], border="B")
-        pdf.cell(50, 8, f"{amount:,.2f}", border="B", align="R", ln=True)
+        pdf.cell(140, 7, doc_row["desc"], border="B")
+        pdf.cell(50, 7, f"{amount:,.2f}", border="B", align="R", ln=True)
+    amount = from_pence(doc_row["amount_pence"])
     if doc_row["vat_rate"]:
         vat_amount = round(amount * doc_row["vat_rate"] / (100 + doc_row["vat_rate"]), 2)
-        pdf.cell(140, 8, f"Includes VAT @ {doc_row['vat_rate']:g}%", border="B")
-        pdf.cell(50, 8, f"{vat_amount:,.2f}", border="B", align="R", ln=True)
-    pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(140, 7, f"Includes VAT @ {doc_row['vat_rate']:g}%", border="B")
+        pdf.cell(50, 7, f"{vat_amount:,.2f}", border="B", align="R", ln=True)
+    pdf.set_text_color(*accent_rgb)
+    pdf.set_font("Helvetica", "B", 12)
     pdf.cell(140, 9, "Total")
     pdf.cell(50, 9, f"{amount:,.2f}", align="R", ln=True)
+    pdf.set_text_color(0, 0, 0)
     pdf.ln(8)
 
-    if company_row["brand_payment_terms"]:
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(0, 6, "Payment terms", ln=True)
-        pdf.set_font("Helvetica", "", 9)
-        pdf.multi_cell(0, 5, company_row["brand_payment_terms"])
-        pdf.ln(2)
-    if company_row["brand_bank_details"]:
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(0, 6, "Bank details", ln=True)
-        pdf.set_font("Helvetica", "", 9)
-        pdf.multi_cell(0, 5, company_row["brand_bank_details"])
+    _invoice_pdf_terms_and_bank(pdf, company_row)
+
+
+INVOICE_PDF_TEMPLATES = {
+    "classic": _generate_invoice_pdf_classic,
+    "modern": _generate_invoice_pdf_modern,
+    "minimal": _generate_invoice_pdf_minimal,
+}
+
+
+def generate_invoice_pdf(company_row, doc_row, contact_row, line_items=None):
+    """A real, customer-facing invoice/bill PDF — logo, business address, line items, payment
+    terms, and bank details, all pulled from the company's branding settings rather than
+    hardcoded. Three template designs (classic/modern/minimal), picked via brand_template,
+    share the same data and line-items rendering but differ in header layout and colour use.
+    fpdf2 is pure-Python (no system libs like wkhtmltopdf/Cairo needed), so this runs the same in
+    any deployment without extra setup. line_items is optional — documents created before line
+    items existed fall back to the single desc/amount row they've always had."""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=20)
+
+    accent_rgb = _hex_to_rgb(company_row["brand_color"])
+    display_name = company_row["brand_display_name"] or company_row["name"]
+    label = {"invoice": "INVOICE", "bill": "BILL", "credit_note": "CREDIT NOTE", "quote": "QUOTE"}.get(doc_row["kind"], "DOCUMENT")
+    template = company_row["brand_template"] if company_row["brand_template"] in INVOICE_PDF_TEMPLATES else "classic"
+    INVOICE_PDF_TEMPLATES[template](pdf, company_row, doc_row, contact_row, line_items, accent_rgb, display_name, label)
 
     return bytes(pdf.output())
 
