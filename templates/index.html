@@ -346,14 +346,17 @@
       <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--debit);">
         <div class="sub" style="margin:0;"><span class="term-tip" data-tip="Money customers owe you for invoices you've sent but they haven't paid yet.">Outstanding receivables</span></div>
         <div style="font-size:22px; font-weight:700; color:var(--debit);" id="dash-receivables">—</div>
+        <div id="dash-receivables-hint" style="font-size:11px; margin-top:2px; min-height:14px; color:var(--muted);"></div>
       </div>
       <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--credit);">
         <div class="sub" style="margin:0;"><span class="term-tip" data-tip="Money you owe suppliers for bills you've received but haven't paid yet.">Outstanding payables</span></div>
         <div style="font-size:22px; font-weight:700; color:var(--credit);" id="dash-payables">—</div>
+        <div id="dash-payables-hint" style="font-size:11px; margin-top:2px; min-height:14px; color:var(--muted);"></div>
       </div>
       <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--good);">
         <div class="sub" style="margin:0;">Net profit <span id="dash-profit-period" style="color:var(--muted);">(all time)</span></div>
         <div style="font-size:22px; font-weight:700;" id="dash-profit">—</div>
+        <div id="dash-profit-hint" style="font-size:11px; margin-top:2px; min-height:14px; color:var(--muted);"></div>
       </div>
     </div>
 
@@ -3413,13 +3416,15 @@ function renderDashboard() {
     cashVsEl.style.color = cashDelta >= 0 ? 'var(--good)' : 'var(--bad)';
     cashVsEl.textContent = `${cashDelta >= 0 ? '↑' : '↓'} ${fmt(Math.abs(cashDelta))} vs end of last month`;
   } else {
-    cashVsEl.textContent = '';
+    cashVsEl.textContent = 'Will track once you post transactions or connect a bank.';
   }
 
   const receivables = invoicesBills.filter(d => d.kind === 'invoice' && d.status === 'sent').reduce((s, d) => s + d.amount, 0);
   const payables = invoicesBills.filter(d => d.kind === 'bill' && d.status === 'sent').reduce((s, d) => s + d.amount, 0);
   document.getElementById('dash-receivables').textContent = fmt(receivables);
   document.getElementById('dash-payables').textContent = fmt(payables);
+  document.getElementById('dash-receivables-hint').textContent = invoicesBills.some(d => d.kind === 'invoice') ? '' : 'Updates once you send your first invoice.';
+  document.getElementById('dash-payables-hint').textContent = invoicesBills.some(d => d.kind === 'bill') ? '' : 'Updates once you enter your first bill.';
 
   let revenue = 0, cogs = 0, expenses = 0;
   for (const name of names) {
@@ -3433,6 +3438,7 @@ function renderDashboard() {
   const profitEl = document.getElementById('dash-profit');
   profitEl.textContent = fmt(profit);
   profitEl.style.color = profit >= 0 ? 'var(--good)' : 'var(--bad)';
+  document.getElementById('dash-profit-hint').textContent = transactions.length ? '' : 'Calculates once revenue/expenses are posted.';
 
   renderAttentionList();
   renderSetupChecklist();
