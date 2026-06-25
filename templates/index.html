@@ -2745,6 +2745,12 @@ async function scanReceiptForQuickEntry(event) {
     const res = await fetch(`/api/companies/${currentCompany.id}/scan-receipt`, { method: 'POST', body: formData, credentials: 'same-origin' });
     const extracted = await res.json();
     if (!res.ok) throw new Error(extracted.error || 'Could not read that receipt.');
+    if (extracted.posted) {
+      statusEl.textContent = `Posted automatically as ${extracted.debit} / ${extracted.credit} (${fmt(extracted.amount)}) — receipt attached.`;
+      showToast('Receipt read, categorised, and posted to the ledger.', 'success');
+      await refreshAll();
+      return;
+    }
     if (extracted.date) document.getElementById('f-date').value = extracted.date;
     if (extracted.desc) document.getElementById('f-desc').value = extracted.desc;
     if (extracted.amount != null) document.getElementById('f-amount').value = extracted.amount;

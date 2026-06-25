@@ -3497,11 +3497,12 @@ def extract_attachment(company_id, attachment_id):
 @company_required
 @write_required
 def scan_receipt(company_id):
-    """Quick-entry receipt capture: OCR a photo BEFORE any transaction exists, so the
-    new-transaction form can be pre-filled and posted in one step. Deliberately doesn't persist
-    the file — attachments.transaction_id is NOT NULL (a file is always attached to a posted
-    transaction), so a scan that's discarded or never posted leaves nothing orphaned. If the
-    user wants the receipt kept, they attach it the normal way after posting."""
+    """Quick-entry receipt capture: OCR a photo/PDF and, when a categorization rule or learned
+    preset confidently identifies the accounts for it, post the transaction AND save the file as
+    its attachment in one step — the user's only job is to hand over the receipt. Without a
+    confident match, this falls back to the old behaviour (return extracted fields, post nothing,
+    keep no file) rather than guessing accounts with no signal at all, the same "auto-post only
+    when confident, otherwise ask" rule the bank feed importer follows."""
     api_key = decrypt_secret(g.company["ai_api_key"])
     if not api_key:
         return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
@@ -3512,18 +3513,44 @@ def scan_receipt(company_id):
     mime_type = file.mimetype or mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
     if mime_type not in ALLOWED_ATTACHMENT_TYPES:
         return jsonify({"error": f"Unsupported file type: {mime_type}. Allowed: PDF, PNG, JPEG, HEIC, WEBP."}), 400
+    file_bytes = file.read()
 
     try:
-        extracted = extract_receipt_fields(api_key, mime_type, file.read())
+        extracted = extract_receipt_fields(api_key, mime_type, file_bytes)
     except urllib.error.HTTPError as e:
         return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
     except urllib.error.URLError as e:
         return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
     except (ValueError, json.JSONDecodeError) as e:
         return jsonify({"error": str(e) or "Claude's response wasn't valid JSON."}), 502
-    suggestion = suggest_accounts_for_desc(get_db(), company_id, extracted.get("desc"))
+
+    db = get_db()
+    suggestion = suggest_accounts_for_desc(db, company_id, extracted.get("desc"))
     if suggestion:
         extracted.update(suggestion)
+
+    if suggestion and extracted.get("date") and extracted.get("desc") and extracted.get("amount"):
+        try:
+            tx_id = post_ledger_transaction(
+                db, company_id, extracted["date"], extracted["desc"], extracted["amount"],
+                suggestion["debit"], suggestion["credit"],
+            )
+        except LedgerError as e:
+            extracted["error"] = e.message  # surfaced as a warning, not a hard failure — fields are still usable for manual entry
+        else:
+            company_dir = UPLOADS_DIR / str(company_id)
+            company_dir.mkdir(exist_ok=True)
+            safe_name = secure_filename(file.filename) or "upload"
+            stored_name = f"{uuid.uuid4().hex}_{safe_name}"
+            (company_dir / stored_name).write_bytes(file_bytes)
+            db.execute(
+                "INSERT INTO attachments (company_id, transaction_id, filename, mime_type, stored_path, uploaded_by) "
+                "VALUES (?,?,?,?,?,?)",
+                (company_id, tx_id, safe_name, mime_type, f"{company_id}/{stored_name}", session.get("email", "unknown")),
+            )
+            db.commit()
+            extracted["posted"] = True
+            extracted["transactionId"] = tx_id
     return jsonify(extracted)
 
 
