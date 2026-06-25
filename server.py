@@ -566,8 +566,9 @@ def init_db():
         );
 
         -- Multi-entity consolidation: a simple named grouping of companies the same user owns.
-        -- The consolidated report sums matching account lines across members — it's a plain
-        -- aggregation, not true consolidation accounting (no intercompany eliminations).
+        -- The consolidated report sums matching account lines across members, then eliminates
+        -- intercompany balances (accounts named "Intercompany..."/"Due from/to...") so trades
+        -- between members aren't double-counted in combined assets/liabilities.
         CREATE TABLE IF NOT EXISTS consolidation_groups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1707,11 +1708,12 @@ def remove_member(company_id, member_id):
 # ---------- multi-entity consolidation (Stage 6) ----------
 #
 # A simple named grouping of companies the user owns. The report sums matching account lines
-# across members by (name, type) — a plain aggregation, explicitly NOT true consolidation
-# accounting: there's no intercompany elimination (a loan from Company A to Company B would
-# double-count as an asset in A and a liability in B rather than netting to zero), and no
-# minority-interest handling. Good enough for "what does this group look like combined";
-# not a substitute for a real consolidation engine if intercompany transactions exist.
+# across members by (name, type), then nets out intercompany balances (accounts named
+# "Intercompany..."/"Due from/to...") up to the matched amount so a loan from Company A to
+# Company B doesn't double-count as an asset in A and a liability in B. Still no
+# minority-interest handling, and elimination relies on the account-naming convention rather
+# than tagging specific transactions — good enough for most small owner-managed groups, but
+# not a substitute for a real consolidation engine on complex group structures.
 
 @app.route("/api/consolidation-groups", methods=["GET"])
 @login_required
@@ -1816,14 +1818,22 @@ def consolidation_report(group_id):
     total_liabilities = totals["current_liability"] + totals["noncurrent_liability"]
     total_equity = totals["equity"] + net_profit - totals["drawings"]
 
-    # This consolidation is a plain aggregation (documented elsewhere in this app) — it does not
-    # eliminate intercompany balances. At minimum, flag accounts that look like they record a
-    # balance between related entities (the things that genuinely need eliminating before this
-    # report can be called real consolidated accounts) so the user knows to look at them.
+    # Intercompany elimination: accounts named "Intercompany ..." / "Due from/to ..." record
+    # balances between related entities that must net to zero in true consolidated accounts —
+    # otherwise the same loan/trade balance is counted twice (once as one member's asset, once
+    # as another's liability), overstating combined assets and liabilities.
     intercompany_accounts = [
         a for a in accounts_out
         if re.search(r"intercompany|inter-company|due (from|to)", a["name"], re.IGNORECASE)
     ]
+    intercompany_asset_total = sum(a["balance"] for a in intercompany_accounts if a["type"] in debit_normal_types)
+    intercompany_liability_total = sum(a["balance"] for a in intercompany_accounts if a["type"] not in debit_normal_types)
+    elimination_amount = round(min(intercompany_asset_total, intercompany_liability_total), 2)
+    residual = round(intercompany_asset_total - intercompany_liability_total, 2)
+
+    if elimination_amount:
+        total_assets = round(total_assets - elimination_amount, 2)
+        total_liabilities = round(total_liabilities - elimination_amount, 2)
 
     return jsonify({
         "memberCount": len(member_ids),
@@ -1833,12 +1843,21 @@ def consolidation_report(group_id):
             "netProfit": net_profit, "totalAssets": total_assets, "totalLiabilities": total_liabilities,
             "totalEquity": total_equity,
         },
-        "intercompanyWarning": {
+        "intercompanyElimination": {
             "accounts": [{"name": a["name"], "balance": a["balance"]} for a in intercompany_accounts],
-            "note": "These look like balances between related entities. This report is a plain "
-                    "aggregation, not true consolidation accounting — these have NOT been eliminated "
-                    "and may overstate combined assets/liabilities if the member companies trade with "
-                    "each other.",
+            "eliminatedAmount": elimination_amount,
+            "residual": residual,
+            "note": (
+                "Intercompany balances of {amt} have been eliminated from total assets and total "
+                "liabilities in the figures above.".format(amt=elimination_amount)
+                + (
+                    " Residual of {res} remains unmatched — intercompany 'due from'/'due to' balances "
+                    "don't net to zero, which usually means one side hasn't recorded the same "
+                    "transaction yet (timing difference) or the amounts genuinely disagree. Review "
+                    "the underlying postings before treating this report as final.".format(res=abs(residual))
+                    if residual else ""
+                )
+            ),
         } if intercompany_accounts else None,
     })
 

@@ -229,7 +229,7 @@
 
   <div class="panel" style="margin-top:16px;">
     <h2>Consolidation Groups</h2>
-    <div class="sub" style="margin-bottom:12px;">Combine companies you own into one summed view (e.g. a charity plus its trading subsidiary). A plain aggregation across entities — no intercompany eliminations, so it's not true consolidation accounting if the companies trade with each other.</div>
+    <div class="sub" style="margin-bottom:12px;">Combine companies you own into one consolidated view (e.g. a charity plus its trading subsidiary). Balances in accounts named "Intercompany..." or "Due from/to..." are automatically eliminated between members so trades between them aren't double-counted.</div>
     <div id="consol-groups-body"></div>
     <label style="margin-top:12px;">New group name</label>
     <input type="text" id="consol-new-name" placeholder="e.g. Whole Org">
@@ -1958,10 +1958,12 @@ async function viewConsolidationReport(groupId) {
     <tr><td>${escapeHtml(a.name)}</td><td>${escapeHtml(a.type)}</td><td class="num">${fmt(a.balance)}</td></tr>
   `).join('');
   const warningEl = document.getElementById('consol-intercompany-warning');
-  if (report.intercompanyWarning) {
+  if (report.intercompanyElimination) {
+    const ic = report.intercompanyElimination;
+    const label = ic.residual ? '⚠ Intercompany balances eliminated (with unmatched residual)' : '✓ Intercompany balances eliminated';
     warningEl.style.display = '';
-    warningEl.innerHTML = `<strong>⚠ Possible intercompany balances not eliminated</strong><div class="sub" style="margin:4px 0;">${escapeHtml(report.intercompanyWarning.note)}</div>` +
-      report.intercompanyWarning.accounts.map(a => `<div class="sub" style="margin:0;">${escapeHtml(a.name)}: <span class="money">${fmt(a.balance)}</span></div>`).join('');
+    warningEl.innerHTML = `<strong>${label}</strong><div class="sub" style="margin:4px 0;">${escapeHtml(ic.note)}</div>` +
+      ic.accounts.map(a => `<div class="sub" style="margin:0;">${escapeHtml(a.name)}: <span class="money">${fmt(a.balance)}</span></div>`).join('');
   } else {
     warningEl.style.display = 'none';
   }
