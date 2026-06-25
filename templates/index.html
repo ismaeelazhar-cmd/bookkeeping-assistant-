@@ -5336,22 +5336,52 @@ function printManagementAccountsPack() {
   const period = document.getElementById('period-label').textContent;
   const debtors = document.getElementById('aging-invoice-body').innerHTML;
   const creditors = document.getElementById('aging-bill-body').innerHTML;
+  const accent = currentCompany.brand_color || '#0A7EA4';
+  const displayName = currentCompany.brand_display_name || currentCompany.name;
+  const logoHtml = currentCompany.brand_logo_path
+    ? `<img src="/api/companies/${currentCompany.id}/branding/logo" class="cover-logo" onerror="this.style.display='none'">`
+    : '';
   const win = window.open('', '_blank');
-  win.document.write(`<html><head><title>Management Accounts — ${escapeHtml(currentCompany.name)}</title><style>
-    body{font-family:-apple-system,sans-serif;padding:24px;color:#111;} h1{font-size:20px;margin-bottom:2px;} h2{font-size:14px;margin-top:26px;}
-    table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px;} td,th{padding:5px 8px;text-align:left;} td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;}
-    .sub{color:#666;font-size:12px;} .cover{margin-bottom:24px; border-bottom:2px solid #333; padding-bottom:16px;}
+  win.document.write(`<html><head><title>Management Accounts — ${escapeHtml(displayName)}</title><style>
+    :root { --accent: ${accent}; }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 32px 40px; color: #1a1b2e; line-height: 1.4; }
+    .cover { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; padding-bottom: 18px; border-bottom: 3px solid var(--accent); }
+    .cover-logo { max-height: 52px; max-width: 160px; object-fit: contain; }
+    .cover-title h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
+    .cover-title .sub { color: #6b6f80; font-size: 12.5px; }
+    .cover-meta { text-align: right; font-size: 11.5px; color: #6b6f80; }
+    section { margin-top: 30px; page-break-inside: avoid; }
+    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid #e4e2da; }
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    td, th { padding: 7px 10px; text-align: left; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: #6b6f80; border-bottom: 1px solid #e4e2da; }
+    tbody tr:nth-child(even) { background: #faf9f6; }
+    tbody tr:last-child, tr[style*="font-weight:700"] { font-weight: 700; border-top: 1.5px solid #1a1b2e; }
+    .sub { color: #6b6f80; font-size: 12px; }
+    .pack-footer { margin-top: 36px; padding-top: 14px; border-top: 1px solid #e4e2da; font-size: 10.5px; color: #9a9da8; text-align: center; }
+    @media print { section { page-break-after: auto; } }
     </style></head><body>
     <div class="cover">
-      <h1>${escapeHtml(currentCompany.name)}</h1>
-      <div class="sub">Management Accounts — Period: ${period}</div>
-      <div class="sub">Prepared ${new Date().toLocaleDateString('en-GB')}</div>
+      <div style="display:flex; align-items:center; gap:16px;">
+        ${logoHtml}
+        <div class="cover-title">
+          <h1>${escapeHtml(displayName)}</h1>
+          <div class="sub">Management Accounts</div>
+        </div>
+      </div>
+      <div class="cover-meta">
+        <div><strong>Period:</strong> ${escapeHtml(period)}</div>
+        <div>Prepared ${new Date().toLocaleDateString('en-GB')}</div>
+      </div>
     </div>
-    <h2>Statement of Profit or Loss</h2><table>${pnl}</table>
-    <h2>Statement of Financial Position</h2><table>${sofp}</table>
-    <h2>Statement of Cash Flows</h2><table>${cf}</table>
-    <h2>Aged Debtors</h2><table><thead><tr><th>Customer</th><th class="num">Current</th><th class="num">1-30</th><th class="num">31-60</th><th class="num">61-90</th><th class="num">90+</th></tr></thead><tbody>${debtors}</tbody></table>
-    <h2>Aged Creditors</h2><table><thead><tr><th>Supplier</th><th class="num">Current</th><th class="num">1-30</th><th class="num">31-60</th><th class="num">61-90</th><th class="num">90+</th></tr></thead><tbody>${creditors}</tbody></table>
+    <section><h2>Statement of Profit or Loss</h2><table>${pnl}</table></section>
+    <section><h2>Statement of Financial Position</h2><table>${sofp}</table></section>
+    <section><h2>Statement of Cash Flows</h2><table>${cf}</table></section>
+    <section><h2>Aged Debtors</h2><table><thead><tr><th>Customer</th><th class="num">Current</th><th class="num">1-30</th><th class="num">31-60</th><th class="num">61-90</th><th class="num">90+</th></tr></thead><tbody>${debtors}</tbody></table></section>
+    <section><h2>Aged Creditors</h2><table><thead><tr><th>Supplier</th><th class="num">Current</th><th class="num">1-30</th><th class="num">31-60</th><th class="num">61-90</th><th class="num">90+</th></tr></thead><tbody>${creditors}</tbody></table></section>
+    <div class="pack-footer">Generated by ${escapeHtml(displayName)}'s bookkeeping records — not an audited financial statement.</div>
     </body></html>`);
   win.document.close(); win.focus(); setTimeout(() => win.print(), 300);
 }
