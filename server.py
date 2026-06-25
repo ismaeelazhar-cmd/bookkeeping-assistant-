@@ -2777,6 +2777,86 @@ def unreview_transaction(company_id, tx_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/companies/<int:company_id>/transactions/bulk-review", methods=["POST"])
+@login_required
+@company_required
+def bulk_review_transactions(company_id):
+    """Same per-transaction logic as the single review/unreview routes, just looped — selecting
+    several rows in the Journal and clicking one button instead of one "Mark reviewed" click per
+    row. Not write_required-gated, matching review_transaction: reviewing is an annotation, not a
+    ledger mutation."""
+    data = request.get_json(force=True) or {}
+    ids = data.get("ids") or []
+    unreview = bool(data.get("unreview"))
+    db = get_db()
+    now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    updated = 0
+    for tx_id in ids:
+        row = db.execute("SELECT id FROM transactions WHERE id = ? AND company_id = ?", (tx_id, company_id)).fetchone()
+        if row is None:
+            continue
+        if unreview:
+            db.execute(
+                "UPDATE transactions SET reviewed_by = NULL, reviewed_at = NULL WHERE id = ? AND company_id = ?",
+                (tx_id, company_id),
+            )
+        else:
+            db.execute(
+                "UPDATE transactions SET reviewed_by = ?, reviewed_at = ? WHERE id = ? AND company_id = ?",
+                (session.get("email", "unknown"), now, tx_id, company_id),
+            )
+            log_audit(db, company_id, "review", "transaction", tx_id, after={"reviewedBy": session.get("email")})
+        updated += 1
+    db.commit()
+    return jsonify({"updated": updated})
+
+
+@app.route("/api/companies/<int:company_id>/transactions/bulk-void", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def bulk_void_transactions(company_id):
+    """Same per-transaction void logic as void_transaction (including pulling in the rest of a
+    compound journal's legs), just looped over a selection from the Journal instead of one
+    "Delete" click per row. Locked-period transactions are skipped (not erred) so one locked row
+    in a big selection doesn't block voiding the rest."""
+    data = request.get_json(force=True) or {}
+    ids = data.get("ids") or []
+    db = get_db()
+    voided, skipped_locked, not_found = 0, 0, 0
+    now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    already_voided_in_this_call = set()
+    for tx_id in ids:
+        if tx_id in already_voided_in_this_call:
+            continue
+        row = db.execute(
+            "SELECT date, desc, amount_pence as amountPence, debit, credit, journal_id as journalId FROM transactions "
+            "WHERE id = ? AND company_id = ? AND voided_at IS NULL",
+            (tx_id, company_id),
+        ).fetchone()
+        if row is None:
+            not_found += 1
+            continue
+        if is_locked(g.company, row["date"]):
+            skipped_locked += 1
+            continue
+        ids_to_void = [tx_id]
+        if row["journalId"]:
+            ids_to_void = [r["id"] for r in db.execute(
+                "SELECT id FROM transactions WHERE company_id = ? AND journal_id = ? AND voided_at IS NULL",
+                (company_id, row["journalId"]),
+            ).fetchall()]
+        db.executemany(
+            "UPDATE transactions SET voided_at = ?, voided_by = ? WHERE id = ? AND company_id = ?",
+            [(now, session.get("email", "unknown"), i, company_id) for i in ids_to_void],
+        )
+        log_audit(db, company_id, "void", "transaction", tx_id, before=_serialize_transaction(row))
+        already_voided_in_this_call.update(ids_to_void)
+        voided += 1
+    db.commit()
+    return jsonify({"voided": voided, "skippedLocked": skipped_locked, "notFound": not_found})
+
+
 @app.route("/api/companies/<int:company_id>/transactions/clear", methods=["POST"])
 @login_required
 @company_required

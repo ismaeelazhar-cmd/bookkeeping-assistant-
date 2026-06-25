@@ -488,8 +488,15 @@
             <input type="date" id="jf-to" oninput="renderJournal()">
           </div>
           <button class="btn-secondary" style="margin:10px 0;" onclick="clearJournalFilters()">Clear filters</button>
+          <div id="journal-bulk-bar" style="display:none; margin-bottom:10px; padding:8px; background:var(--panel-soft); border-radius:6px; align-items:center; gap:10px;">
+            <span id="journal-bulk-count" style="font-size:13px;"></span>
+            <button class="btn-secondary" onclick="bulkReviewSelected(false)">Mark reviewed</button>
+            <button class="btn-secondary" onclick="bulkReviewSelected(true)">Mark unreviewed</button>
+            <button class="btn-danger" onclick="bulkVoidSelected()">Delete</button>
+            <button class="btn-secondary" onclick="clearJournalSelection()">Clear selection</button>
+          </div>
           <table class="journal">
-            <thead><tr><th>Date</th><th>Description</th><th><span class="term-tip" data-tip="The left side of an entry — increases assets/expenses, decreases liabilities/income.">Debit</span></th><th><span class="term-tip" data-tip="The right side of an entry — increases liabilities/income, decreases assets/expenses.">Credit</span></th><th class="num">Amount</th><th>VAT</th><th></th></tr></thead>
+            <thead><tr><th><input type="checkbox" id="journal-select-all" onchange="toggleSelectAllJournal(this.checked)"></th><th>Date</th><th>Description</th><th><span class="term-tip" data-tip="The left side of an entry — increases assets/expenses, decreases liabilities/income.">Debit</span></th><th><span class="term-tip" data-tip="The right side of an entry — increases liabilities/income, decreases assets/expenses.">Credit</span></th><th class="num">Amount</th><th>VAT</th><th></th></tr></thead>
             <tbody id="journal-body"></tbody>
           </table>
         </div>
@@ -2998,6 +3005,55 @@ function clearJournalFilters() {
   renderJournal();
 }
 
+let journalSelection = new Set();
+
+function toggleSelectAllJournal(checked) {
+  const boxes = document.querySelectorAll('.journal-row-check');
+  boxes.forEach(b => { b.checked = checked; journalSelection[checked ? 'add' : 'delete'](parseInt(b.value, 10)); });
+  renderJournalBulkBar();
+}
+
+function toggleJournalRow(id, checked) {
+  journalSelection[checked ? 'add' : 'delete'](id);
+  renderJournalBulkBar();
+}
+
+function clearJournalSelection() {
+  journalSelection.clear();
+  document.getElementById('journal-select-all').checked = false;
+  renderJournal();
+}
+
+function renderJournalBulkBar() {
+  const bar = document.getElementById('journal-bulk-bar');
+  if (journalSelection.size) {
+    bar.style.display = 'flex';
+    document.getElementById('journal-bulk-count').textContent = `${journalSelection.size} selected`;
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
+async function bulkReviewSelected(unreview) {
+  const ids = [...journalSelection];
+  if (!ids.length) return;
+  await api(`/api/companies/${currentCompany.id}/transactions/bulk-review`, { method: 'POST', body: JSON.stringify({ ids, unreview }) });
+  journalSelection.clear();
+  await loadTransactions();
+  await refreshAll();
+  showToast(`${ids.length} transaction(s) marked ${unreview ? 'unreviewed' : 'reviewed'}.`, 'success');
+}
+
+async function bulkVoidSelected() {
+  const ids = [...journalSelection];
+  if (!ids.length) return;
+  if (!(await confirmAction(`Delete ${ids.length} selected transaction(s)? This cannot be undone.`))) return;
+  const result = await api(`/api/companies/${currentCompany.id}/transactions/bulk-void`, { method: 'POST', body: JSON.stringify({ ids }) });
+  journalSelection.clear();
+  await refreshAll();
+  showToast(`Deleted ${result.voided} transaction(s).` + (result.skippedLocked ? ` ${result.skippedLocked} skipped (locked period).` : ''), 'success');
+}
+
 function renderJournal() {
   const tbody = document.getElementById('journal-body');
   const text = (document.getElementById('jf-text').value || '').toLowerCase();
@@ -3011,9 +3067,13 @@ function renderJournal() {
   if (from) filtered = filtered.filter(t => t.date >= from);
   if (to) filtered = filtered.filter(t => t.date <= to);
 
+  const visibleIds = new Set(filtered.map(t => t.id));
+  for (const id of [...journalSelection]) if (!visibleIds.has(id)) journalSelection.delete(id);
+
   const sorted = [...filtered].sort((a, b) => b.date.localeCompare(a.date));
   tbody.innerHTML = sorted.length ? sorted.map(t => `
     <tr>
+      <td><input type="checkbox" class="journal-row-check" value="${t.id}" ${journalSelection.has(t.id) ? 'checked' : ''} onchange="toggleJournalRow(${t.id}, this.checked)"></td>
       <td>${fmtDate(t.date)}</td><td>${escapeHtml(t.desc)}${t.journalId ? ` <span class="pill" title="Part of a compound journal — other legs share this ID">journal ${t.journalId.slice(0,6)}</span>` : ''}</td>
       <td style="color:var(--debit)">${accountTypeDot(t.debit)}${escapeHtml(t.debit)}</td>
       <td style="color:var(--credit)">${accountTypeDot(t.credit)}${escapeHtml(t.credit)}</td>
@@ -3028,12 +3088,13 @@ function renderJournal() {
         ${findTransactionSources(t.id).length ? `<button class="btn-secondary" onclick="showSourceModal(${t.id})" title="Where this came from">🔗 Source</button>` : ''}
         <button class="btn-danger" onclick="deleteTransaction(${t.id})">Delete</button>
       </td>
-    </tr>`).join('') : '<tr><td colspan="7" class="empty">No transactions match these filters.</td></tr>';
+    </tr>`).join('') : '<tr><td colspan="8" class="empty">No transactions match these filters.</td></tr>';
 
   const countText = filtered.length === transactions.length
     ? `${transactions.length} transaction${transactions.length === 1 ? '' : 's'}`
     : `${filtered.length} of ${transactions.length} transactions`;
   document.getElementById('journal-count').textContent = countText;
+  renderJournalBulkBar();
 }
 
 function renderTrialBalance() {
