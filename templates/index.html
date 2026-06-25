@@ -1438,6 +1438,13 @@
   </div>
 
   <div class="page" data-page="settings" style="display:none;">
+    <div class="subpage-tabs">
+      <a href="#" data-settings-tab="general" onclick="showSettingsSubpage('general'); return false;">General &amp; Branding</a>
+      <a href="#" data-settings-tab="ai" onclick="showSettingsSubpage('ai'); return false;">AI Features</a>
+      <a href="#" data-settings-tab="integrations" onclick="showSettingsSubpage('integrations'); return false;">Integrations</a>
+      <a href="#" data-settings-tab="team" onclick="showSettingsSubpage('team'); return false;">Notifications &amp; Team</a>
+    </div>
+    <div data-settings-subpage="general">
     <div class="panel">
       <h2>Defaults</h2>
       <label>Default credit account <span style="color:var(--muted); font-weight:400;">(auto-fills credit when posting a transaction)</span></label>
@@ -1480,6 +1487,8 @@
       </label>
     </div>
 
+    </div>
+    <div data-settings-subpage="ai">
     <div class="panel" style="margin-top:20px;">
       <h2>AI Features</h2>
       <div class="sub" style="margin:8px 0;">Turns on: reading receipts automatically, suggesting categories for bank transactions, "Ask Your Ledger", and the month-end narrative.</div>
@@ -1538,6 +1547,8 @@ ollama pull llama3.2-vision</pre>
       </div>
     </div>
 
+    </div>
+    <div data-settings-subpage="integrations">
     <div class="panel" style="margin-top:20px;">
       <h2>Bank feed credentials (Plaid)</h2>
       <div class="sub" style="margin:8px 0;">From a free account at <span style="color:var(--text);">dashboard.plaid.com</span>. Secret is write-only — encrypted at rest, never sent back to this browser. Connect or sync the actual bank account under the Bank page once these are set.</div>
@@ -1575,6 +1586,8 @@ ollama pull llama3.2-vision</pre>
       <button class="btn-primary" onclick="connectHmrc()">Connect to HMRC</button>
     </div>
 
+    </div>
+    <div data-settings-subpage="general">
     <div class="panel" style="margin-top:20px;">
       <h2>Branding</h2>
       <div class="sub" style="margin-bottom:10px;">Applied to invoice/bill PDFs and the customer payment portal — useful as-is, and essential if you're an accountant invoicing under your firm's own name rather than each client's.</div>
@@ -1599,6 +1612,8 @@ ollama pull llama3.2-vision</pre>
       <textarea id="brand-bank-details" rows="2" placeholder="e.g. Sort code 12-34-56, Account 12345678" oninput="saveSettings()"></textarea>
     </div>
 
+    </div>
+    <div data-settings-subpage="team">
     <div class="panel" id="settings-notifications-panel" style="margin-top:20px;">
       <h2>Notifications</h2>
       <div class="sub" style="margin-bottom:10px;">A daily digest email — overdue invoices, a VAT deadline within 7 days (if HMRC is connected), and a nudge if bank reconciliation has gone stale. Checked once a day when the dashboard loads; needs an outbound email server below.</div>
@@ -1642,6 +1657,8 @@ ollama pull llama3.2-vision</pre>
       <div id="notify-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
 
+    </div>
+    <div data-settings-subpage="integrations">
     <div class="panel" style="margin-top:20px;">
       <h2>Get Paid Online</h2>
       <div class="sub" style="margin-bottom:10px;">Lets a customer pay an invoice with a card by clicking the link you email them — no chasing a bank transfer. Powered by Stripe (the same payment processor Amazon and Shopify use), since taking real card payments needs a real, regulated payment provider behind it.</div>
@@ -1666,6 +1683,8 @@ ollama pull llama3.2-vision</pre>
       </div>
     </div>
 
+    </div>
+    <div data-settings-subpage="team">
     <div class="panel" style="margin-top:20px;">
       <h2>Team</h2>
       <div class="sub" style="margin-bottom:12px;">Invite an accountant or colleague to this company. They need an existing account on this app first — invite by the email they signed up with. "View" can read everything; "post" can also enter/edit transactions and everything else; only the owner can manage the team or delete the company.</div>
@@ -1680,6 +1699,7 @@ ollama pull llama3.2-vision</pre>
       </div>
       <button class="btn-primary" id="team-invite-btn" onclick="inviteMember()">Invite</button>
       <div id="team-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
     </div>
   </div>
 
@@ -2749,6 +2769,7 @@ function showToast(message, kind) {
 const PAGE_NAMES = ['dashboard', 'transactions', 'bank', 'accounts', 'ledgers', 'invoices', 'reports', 'settings', 'audit'];
 
 const REPORTS_SUBPAGES = ['statements', 'tax', 'funds-depts', 'health'];
+const SETTINGS_SUBPAGES = ['general', 'ai', 'integrations', 'team'];
 
 function showPage(name, subpage) {
   if (!PAGE_NAMES.includes(name)) name = 'dashboard';
@@ -2758,6 +2779,10 @@ function showPage(name, subpage) {
   if (name === 'reports') {
     if (!REPORTS_SUBPAGES.includes(subpage)) subpage = 'statements';
     showReportsSubpage(subpage, /*skipHash=*/true);
+    hash += `/${subpage}`;
+  } else if (name === 'settings') {
+    if (!SETTINGS_SUBPAGES.includes(subpage)) subpage = 'general';
+    showSettingsSubpage(subpage, /*skipHash=*/true);
     hash += `/${subpage}`;
   }
   if (location.hash !== hash) history.replaceState(null, '', hash);
@@ -2770,6 +2795,16 @@ function showReportsSubpage(subpage, skipHash) {
   document.querySelectorAll('[data-subpage-tab]').forEach(a => a.classList.toggle('subpage-active', a.dataset.subpageTab === subpage));
   if (!skipHash) {
     const hash = `#page-reports/${subpage}`;
+    if (location.hash !== hash) history.replaceState(null, '', hash);
+  }
+}
+
+function showSettingsSubpage(subpage, skipHash) {
+  if (!SETTINGS_SUBPAGES.includes(subpage)) subpage = 'general';
+  document.querySelectorAll('[data-settings-subpage]').forEach(el => { el.style.display = el.dataset.settingsSubpage === subpage ? '' : 'none'; });
+  document.querySelectorAll('[data-settings-tab]').forEach(a => a.classList.toggle('subpage-active', a.dataset.settingsTab === subpage));
+  if (!skipHash) {
+    const hash = `#page-settings/${subpage}`;
     if (location.hash !== hash) history.replaceState(null, '', hash);
   }
 }
