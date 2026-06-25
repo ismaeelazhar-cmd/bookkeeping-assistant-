@@ -6035,7 +6035,20 @@ async function submitVatReturnToHmrc() {
   }
   const netVatDue = outputVat - inputVat;
 
-  const periodKey = prompt('HMRC period key for this VAT period (find it via the Obligations check in your HMRC account)?');
+  // Pull real open obligations from HMRC instead of sending the user off to find the period key
+  // themselves — this app already has the endpoint, it just wasn't wired into this flow.
+  let obligations = [];
+  try {
+    const result = await api(`/api/companies/${currentCompany.id}/hmrc/obligations`);
+    obligations = result.obligations || [];
+  } catch (e) {
+    // Not connected to HMRC, or the lookup failed — fall back to a bare prompt rather than blocking.
+  }
+  const matching = obligations.find(o => o.start === from && o.end === to);
+  const listText = obligations.length
+    ? obligations.map(o => `${o.periodKey}: ${o.start} to ${o.end} (due ${o.due})`).join('\n')
+    : 'No open obligations found — check HMRC connection in Settings, or enter the period key manually.';
+  const periodKey = prompt(`HMRC period key for this VAT period:\n\n${listText}`, matching ? matching.periodKey : '');
   if (!periodKey) return;
   const ok = await confirmAction(
     `Submit this VAT return to HMRC for period ${periodKey}? Box 1: ${fmt(outputVat)}, Box 4: ${fmt(inputVat)}, Box 5: ${fmt(Math.abs(netVatDue))}. This cannot be undone once HMRC accepts it.`,
