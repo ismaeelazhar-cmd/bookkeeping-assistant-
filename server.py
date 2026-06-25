@@ -678,14 +678,19 @@ def init_db():
 
         -- One budgeted amount per account per month ('YYYY-MM'). Variance against actual is
         -- computed on read (sum of that month's transactions for the account), not stored.
+        -- department_id NULL means a whole-company budget for that account/period; a real
+        -- department id scopes the budget to just that department's spend on the account.
+        -- The uniqueness check is done in Python (via "department_id IS ?") rather than a SQL
+        -- UNIQUE constraint, because SQLite treats every NULL as distinct in a unique index —
+        -- a constraint here would happily let in duplicate whole-company budget rows.
         CREATE TABLE IF NOT EXISTS budgets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
             account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            department_id INTEGER DEFAULT NULL REFERENCES departments(id) ON DELETE CASCADE,
             period TEXT NOT NULL,
             amount_pence INTEGER NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE (company_id, account_id, period)
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS clarification_queue (
@@ -723,6 +728,39 @@ def init_db():
         db.execute("ALTER TABLE companies ADD COLUMN plaid_client_id TEXT DEFAULT ''")
         db.execute("ALTER TABLE companies ADD COLUMN plaid_secret TEXT DEFAULT ''")  # encrypted at rest, like ai_api_key
         db.execute("ALTER TABLE companies ADD COLUMN plaid_env TEXT DEFAULT 'sandbox'")
+    budget_cols = {row[1] for row in db.execute("PRAGMA table_info(budgets)").fetchall()}
+    budgets_sql = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'budgets'"
+    ).fetchone()
+    has_old_unique = budgets_sql and "UNIQUE" in budgets_sql[0]
+    if "department_id" not in budget_cols or has_old_unique:
+        # An older budgets table has UNIQUE(company_id, account_id, period) baked into its
+        # CREATE TABLE statement — a plain ALTER TABLE ADD COLUMN can't touch that constraint,
+        # and it would reject a department-scoped budget that shares an account/period with a
+        # whole-company one. Rebuild the table (SQLite's standard way to change a constraint)
+        # instead of just adding the column. Checked by inspecting the table's own SQL (not just
+        # column presence) so this also heals a database that already got the column added by a
+        # previous, narrower version of this migration but still has the stale constraint.
+        if "department_id" in budget_cols:
+            db.execute("ALTER TABLE budgets RENAME COLUMN department_id TO department_id_old")
+        db.execute(
+            "CREATE TABLE budgets_new ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,"
+            "account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,"
+            "department_id INTEGER DEFAULT NULL REFERENCES departments(id) ON DELETE CASCADE,"
+            "period TEXT NOT NULL,"
+            "amount_pence INTEGER NOT NULL,"
+            "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
+            ")"
+        )
+        old_dept_col = "department_id_old" if "department_id" in budget_cols else "NULL"
+        db.execute(
+            "INSERT INTO budgets_new (id, company_id, account_id, department_id, period, amount_pence, created_at) "
+            f"SELECT id, company_id, account_id, {old_dept_col}, period, amount_pence, created_at FROM budgets"
+        )
+        db.execute("DROP TABLE budgets")
+        db.execute("ALTER TABLE budgets_new RENAME TO budgets")
     bank_line_cols = {row[1] for row in db.execute("PRAGMA table_info(bank_lines)").fetchall()}
     if "external_id" not in bank_line_cols:
         db.execute("ALTER TABLE bank_lines ADD COLUMN external_id TEXT DEFAULT NULL")
@@ -4420,12 +4458,17 @@ def delete_purchase_order(company_id, po_id):
 def list_budgets(company_id):
     db = get_db()
     period = request.args.get("period")
-    query = "SELECT b.id, b.account_id as accountId, a.name as account, a.type as accountType, b.period, b.amount_pence as amountPence FROM budgets b JOIN accounts a ON a.id = b.account_id WHERE b.company_id = ?"
+    query = (
+        "SELECT b.id, b.account_id as accountId, a.name as account, a.type as accountType, "
+        "b.department_id as departmentId, d.name as department, b.period, b.amount_pence as amountPence "
+        "FROM budgets b JOIN accounts a ON a.id = b.account_id "
+        "LEFT JOIN departments d ON d.id = b.department_id WHERE b.company_id = ?"
+    )
     params = [company_id]
     if period:
         query += " AND b.period = ?"
         params.append(period)
-    rows = db.execute(query + " ORDER BY b.period, a.code", params).fetchall()
+    rows = db.execute(query + " ORDER BY b.period, a.code, d.name", params).fetchall()
     result = [dict(r) for r in rows]
     for r in result:
         r["amount"] = from_pence(r.pop("amountPence"))
@@ -4439,6 +4482,7 @@ def list_budgets(company_id):
 def set_budget(company_id):
     data = request.get_json(force=True) or {}
     account_name, period, amount = data.get("account"), data.get("period"), data.get("amount")
+    department_name = data.get("department")
     if not all([account_name, period]) or amount is None or float(amount) < 0:
         return jsonify({"error": "Account, period (YYYY-MM), and a non-negative amount are required."}), 400
     if not re.match(r"^\d{4}-\d{2}$", period):
@@ -4446,11 +4490,23 @@ def set_budget(company_id):
     db = get_db()
     account_name = resolve_account(db, company_id, account_name)
     account_row = get_account_by_name(db, company_id, account_name)
-    db.execute(
-        "INSERT INTO budgets (company_id, account_id, period, amount_pence) VALUES (?,?,?,?) "
-        "ON CONFLICT(company_id, account_id, period) DO UPDATE SET amount_pence = excluded.amount_pence",
-        (company_id, account_row["id"], period, to_pence(amount)),
-    )
+    department_id = resolve_department_id(db, company_id, department_name)
+
+    # Manual select-then-write instead of an upsert: SQLite treats every NULL as distinct in a
+    # unique index, so "ON CONFLICT" would never match two whole-company (department_id IS NULL)
+    # budgets for the same account/period as the same row — "IS" here is the NULL-safe comparison
+    # that makes that case work correctly.
+    existing = db.execute(
+        "SELECT id FROM budgets WHERE company_id = ? AND account_id = ? AND period = ? AND department_id IS ?",
+        (company_id, account_row["id"], period, department_id),
+    ).fetchone()
+    if existing:
+        db.execute("UPDATE budgets SET amount_pence = ? WHERE id = ?", (to_pence(amount), existing["id"]))
+    else:
+        db.execute(
+            "INSERT INTO budgets (company_id, account_id, department_id, period, amount_pence) VALUES (?,?,?,?,?)",
+            (company_id, account_row["id"], department_id, period, to_pence(amount)),
+        )
     db.commit()
     return jsonify({"ok": True})
 

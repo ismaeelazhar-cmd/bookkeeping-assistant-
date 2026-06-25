@@ -1250,16 +1250,20 @@
     <div class="panel" style="margin-top:20px;">
       <h2>Budget vs Actual</h2>
       <div class="sub" style="margin-bottom:12px;">Set a monthly budget per revenue/expense account, see the variance against what actually posted.</div>
-      <label>Month</label>
-      <input type="month" id="budget-period" onchange="renderBudgetVsActual()">
+      <div class="row2">
+        <div><label>Month</label><input type="month" id="budget-period" onchange="renderBudgetVsActual()"></div>
+        <div><label>Department <span style="color:var(--muted); font-weight:400;">(optional filter)</span></label><select id="budget-filter-department" onchange="renderBudgetVsActual()"><option value="">All departments</option></select></div>
+      </div>
       <table class="trial" style="margin-top:10px;">
-        <thead><tr><td><b>Account</b></td><td class="num"><b>Budget</b></td><td class="num"><b>Actual</b></td><td class="num"><b>Variance</b></td><td class="num"><b>Variance %</b></td><td></td></tr></thead>
+        <thead><tr><td><b>Account</b></td><td><b>Department</b></td><td class="num"><b>Budget</b></td><td class="num"><b>Actual</b></td><td class="num"><b>Variance</b></td><td class="num"><b>Variance %</b></td><td></td></tr></thead>
         <tbody id="budget-body"></tbody>
       </table>
       <div class="row2" style="margin-top:14px;">
         <div><label>Account</label><select id="budget-new-account"></select></div>
         <div><label>Budgeted amount</label><input type="number" id="budget-new-amount" step="0.01" min="0" placeholder="0.00"></div>
       </div>
+      <label>Department <span style="color:var(--muted); font-weight:400;">(optional — leave blank for a whole-company budget)</span></label>
+      <select id="budget-new-department"><option value="">— whole company —</option></select>
       <button class="btn-secondary" onclick="addBudget()">Set budget for this month</button>
       <div id="budget-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
@@ -2595,6 +2599,7 @@ async function refreshAll() {
   populateContactSelect();
   populateFundSelect();
   populateDepartmentSelect();
+  populateBudgetDepartmentSelects();
   renderFunds();
   renderDepartments();
   render();
@@ -5154,35 +5159,53 @@ async function loadBudgets() {
   renderBudgetVsActual();
 }
 
+function populateBudgetDepartmentSelects() {
+  const optionsHtml = departments.map(d => `<option value="${escapeHtml(d.name)}">${escapeHtml(d.name)}</option>`).join('');
+  const filterEl = document.getElementById('budget-filter-department');
+  const newEl = document.getElementById('budget-new-department');
+  if (filterEl) filterEl.innerHTML = '<option value="">All departments</option>' + optionsHtml;
+  if (newEl) newEl.innerHTML = '<option value="">— whole company —</option>' + optionsHtml;
+}
+
 function renderBudgetVsActual() {
   const body = document.getElementById('budget-body');
   if (!body) return;
   const periodInput = document.getElementById('budget-period').value; // 'YYYY-MM'
-  if (!periodInput) { body.innerHTML = '<tr><td colspan="6" class="empty">Pick a month above.</td></tr>'; return; }
+  if (!periodInput) { body.innerHTML = '<tr><td colspan="7" class="empty">Pick a month above.</td></tr>'; return; }
+  const departmentFilter = document.getElementById('budget-filter-department').value;
 
-  const periodBudgets = budgets.filter(b => b.period === periodInput);
-  const actualByAccount = {};
+  let periodBudgets = budgets.filter(b => b.period === periodInput);
+  if (departmentFilter) periodBudgets = periodBudgets.filter(b => b.department === departmentFilter);
+
+  // actualByAccount is keyed by "account||department" (department '' = untagged) so a
+  // whole-company budget (no department) only ever compares against untagged spend, and a
+  // department budget only compares against that department's own tagged spend — mixing them
+  // would make a department's variance meaningless.
+  const actualByKey = {};
   for (const t of transactions) {
     if (!t.date.startsWith(periodInput)) continue;
     for (const line of expandTransactionLines(t)) {
       const type = getAccountType(line.account);
       if (type !== 'revenue' && type !== 'cogs' && type !== 'expense') continue;
       const sign = (type === 'revenue') ? (line.side === 'credit' ? 1 : -1) : (line.side === 'debit' ? 1 : -1);
-      actualByAccount[line.account] = (actualByAccount[line.account] || 0) + sign * line.amount;
+      const key = line.account + '||' + (t.department || '');
+      actualByKey[key] = (actualByKey[key] || 0) + sign * line.amount;
     }
   }
 
   if (!periodBudgets.length) {
-    body.innerHTML = '<tr><td colspan="6" class="empty">No budgets set for this month yet — add one below.</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="empty">No budgets set for this month yet — add one below.</td></tr>';
     return;
   }
   body.innerHTML = periodBudgets.map(b => {
-    const actual = actualByAccount[b.account] || 0;
+    const key = b.account + '||' + (b.department || '');
+    const actual = actualByKey[key] || 0;
     const variance = actual - b.amount;
     const variancePct = b.amount ? (variance / b.amount * 100) : 0;
     const color = (b.accountType === 'revenue') ? (variance >= 0 ? 'var(--good)' : 'var(--bad)') : (variance <= 0 ? 'var(--good)' : 'var(--bad)');
     return `<tr>
       <td>${escapeHtml(b.account)}</td>
+      <td>${escapeHtml(b.department || 'Whole company')}</td>
       <td class="num">${fmt(b.amount)}</td>
       <td class="num">${fmt(actual)}</td>
       <td class="num" style="color:${color};">${fmt(variance)}</td>
@@ -5196,12 +5219,13 @@ async function addBudget() {
   const period = document.getElementById('budget-period').value;
   const account = document.getElementById('budget-new-account').value;
   const amount = parseFloat(document.getElementById('budget-new-amount').value);
+  const department = document.getElementById('budget-new-department').value;
   const statusEl = document.getElementById('budget-status');
   if (!period || !account || !amount || amount < 0) {
     statusEl.textContent = 'Pick a month, an account, and a non-negative amount.'; return;
   }
   try {
-    await api(`/api/companies/${currentCompany.id}/budgets`, { method: 'POST', body: JSON.stringify({ account, period, amount }) });
+    await api(`/api/companies/${currentCompany.id}/budgets`, { method: 'POST', body: JSON.stringify({ account, period, amount, department }) });
   } catch (e) { statusEl.textContent = e.message; return; }
   statusEl.textContent = '';
   document.getElementById('budget-new-amount').value = '';
@@ -6630,6 +6654,7 @@ async function addDepartment() {
   document.getElementById('department-new-name').value = '';
   departments = await api(`/api/companies/${currentCompany.id}/departments`);
   populateDepartmentSelect();
+  populateBudgetDepartmentSelects();
   renderDepartments();
 }
 
@@ -6640,6 +6665,7 @@ async function deleteDepartment(id, name) {
   } catch (e) { alert(e.message); return; }
   departments = await api(`/api/companies/${currentCompany.id}/departments`);
   populateDepartmentSelect();
+  populateBudgetDepartmentSelects();
   renderDepartments();
 }
 
