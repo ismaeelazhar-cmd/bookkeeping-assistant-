@@ -526,7 +526,14 @@
         <div id="undo-bar" style="margin-bottom:8px;"></div>
 
         <div id="quick-receipt-row" style="display:none; margin-bottom:6px;">
-          <button class="btn-secondary" style="width:100%;" onclick="document.getElementById('quick-receipt-file').click()">📷 Scan a receipt</button>
+          <div class="row2">
+            <button class="btn-primary" style="margin-top:0;" onclick="document.getElementById('quick-receipt-camera').click()">📷 Take a photo</button>
+            <button class="btn-secondary" onclick="document.getElementById('quick-receipt-file').click()">📁 Upload a file</button>
+          </div>
+          <!-- accept="image/*" + capture="environment" opens the device camera directly on a
+               phone instead of a generic file picker — capture has no effect on desktop browsers,
+               which just fall back to a normal file dialog, so this is safe either way. -->
+          <input type="file" id="quick-receipt-camera" accept="image/*" capture="environment" style="display:none" onchange="scanReceiptForQuickEntry(event)">
           <input type="file" id="quick-receipt-file" accept=".pdf,.png,.jpg,.jpeg,.heic,.webp" style="display:none" onchange="scanReceiptForQuickEntry(event)">
           <div id="quick-receipt-status" style="font-size:12px; color:var(--muted); margin-top:4px;"></div>
         </div>
@@ -755,9 +762,21 @@
         <div><label>Date</label><input type="date" id="pr-date"></div>
         <div><label>Label</label><input type="text" id="pr-label" placeholder="e.g. June payroll"></div>
       </div>
-      <label>Gross pay</label>
-      <input type="number" id="pr-gross" step="0.01" min="0" placeholder="0.00" oninput="updatePayrollPreview()">
       <div class="row2">
+        <div><label>Gross pay</label><input type="number" id="pr-gross" step="0.01" min="0" placeholder="0.00" oninput="updatePayrollPreview()"></div>
+        <div><label>Pay frequency</label>
+          <select id="pr-frequency">
+            <option value="monthly" selected>Monthly</option>
+            <option value="weekly">Weekly</option>
+            <option value="fortnightly">Fortnightly</option>
+            <option value="annually">Annually</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn-secondary" onclick="calculatePayrollEstimate()">Calculate PAYE / NI estimate</button>
+      <div class="sub" style="margin:6px 0 0;">Estimates PAYE and employee/employer NI from gross pay using the rates below — an annualised-equivalent calculation, not a true cumulative payroll history. Fills in the fields below, which stay editable if you already have exact figures from a real payslip or payroll software.</div>
+      <div id="pr-calc-status" style="font-size:12px; color:var(--muted); margin-top:4px;"></div>
+      <div class="row2" style="margin-top:10px;">
         <div><label>Employee NI</label><input type="number" id="pr-employee-ni" step="0.01" min="0" placeholder="0.00" oninput="updatePayrollPreview()"></div>
         <div><label>Employer NI</label><input type="number" id="pr-employer-ni" step="0.01" min="0" placeholder="0.00" oninput="updatePayrollPreview()"></div>
       </div>
@@ -770,6 +789,40 @@
       <div class="sub" id="pr-preview" style="margin:8px 0; font-weight:600;"></div>
       <button class="btn-primary" onclick="postPayrollJournal()">Post payroll journal</button>
       <div id="pr-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+
+      <details style="margin-top:14px;">
+        <summary style="cursor:pointer; font-size:12px; color:var(--muted); font-weight:600;">PAYE/NI rates used (edit if these are out of date for the current tax year)</summary>
+        <div style="margin-top:10px;">
+          <div class="row2">
+            <div><label>Personal allowance (£/yr)</label><input type="number" id="pr-rate-personalAllowance" step="1"></div>
+            <div><label>Allowance taper starts (£/yr)</label><input type="number" id="pr-rate-personalAllowanceTaperStart" step="1"></div>
+          </div>
+          <div class="row2">
+            <div><label>Basic rate threshold (£/yr)</label><input type="number" id="pr-rate-basicRateThreshold" step="1"></div>
+            <div><label>Higher rate threshold (£/yr)</label><input type="number" id="pr-rate-higherRateThreshold" step="1"></div>
+          </div>
+          <div class="row2">
+            <div><label>Basic rate (%)</label><input type="number" id="pr-rate-basicRate" step="0.1"></div>
+            <div><label>Higher rate (%)</label><input type="number" id="pr-rate-higherRate" step="0.1"></div>
+          </div>
+          <label>Additional rate (%)</label>
+          <input type="number" id="pr-rate-additionalRate" step="0.1">
+          <div class="row2">
+            <div><label>Employee NI primary threshold (£/yr)</label><input type="number" id="pr-rate-niEmployeePrimaryThreshold" step="1"></div>
+            <div><label>Employee NI upper threshold (£/yr)</label><input type="number" id="pr-rate-niEmployeeUpperThreshold" step="1"></div>
+          </div>
+          <div class="row2">
+            <div><label>Employee NI rate (%)</label><input type="number" id="pr-rate-niEmployeeRate" step="0.1"></div>
+            <div><label>Employee NI upper rate (%)</label><input type="number" id="pr-rate-niEmployeeUpperRate" step="0.1"></div>
+          </div>
+          <div class="row2">
+            <div><label>Employer NI secondary threshold (£/yr)</label><input type="number" id="pr-rate-niEmployerSecondaryThreshold" step="1"></div>
+            <div><label>Employer NI rate (%)</label><input type="number" id="pr-rate-niEmployerRate" step="0.1"></div>
+          </div>
+          <button class="btn-secondary" onclick="savePayrollRates()">Save rates</button>
+          <div id="pr-rates-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+        </div>
+      </details>
     </div>
 
     <div class="panel" id="dividend-panel" style="margin-top:20px;">
@@ -3076,6 +3129,7 @@ async function refreshAll() {
   await loadRecurringJournals();
   await loadRecurringInvoices();
   await loadAccrualPrepayments();
+  await loadPayrollRates();
   await loadCategorizationRules();
   renderCashFlowForecast();
   renderMonthlyPnL();
@@ -7038,6 +7092,56 @@ function readPayrollForm() {
   const paye = num('pr-paye');
   const netPay = Math.round((gross - employeeNi - paye - employeePension) * 100) / 100;
   return { gross, employeeNi, employerNi, employeePension, employerPension, paye, netPay };
+}
+
+const PAYROLL_RATE_KEYS = [
+  'personalAllowance', 'personalAllowanceTaperStart', 'basicRateThreshold', 'higherRateThreshold',
+  'basicRate', 'higherRate', 'additionalRate', 'niEmployeePrimaryThreshold', 'niEmployeeUpperThreshold',
+  'niEmployeeRate', 'niEmployeeUpperRate', 'niEmployerSecondaryThreshold', 'niEmployerRate',
+];
+
+async function loadPayrollRates() {
+  let rates;
+  try {
+    rates = await api(`/api/companies/${currentCompany.id}/payroll/rates`);
+  } catch (e) { return; }
+  PAYROLL_RATE_KEYS.forEach(key => {
+    const el = document.getElementById(`pr-rate-${key}`);
+    if (el) el.value = rates[key];
+  });
+}
+
+async function savePayrollRates() {
+  const statusEl = document.getElementById('pr-rates-status');
+  const body = {};
+  PAYROLL_RATE_KEYS.forEach(key => {
+    const el = document.getElementById(`pr-rate-${key}`);
+    if (el) body[key] = parseFloat(el.value);
+  });
+  try {
+    await api(`/api/companies/${currentCompany.id}/payroll/rates`, { method: 'PUT', body: JSON.stringify(body) });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = 'Saved.';
+  showToast('Payroll rates updated.', 'success');
+}
+
+async function calculatePayrollEstimate() {
+  const statusEl = document.getElementById('pr-calc-status');
+  const gross = parseFloat(document.getElementById('pr-gross').value);
+  const frequency = document.getElementById('pr-frequency').value;
+  if (!gross || gross <= 0) { statusEl.textContent = 'Enter gross pay first.'; return; }
+  statusEl.textContent = 'Calculating…';
+  let result;
+  try {
+    result = await api(`/api/companies/${currentCompany.id}/payroll/calculate`, {
+      method: 'POST', body: JSON.stringify({ grossPay: gross, frequency }),
+    });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  document.getElementById('pr-paye').value = result.paye;
+  document.getElementById('pr-employee-ni').value = result.employeeNi;
+  document.getElementById('pr-employer-ni').value = result.employerNi;
+  statusEl.textContent = `Estimated: PAYE ${fmt(result.paye)}, employee NI ${fmt(result.employeeNi)}, employer NI ${fmt(result.employerNi)}. Check against a real payslip before relying on this.`;
+  updatePayrollPreview();
 }
 
 function updatePayrollPreview() {

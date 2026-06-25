@@ -908,6 +908,16 @@ def init_db():
         # SA103. Defaults to limited_company (the fuller feature set) rather than sole_trader, so
         # existing companies don't suddenly lose a feature they were already using.
         db.execute("ALTER TABLE companies ADD COLUMN entity_type TEXT DEFAULT 'limited_company'")
+    if "payroll_rates_json" not in company_cols:
+        # PAYE/NI bands and rates change every tax year and this app has no live feed for them —
+        # stored as editable JSON (not hardcoded) so a company keeps working correctly once rates
+        # change, by editing them in the Payroll Journal panel, rather than needing a code update.
+        # Defaults are the last published UK rates as of this app's last update; ALWAYS verify
+        # against the current tax year before relying on this for a real payroll run.
+        # SQLite's ALTER TABLE ADD COLUMN DEFAULT can't take a "?" placeholder — it's DDL, not a
+        # normal parameterized statement — so the constant is inlined via an f-string. Safe here
+        # since DEFAULT_PAYROLL_RATES is a fixed dict this app controls, never user input.
+        db.execute(f"ALTER TABLE companies ADD COLUMN payroll_rates_json TEXT DEFAULT '{json.dumps(DEFAULT_PAYROLL_RATES)}'")
     if "stripe_secret_key" not in company_cols:
         # #7: Stripe Checkout, called directly via its REST API (urllib, no SDK dependency) —
         # encrypted at rest like every other API credential here. Needs the user's own Stripe
@@ -971,6 +981,69 @@ DEFAULT_CHART = [
     ("VAT Control Account", "current_liability"),
     ("Depreciation Expense", "expense"),
 ]
+
+# Last published UK PAYE/NI figures as of this app's last update — NOT a live HMRC feed, and tax
+# bands/rates/thresholds change every tax year (sometimes mid-year). Stored per-company as
+# editable JSON (companies.payroll_rates_json) specifically so a company can correct these once
+# rates change, rather than the whole app needing a code update. ALWAYS verify against the
+# current tax year before relying on this for a real payroll run — this is a calculator for an
+# estimate, not a substitute for registered payroll software or an accountant's sign-off.
+DEFAULT_PAYROLL_RATES = {
+    "personalAllowance": 12570,       # £/year, before tapering
+    "personalAllowanceTaperStart": 100000,   # £1 of allowance lost per £2 of income above this
+    "basicRateThreshold": 50270,      # £/year — band: personalAllowance to this, at basicRate
+    "higherRateThreshold": 125140,    # £/year — band: basicRateThreshold to this, at higherRate
+    "basicRate": 20,
+    "higherRate": 40,
+    "additionalRate": 45,
+    "niEmployeePrimaryThreshold": 12570,   # £/year — employee NI starts above this
+    "niEmployeeUpperThreshold": 50270,     # £/year — employee NI rate drops above this
+    "niEmployeeRate": 8,
+    "niEmployeeUpperRate": 2,
+    "niEmployerSecondaryThreshold": 9100,  # £/year — employer NI starts above this
+    "niEmployerRate": 13.8,
+}
+
+
+def calculate_paye_ni(gross_pay, frequency, rates):
+    """Annualises the period's gross pay, applies the UK PAYE bands and Class 1 NI thresholds to
+    get an ESTIMATED tax/NI split, then divides back down to the period — the same simplification
+    every "rough payroll estimate" tool makes (an annualised-equivalent calculation, not a true
+    cumulative pay-period history). Pure function, no DB/network access, so the exact same
+    arithmetic is used whether called from the live preview or the actual posting — unlike the
+    fixed-asset depreciation calculator, which duplicates its logic between JS and Python, this
+    one has a single source of truth."""
+    periods_per_year = {"monthly": 12, "weekly": 52, "fortnightly": 26, "annually": 1}.get(frequency, 12)
+    annual_gross = gross_pay * periods_per_year
+
+    allowance = rates["personalAllowance"]
+    if annual_gross > rates["personalAllowanceTaperStart"]:
+        allowance = max(0, allowance - (annual_gross - rates["personalAllowanceTaperStart"]) / 2)
+
+    taxable = max(0, annual_gross - allowance)
+    # band widths, each clipped to taxable income above the allowance
+    basic_width = max(0, rates["basicRateThreshold"] - allowance)
+    higher_width = max(0, rates["higherRateThreshold"] - rates["basicRateThreshold"])
+    basic_amt = min(taxable, basic_width)
+    higher_amt = min(max(0, taxable - basic_width), higher_width)
+    additional_amt = max(0, taxable - basic_width - higher_width)
+    annual_paye = (basic_amt * rates["basicRate"] + higher_amt * rates["higherRate"]
+                   + additional_amt * rates["additionalRate"]) / 100
+
+    ni_basic_width = max(0, rates["niEmployeeUpperThreshold"] - rates["niEmployeePrimaryThreshold"])
+    ni_basic_amt = max(0, min(annual_gross, rates["niEmployeeUpperThreshold"]) - rates["niEmployeePrimaryThreshold"])
+    ni_basic_amt = max(0, min(ni_basic_amt, ni_basic_width))
+    ni_upper_amt = max(0, annual_gross - rates["niEmployeeUpperThreshold"])
+    annual_employee_ni = (ni_basic_amt * rates["niEmployeeRate"] + ni_upper_amt * rates["niEmployeeUpperRate"]) / 100
+
+    employer_ni_base = max(0, annual_gross - rates["niEmployerSecondaryThreshold"])
+    annual_employer_ni = employer_ni_base * rates["niEmployerRate"] / 100
+
+    return {
+        "paye": round(annual_paye / periods_per_year, 2),
+        "employeeNi": round(annual_employee_ni / periods_per_year, 2),
+        "employerNi": round(annual_employer_ni / periods_per_year, 2),
+    }
 
 # Onboarding chart-of-accounts templates, keyed by business type. Each extends DEFAULT_CHART
 # with a handful of accounts a business of that type will need on day one — not exhaustive,
@@ -1521,7 +1594,7 @@ def list_companies():
         "fund_accounting_enabled, plaid_client_id, plaid_secret, plaid_env, confidence_threshold, cost_centres_enabled, "
         "hmrc_client_id, hmrc_client_secret, hmrc_env, hmrc_vrn, hmrc_access_token, "
         "smtp_host, smtp_port, smtp_username, smtp_password, smtp_from_email, notifications_enabled, notify_email, "
-        "brand_logo_path, brand_color, brand_display_name, brand_address, brand_payment_terms, brand_bank_details, brand_template, ai_provider, ollama_url, ollama_model, "
+        "brand_logo_path, brand_color, brand_display_name, brand_address, brand_payment_terms, brand_bank_details, brand_template, ai_provider, ollama_url, ollama_model, payroll_rates_json, "
         "stripe_secret_key, stripe_publishable_key, stripe_webhook_secret, stripe_payment_account, auto_chase_overdue_invoices, "
         "business_type, entity_type, show_cis_tools, show_fx_tools, tour_completed, "
         "'owner' as permission "
@@ -1531,7 +1604,7 @@ def list_companies():
         "c.fund_accounting_enabled, c.plaid_client_id, c.plaid_secret, c.plaid_env, c.confidence_threshold, c.cost_centres_enabled, "
         "c.hmrc_client_id, c.hmrc_client_secret, c.hmrc_env, c.hmrc_vrn, c.hmrc_access_token, "
         "c.smtp_host, c.smtp_port, c.smtp_username, c.smtp_password, c.smtp_from_email, c.notifications_enabled, c.notify_email, "
-        "c.brand_logo_path, c.brand_color, c.brand_display_name, c.brand_address, c.brand_payment_terms, c.brand_bank_details, c.brand_template, c.ai_provider, c.ollama_url, c.ollama_model, "
+        "c.brand_logo_path, c.brand_color, c.brand_display_name, c.brand_address, c.brand_payment_terms, c.brand_bank_details, c.brand_template, c.ai_provider, c.ollama_url, c.ollama_model, c.payroll_rates_json, "
         "c.stripe_secret_key, c.stripe_publishable_key, c.stripe_webhook_secret, c.stripe_payment_account, c.auto_chase_overdue_invoices, "
         "c.business_type, c.entity_type, c.show_cis_tools, c.show_fx_tools, c.tour_completed, "
         "cm.permission "
@@ -6598,6 +6671,60 @@ def delete_mileage_log(company_id, entry_id):
     db.execute("DELETE FROM mileage_log WHERE id = ?", (entry_id,))
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/payroll/rates", methods=["GET"])
+@login_required
+@company_required
+def get_payroll_rates(company_id):
+    try:
+        rates = json.loads(g.company["payroll_rates_json"] or "{}")
+    except json.JSONDecodeError:
+        rates = {}
+    merged = {**DEFAULT_PAYROLL_RATES, **rates}
+    return jsonify(merged)
+
+
+@app.route("/api/companies/<int:company_id>/payroll/rates", methods=["PUT"])
+@login_required
+@company_required
+@write_required
+def set_payroll_rates(company_id):
+    data = request.get_json(force=True) or {}
+    rates = {}
+    for key in DEFAULT_PAYROLL_RATES:
+        if key in data:
+            try:
+                rates[key] = float(data[key])
+            except (TypeError, ValueError):
+                return jsonify({"error": f'"{key}" must be a number.'}), 400
+    merged = {**DEFAULT_PAYROLL_RATES, **rates}
+    db = get_db()
+    db.execute("UPDATE companies SET payroll_rates_json = ? WHERE id = ?", (json.dumps(merged), company_id))
+    db.commit()
+    return jsonify(merged)
+
+
+@app.route("/api/companies/<int:company_id>/payroll/calculate", methods=["POST"])
+@login_required
+@company_required
+def calculate_payroll(company_id):
+    """Estimates PAYE + employee/employer NI from gross pay using the company's own (editable)
+    rates — see DEFAULT_PAYROLL_RATES and calculate_paye_ni for the caveats. This is the one
+    place that does the calculation; the posting endpoint below takes the figures as given
+    rather than recomputing them, so a live preview and the actual post can never disagree."""
+    data = request.get_json(force=True) or {}
+    gross_pay = float(data.get("grossPay") or 0)
+    frequency = data.get("frequency") or "monthly"
+    if gross_pay <= 0:
+        return jsonify({"error": "Enter a positive gross pay first."}), 400
+    try:
+        rates = json.loads(g.company["payroll_rates_json"] or "{}")
+    except json.JSONDecodeError:
+        rates = {}
+    merged_rates = {**DEFAULT_PAYROLL_RATES, **rates}
+    result = calculate_paye_ni(gross_pay, frequency, merged_rates)
+    return jsonify(result)
 
 
 @app.route("/api/companies/<int:company_id>/payroll-journal", methods=["POST"])
