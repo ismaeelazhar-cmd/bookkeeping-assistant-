@@ -4347,10 +4347,23 @@ def _ensure_portal_token(db, doc):
     return db.execute("SELECT * FROM invoices_bills WHERE id = ?", (doc["id"],)).fetchone()
 
 
-def build_invoice_email_draft(db, company, doc, contact, reminder=False):
+#  Per-stage subject/opening line for the fixed auto-chase cadence (3 days before due, due today,
+#  7/14 days after) — the old single "is now overdue" copy was wrong for the two pre-due stages,
+#  which aren't overdue at all.
+CHASE_STAGE_COPY = {
+    "3-days-before": ("Reminder: {label} #{num} due in 3 days", "This is a friendly reminder that {label_lower} #{num} is due in 3 days."),
+    "due-today": ("Reminder: {label} #{num} due today", "This is a friendly reminder that {label_lower} #{num} is due today."),
+    "7-days-after": ("Overdue: {label} #{num} (7 days)", "{label} #{num} is now 7 days overdue."),
+    "14-days-after": ("Overdue: {label} #{num} (14 days) — please action", "{label} #{num} is now 14 days overdue — please arrange payment as soon as possible."),
+}
+
+
+def build_invoice_email_draft(db, company, doc, contact, reminder=False, stage=None):
     """The default to/subject/body for an invoice email — pulled out on its own so the compose
     modal can show (and let the user edit) exactly what would be sent, instead of it being
-    assembled invisibly inside send_invoice_email."""
+    assembled invisibly inside send_invoice_email. `stage` (one of CHASE_STAGE_COPY's keys)
+    overrides the plain reminder/non-reminder copy for the fixed auto-chase cadence; a manual
+    on-demand "send reminder" click still just uses the simple overdue wording via `reminder`."""
     label = {"invoice": "Invoice", "bill": "Bill", "credit_note": "Credit note", "quote": "Quote"}.get(doc["kind"], "Document")
     amount = from_pence(doc["amount_pence"])
     display_name = company["brand_display_name"] or company["name"]
@@ -4360,11 +4373,17 @@ def build_invoice_email_draft(db, company, doc, contact, reminder=False):
     if doc["portal_token"] and base_url:
         portal_link_line = f"\n\nView and pay online: {base_url}/portal/{doc['portal_token']}"
 
-    opening = (
-        f"This is a friendly reminder that {label.lower()} #{doc['id']:04d} is now overdue."
-        if reminder else f"{label} #{doc['id']:04d} from {display_name}."
-    )
-    subject = (f"Reminder: {label} #{doc['id']:04d} overdue" if reminder else f"{label} #{doc['id']:04d} from {display_name}")
+    if stage and stage in CHASE_STAGE_COPY:
+        subject_tpl, opening_tpl = CHASE_STAGE_COPY[stage]
+        num = f"{doc['id']:04d}"
+        subject = subject_tpl.format(label=label, num=num)
+        opening = opening_tpl.format(label=label, label_lower=label.lower(), num=num)
+    else:
+        opening = (
+            f"This is a friendly reminder that {label.lower()} #{doc['id']:04d} is now overdue."
+            if reminder else f"{label} #{doc['id']:04d} from {display_name}."
+        )
+        subject = (f"Reminder: {label} #{doc['id']:04d} overdue" if reminder else f"{label} #{doc['id']:04d} from {display_name}")
     body = (
         f"{opening}\n\n"
         f"Amount due: {amount:,.2f}\nDue date: {doc['due_date']}\n\n"
@@ -4373,7 +4392,7 @@ def build_invoice_email_draft(db, company, doc, contact, reminder=False):
     return {"to": contact["email"] or "", "subject": subject, "body": body}
 
 
-def send_invoice_email(db, company, doc, contact, reminder=False, overrides=None):
+def send_invoice_email(db, company, doc, contact, reminder=False, overrides=None, stage=None):
     """Shared send path for the manual "Email" button (now composed/edited via overrides), an
     overdue chase, and auto-sent recurring invoices — same attachment/portal-link logic either
     way, just a different (optionally user-edited) subject/body on top."""
@@ -4381,7 +4400,7 @@ def send_invoice_email(db, company, doc, contact, reminder=False, overrides=None
         raise ValueError(f'"{contact["name"]}" has no email address on file — add one in Contacts first.')
     doc = _ensure_portal_token(db, doc)
     pdf_bytes = generate_invoice_pdf(company, doc, contact, _load_line_items(db, doc["id"]))
-    draft = build_invoice_email_draft(db, company, doc, contact, reminder=reminder)
+    draft = build_invoice_email_draft(db, company, doc, contact, reminder=reminder, stage=stage)
     overrides = overrides or {}
     to_email = overrides.get("to") or draft["to"]
     subject = overrides.get("subject") or draft["subject"]
@@ -4639,20 +4658,30 @@ def run_notifications_for_company(db, company, force=False, fallback_email=None)
     Sends ONE digest email (not one per item) covering: invoices that went overdue, a VAT
     deadline within 7 days (only if HMRC is connected), and a nudge if no bank reconciliation
     has closed in 35+ days. Deduped per calendar day via notification_log. Also runs the
-    autonomous AR chase (at most once a week per invoice) if that's separately turned on."""
+    autonomous AR chase on a fixed cadence (3 days before due, the day it's due, 7 days after,
+    and 14 days after) if that's separately turned on — each stage fires exactly once per
+    invoice, not once per week, so a near-due reminder doesn't get lost behind a weekly bucket
+    that only ever looked at already-overdue invoices."""
     company_id = company["id"]
-    today = datetime.date.today().isoformat()
+    today_date = datetime.date.today()
+    today = today_date.isoformat()
     already_ran_today = company["last_notification_run"] == today
+
+    # Negative = days before due (a reminder ahead of the deadline); positive = days overdue.
+    CHASE_STAGES = {-3: "3-days-before", 0: "due-today", 7: "7-days-after", 14: "14-days-after"}
 
     chased = []
     if company["auto_chase_overdue_invoices"] and (force or not already_ran_today):
-        week_bucket = datetime.date.today().isocalendar()[1]
-        overdue_docs = db.execute(
-            "SELECT * FROM invoices_bills WHERE company_id = ? AND kind = 'invoice' AND status = 'sent' AND due_date < ?",
-            (company_id, today),
+        candidate_docs = db.execute(
+            "SELECT * FROM invoices_bills WHERE company_id = ? AND kind = 'invoice' AND status = 'sent'",
+            (company_id,),
         ).fetchall()
-        for doc in overdue_docs:
-            event_key = f"auto_chase:{doc['id']}:{week_bucket}"
+        for doc in candidate_docs:
+            days_overdue = (today_date - datetime.date.fromisoformat(doc["due_date"])).days
+            stage = CHASE_STAGES.get(days_overdue)
+            if stage is None:
+                continue
+            event_key = f"auto_chase:{doc['id']}:{stage}"
             if force:
                 db.execute("DELETE FROM notification_log WHERE company_id = ? AND event_key = ?", (company_id, event_key))
             # Claim the event BEFORE sending (not after) so two processes racing on the same
@@ -4667,7 +4696,7 @@ def run_notifications_for_company(db, company, force=False, fallback_email=None)
                 continue
             contact = db.execute("SELECT * FROM contacts WHERE id = ?", (doc["contact_id"],)).fetchone()
             try:
-                send_invoice_email(db, company, doc, contact, reminder=True)
+                send_invoice_email(db, company, doc, contact, reminder=True, stage=stage)
                 chased.append(doc["id"])
             except (ValueError, EmailNotConfigured, smtplib.SMTPException, OSError):
                 continue  # one customer's bad email address shouldn't block chasing the rest
