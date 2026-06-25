@@ -408,6 +408,9 @@ def init_db():
             transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
             payment_transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
             linked_doc_id INTEGER REFERENCES invoices_bills(id),
+            sent_at TEXT DEFAULT NULL,
+            opened_at TEXT DEFAULT NULL,
+            paid_at TEXT DEFAULT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -786,6 +789,16 @@ def init_db():
         db.execute("ALTER TABLE bank_lines ADD COLUMN currency TEXT DEFAULT NULL")
         db.execute("ALTER TABLE bank_lines ADD COLUMN foreign_amount_pence INTEGER DEFAULT NULL")
         db.execute("ALTER TABLE bank_lines ADD COLUMN exchange_rate REAL DEFAULT NULL")
+    doc_cols = {row[1] for row in db.execute("PRAGMA table_info(invoices_bills)").fetchall()}
+    if "sent_at" not in doc_cols:
+        db.execute("ALTER TABLE invoices_bills ADD COLUMN sent_at TEXT DEFAULT NULL")
+        db.execute("ALTER TABLE invoices_bills ADD COLUMN opened_at TEXT DEFAULT NULL")
+        db.execute("ALTER TABLE invoices_bills ADD COLUMN paid_at TEXT DEFAULT NULL")
+        # Backfill what we can for documents that already reached 'sent'/'paid' before this
+        # column existed — created_at is the closest approximation we have for sent_at (most
+        # invoices in this app are sent immediately after creation), and there's no better
+        # source for a retroactive paid_at than "we don't know," so that one stays NULL.
+        db.execute("UPDATE invoices_bills SET sent_at = created_at WHERE status IN ('sent', 'paid') AND sent_at IS NULL")
     bank_rec_cols = {row[1] for row in db.execute("PRAGMA table_info(bank_reconciliations)").fetchall()}
     if "currency" not in bank_rec_cols:
         db.execute("ALTER TABLE bank_reconciliations ADD COLUMN currency TEXT DEFAULT NULL")
@@ -3800,7 +3813,8 @@ def list_invoices_bills(company_id):
         "SELECT ib.id, ib.kind, ib.contact_id as contactId, c.name as contactName, ib.date, "
         "ib.due_date as dueDate, ib.desc, ib.amount_pence as amountPence, ib.account, ib.vat_rate as vatRate, "
         "ib.status, ib.transaction_id as transactionId, ib.payment_transaction_id as paymentTransactionId, "
-        "ib.linked_doc_id as linkedDocId, ib.portal_token as portalToken "
+        "ib.linked_doc_id as linkedDocId, ib.portal_token as portalToken, ib.created_at as createdAt, "
+        "ib.sent_at as sentAt, ib.opened_at as openedAt, ib.paid_at as paidAt "
         "FROM invoices_bills ib JOIN contacts c ON c.id = ib.contact_id "
         "WHERE ib.company_id = ? ORDER BY ib.due_date",
         (company_id,),
@@ -4022,7 +4036,11 @@ def _auto_send_generated_invoice(db, company_id, doc_id):
         vat_rate=doc["vat_rate"], vat_direction=vat_direction if doc["vat_rate"] else "",
     )
     portal_token = secrets.token_urlsafe(24) if doc["kind"] == "invoice" else None
-    db.execute("UPDATE invoices_bills SET status = 'sent', transaction_id = ?, portal_token = ? WHERE id = ?", (tx_id, portal_token, doc_id))
+    now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    db.execute(
+        "UPDATE invoices_bills SET status = 'sent', transaction_id = ?, portal_token = ?, sent_at = ? WHERE id = ?",
+        (tx_id, portal_token, now, doc_id),
+    )
     db.commit()
     contact = db.execute("SELECT * FROM contacts WHERE id = ?", (doc["contact_id"],)).fetchone()
     company = db.execute("SELECT * FROM companies WHERE id = ?", (company_id,)).fetchone()
@@ -4051,7 +4069,10 @@ def send_invoice_bill(company_id, doc_id):
         # A quote/estimate is purely informational — agree a price before any ledger effect —
         # so "send" just flips its status, with nothing posted. It becomes real money (and a
         # real posting) only via "Convert to invoice".
-        db.execute("UPDATE invoices_bills SET status = 'sent' WHERE id = ?", (doc_id,))
+        db.execute(
+            "UPDATE invoices_bills SET status = 'sent', sent_at = ? WHERE id = ?",
+            (datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z", doc_id),
+        )
         db.commit()
         return jsonify({"ok": True, "transactionId": None})
 
@@ -4091,9 +4112,10 @@ def send_invoice_bill(company_id, doc_id):
     # Aging Report and as payable via the /pay endpoint, neither of which is correct for it).
     new_status = "applied" if doc["kind"] == "credit_note" else "sent"
     portal_token = doc["portal_token"] or (secrets.token_urlsafe(24) if doc["kind"] == "invoice" else None)
+    now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
     db.execute(
-        "UPDATE invoices_bills SET status = ?, transaction_id = ?, portal_token = COALESCE(portal_token, ?) WHERE id = ?",
-        (new_status, tx_id, portal_token, doc_id),
+        "UPDATE invoices_bills SET status = ?, transaction_id = ?, portal_token = COALESCE(portal_token, ?), sent_at = ? WHERE id = ?",
+        (new_status, tx_id, portal_token, now, doc_id),
     )
     db.commit()
     return jsonify({"ok": True, "transactionId": tx_id})
@@ -4174,8 +4196,8 @@ def pay_invoice_bill(company_id, doc_id):
 
     cis_rate = round(cis_deduction / amount * 100, 2) if cis_deduction else None
     db.execute(
-        "UPDATE invoices_bills SET status = 'paid', payment_transaction_id = ?, cis_deduction_pence = ?, cis_rate = ? WHERE id = ?",
-        (tx_id, to_pence(cis_deduction), cis_rate, doc_id),
+        "UPDATE invoices_bills SET status = 'paid', payment_transaction_id = ?, cis_deduction_pence = ?, cis_rate = ?, paid_at = ? WHERE id = ?",
+        (tx_id, to_pence(cis_deduction), cis_rate, datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z", doc_id),
     )
     db.commit()
     return jsonify({"ok": True, "transactionId": tx_id})
@@ -6440,6 +6462,14 @@ def customer_portal(token):
     if doc is None:
         return "This link isn't valid — the invoice may have been deleted, or the link was mistyped.", 404
 
+    if doc["opened_at"] is None:
+        db.execute(
+            "UPDATE invoices_bills SET opened_at = ? WHERE id = ?",
+            (datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z", doc["id"]),
+        )
+        db.commit()
+        doc = db.execute("SELECT * FROM invoices_bills WHERE id = ?", (doc["id"],)).fetchone()
+
     amount = from_pence(doc["amount_pence"])
     display_name = company["brand_display_name"] or company["name"]
     is_paid = doc["status"] == "paid"
@@ -6531,7 +6561,10 @@ def stripe_webhook():
                     db, company_id, datetime.date.today().isoformat(), f'Stripe payment: {doc["desc"]}',
                     from_pence(doc["amount_pence"]), payment_account, debtors_account,
                 )
-                db.execute("UPDATE invoices_bills SET status = 'paid', payment_transaction_id = ? WHERE id = ?", (tx_id, doc["id"]))
+                db.execute(
+                    "UPDATE invoices_bills SET status = 'paid', payment_transaction_id = ?, paid_at = ? WHERE id = ?",
+                    (tx_id, datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z", doc["id"]),
+                )
                 db.commit()
             except LedgerError:
                 pass  # period locked or similar — the payment still succeeded at Stripe; leave the invoice as-is for manual reconciliation

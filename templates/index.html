@@ -5861,6 +5861,24 @@ async function deleteContact(id, name) {
 
 // ---------- Invoices & Bills ----------
 
+function fmtTimestamp(ts) {
+  if (!ts) return null;
+  const d = new Date(ts.endsWith('Z') ? ts : ts.replace(' ', 'T') + 'Z');
+  return d.toLocaleString(undefined, { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function invoiceTimelineTooltip(d) {
+  const stages = [
+    ['Drafted', d.createdAt],
+    ['Sent', d.sentAt],
+    ['Opened', d.openedAt],
+    ['Paid', d.paidAt],
+  ];
+  return stages
+    .map(([label, ts]) => `${label}: ${ts ? fmtTimestamp(ts) : 'not yet'}`)
+    .join('\n');
+}
+
 function renderInvoicesBills() {
   const body = document.getElementById('ib-body');
   if (!invoicesBills.length) { body.innerHTML = '<tr><td colspan="8" class="empty">No invoices or bills yet — create your first one in the form below.</td></tr>'; return; }
@@ -5889,7 +5907,7 @@ function renderInvoicesBills() {
       <td>${fmtDate(d.dueDate)}</td>
       <td>${escapeHtml(d.desc)}</td>
       <td class="num">${fmt(d.amount)}</td>
-      <td><span class="confidence" style="background:transparent; color:${statusColor[d.displayStatus] || 'var(--muted)'}; font-weight:700;">${d.displayStatus}</span></td>
+      <td><span class="confidence" style="background:transparent; color:${statusColor[d.displayStatus] || 'var(--muted)'}; font-weight:700; cursor:help;" title="${escapeHtml(invoiceTimelineTooltip(d))}">${d.displayStatus} 🕐</span></td>
       <td>${actions.join(' ')}</td>
     </tr>`;
   }).join('');
