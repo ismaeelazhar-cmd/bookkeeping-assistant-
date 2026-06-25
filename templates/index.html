@@ -2445,6 +2445,12 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function confidenceBadgeClass(score) {
+  if (score >= 0.85) return 'high';
+  if (score >= 0.6) return 'medium';
+  return 'low';
+}
+
 // Plain-English hover explanation for an accounting term — wraps `label` in a dotted-underline
 // span; hovering shows TERM_EXPLANATIONS[explanationKey] (or a custom string if passed
 // directly). Used wherever a term like "Credit" or "Trial Balance" appears with no other
@@ -3820,7 +3826,9 @@ function renderCandidates() {
       <td><input list="account-list" value="${escapeHtml(c.debit)}" onchange="updateCandidate('${c.id}','debit',this.value)"></td>
       <td><input list="account-list" value="${escapeHtml(c.credit)}" onchange="updateCandidate('${c.id}','credit',this.value)"></td>
       <td>
-        <span class="badge badge-${c.confidence}">${c.confidence === 'high' ? 'matched' : 'review'}</span>
+        ${c.confidenceScore != null
+          ? `<span class="badge badge-${confidenceBadgeClass(c.confidenceScore)}" title="How confident the AI was in this categorisation">${(c.confidenceScore * 100).toFixed(0)}% confidence</span>`
+          : `<span class="badge badge-${c.confidence}">${c.confidence === 'high' ? 'matched' : 'review'}</span>`}
         ${c.reason ? `<details style="display:inline-block; font-size:11px;"><summary style="cursor:pointer; display:inline; color:var(--muted);">Why?</summary><div style="max-width:220px; color:var(--muted); margin-top:2px;">${escapeHtml(c.reason)}</div></details>` : ''}
         <button class="btn-danger" onclick="removeCandidate('${c.id}')">✕</button>
       </td>
@@ -3858,7 +3866,8 @@ async function analyzeWithAI() {
     const result = await api(`/api/companies/${currentCompany.id}/ai-categorize`, { method: 'POST', body: JSON.stringify({ text }) });
     const newCandidates = result.candidates.map(it => ({
       id: Date.now() + Math.random().toString(36).slice(2, 7), date: it.date, desc: it.desc,
-      amount: Math.abs(parseFloat(it.amount)), debit: it.debit, credit: it.credit, confidence: 'high', selected: true
+      amount: Math.abs(parseFloat(it.amount)), debit: it.debit, credit: it.credit, confidence: 'high',
+      confidenceScore: it.confidence, selected: true
     }));
     candidates = candidates.concat(newCandidates);
     const queuedCount = result.queuedCount || 0;

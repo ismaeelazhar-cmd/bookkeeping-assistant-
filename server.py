@@ -3075,6 +3075,7 @@ Lines:
             )
             queued.append(it)
         else:
+            it["confidence"] = round(confidence, 2)
             ready.append(it)
     if queued:
         db.commit()
