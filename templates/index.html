@@ -495,6 +495,39 @@
         </div>
 
         <div class="panel" style="margin-top:20px;">
+          <h2>Accruals &amp; Prepayments</h2>
+          <div class="sub" style="margin-bottom:12px;">A guided month-end posting instead of a raw journal entry. An <b>accrual</b> records a cost you've incurred but haven't been billed for yet, and auto-reverses on the date you expect the real invoice. A <b>prepayment release</b> recognises one period's slice of something already paid for — no reversal needed.</div>
+          <table class="inbox">
+            <thead><tr><th>Kind</th><th>Description</th><th class="num">Amount</th><th>Posted</th><th>Reverses</th><th>Status</th><th></th></tr></thead>
+            <tbody id="accrual-prepayments-body"></tbody>
+          </table>
+          <div class="panel" style="background:var(--panel-soft); margin-top:14px; box-shadow:none;">
+            <h2 style="margin-top:0; font-size:13px;">Post an accrual or prepayment release</h2>
+            <div class="row2">
+              <div><label>Kind</label>
+                <select id="ap-kind" onchange="onApKindChange()">
+                  <option value="accrual">Accrual (cost incurred, no bill yet)</option>
+                  <option value="prepayment">Prepayment release (recognise one period of a prepaid asset)</option>
+                </select>
+              </div>
+              <div><label>Amount</label><input type="number" id="ap-amount" step="0.01" min="0" placeholder="0.00"></div>
+            </div>
+            <label>Description</label>
+            <input type="text" id="ap-desc" placeholder="e.g. Accrued electricity, June (estimate)">
+            <div class="row2">
+              <div><label>Expense account</label><select id="ap-expense-account"></select></div>
+              <div><label id="ap-bs-label">Liability account (Accruals)</label><select id="ap-bs-account"></select></div>
+            </div>
+            <div class="row2">
+              <div><label>Posting date</label><input type="date" id="ap-posting-date"></div>
+              <div id="ap-reversal-wrap"><label>Reversal date <span style="color:var(--muted); font-weight:400;">(expected real invoice date)</span></label><input type="date" id="ap-reversal-date"></div>
+            </div>
+            <button class="btn-primary" onclick="addAccrualPrepayment()">Post</button>
+            <div id="ap-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-top:20px;">
           <h2><span class="term-tip" data-tip="A list of every account and its balance, used to check the books actually balance — total debits should always equal total credits.">Trial Balance</span> <span class="pill" id="trial-status"></span></h2>
           <table class="trial">
             <thead><tr><td><b>Account</b></td><td class="num"><b>Total Debit</b></td><td class="num"><b>Total Credit</b></td><td class="num"><b>Balance</b></td></tr></thead>
@@ -2515,7 +2548,7 @@ function getAccountType(name) {
 function populateAccountSelects() {
   const sorted = [...chartAccounts].sort((a, b) => a.name.localeCompare(b.name));
   const optionsHtml = sorted.map(a => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)} (${a.code})</option>`).join('');
-  ['f-default-credit', 'brec-account', 'fa-account', 'ib-account', 'cj-pivot-account', 'po-account', 'budget-new-account', 'ri-account'].forEach(id => {
+  ['f-default-credit', 'brec-account', 'fa-account', 'ib-account', 'cj-pivot-account', 'po-account', 'budget-new-account', 'ri-account', 'ap-expense-account', 'ap-bs-account'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     const prev = el.value;
@@ -2572,6 +2605,7 @@ async function refreshAll() {
   await loadReconciliationHistory();
   await loadRecurringJournals();
   await loadRecurringInvoices();
+  await loadAccrualPrepayments();
   await loadCategorizationRules();
   renderCashFlowForecast();
   renderMonthlyPnL();
@@ -3913,6 +3947,67 @@ let recurringJournals = [];
 
 async function loadRecurringJournals() {
   recurringJournals = await api(`/api/companies/${currentCompany.id}/recurring-journals`);
+}
+
+// ---------- accruals & prepayments wizard ----------
+let accrualPrepayments = [];
+
+function onApKindChange() {
+  const isAccrual = document.getElementById('ap-kind').value === 'accrual';
+  document.getElementById('ap-bs-label').textContent = isAccrual ? 'Liability account (Accruals)' : 'Asset account (Prepayments)';
+  document.getElementById('ap-reversal-wrap').style.display = isAccrual ? '' : 'none';
+}
+
+async function loadAccrualPrepayments() {
+  accrualPrepayments = await api(`/api/companies/${currentCompany.id}/accrual-prepayments`);
+  renderAccrualPrepayments();
+}
+
+function renderAccrualPrepayments() {
+  const body = document.getElementById('accrual-prepayments-body');
+  if (!body) return;
+  body.innerHTML = accrualPrepayments.length ? accrualPrepayments.map(ap => `
+    <tr>
+      <td>${escapeHtml(ap.kind)}</td>
+      <td>${escapeHtml(ap.description)}</td>
+      <td class="num">${fmt(ap.amount)}</td>
+      <td>${fmtDate(ap.postingDate)}</td>
+      <td>${ap.reversalDate ? fmtDate(ap.reversalDate) : '—'}</td>
+      <td>${ap.kind === 'accrual' ? (ap.reversed ? 'Reversed' : 'Pending reversal') : 'Posted'}</td>
+      <td><button class="btn-danger" onclick="deleteAccrualPrepaymentUI(${ap.id})">✕</button></td>
+    </tr>`).join('') : '<tr><td colspan="7" class="empty">No accruals or prepayment releases posted yet.</td></tr>';
+}
+
+async function addAccrualPrepayment() {
+  const statusEl = document.getElementById('ap-status');
+  const body = {
+    kind: document.getElementById('ap-kind').value,
+    description: document.getElementById('ap-desc').value.trim(),
+    amount: parseFloat(document.getElementById('ap-amount').value),
+    expenseAccount: document.getElementById('ap-expense-account').value,
+    balanceSheetAccount: document.getElementById('ap-bs-account').value,
+    postingDate: document.getElementById('ap-posting-date').value,
+    reversalDate: document.getElementById('ap-reversal-date').value,
+  };
+  try {
+    await api(`/api/companies/${currentCompany.id}/accrual-prepayments`, { method: 'POST', body: JSON.stringify(body) });
+  } catch (e) {
+    statusEl.textContent = e.message;
+    statusEl.style.color = 'var(--danger)';
+    return;
+  }
+  statusEl.textContent = '';
+  document.getElementById('ap-desc').value = '';
+  document.getElementById('ap-amount').value = '';
+  document.getElementById('ap-reversal-date').value = '';
+  await loadAccrualPrepayments();
+  await loadTransactions();
+  showToast(`${body.kind === 'accrual' ? 'Accrual' : 'Prepayment release'} posted.`, 'success');
+}
+
+async function deleteAccrualPrepaymentUI(id) {
+  await api(`/api/companies/${currentCompany.id}/accrual-prepayments/${id}`, { method: 'DELETE' });
+  await loadAccrualPrepayments();
 }
 
 // ---------- recurring invoices/bills ----------

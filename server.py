@@ -634,6 +634,27 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- Guided month-end accrual/prepayment postings, instead of asking the user to build the
+        -- right journal by hand. An accrual posts (debit expense / credit liability) immediately
+        -- and schedules an automatic reversal so next period's real invoice isn't double-counted.
+        -- A prepayment release posts (debit expense / credit asset) immediately and has no
+        -- reversal — it's recognising one period's slice of an asset that's already on the books.
+        CREATE TABLE IF NOT EXISTS accrual_prepayments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            description TEXT NOT NULL,
+            amount_pence INTEGER NOT NULL,
+            expense_account TEXT NOT NULL,
+            balance_sheet_account TEXT NOT NULL,
+            posting_date TEXT NOT NULL,
+            reversal_date TEXT DEFAULT '',
+            initial_tx_id INTEGER,
+            reversal_tx_id INTEGER,
+            reversed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- Anything the system ingested but couldn't confidently categorise (AI suggestion below
         -- the company's confidence_threshold today; bank feed / PDF / CSV ingestion are documented
         -- trigger points for later, not yet wired) lands here instead of being silently posted or
@@ -5337,6 +5358,139 @@ def run_recurring_journals_for_company(db, company):
     return {"posted": posted, "skipped": skipped, "queued": queued}
 
 
+# ---------- accruals & prepayments wizard ----------
+
+def _serialize_accrual_prepayment(row):
+    d = dict(row)
+    d["amount"] = from_pence(d.pop("amount_pence"))
+    d["postingDate"] = d.pop("posting_date")
+    d["reversalDate"] = d.pop("reversal_date")
+    d["expenseAccount"] = d.pop("expense_account")
+    d["balanceSheetAccount"] = d.pop("balance_sheet_account")
+    d["initialTxId"] = d.pop("initial_tx_id")
+    d["reversalTxId"] = d.pop("reversal_tx_id")
+    d["reversed"] = bool(d["reversed"])
+    return d
+
+
+@app.route("/api/companies/<int:company_id>/accrual-prepayments", methods=["GET"])
+@login_required
+@company_required
+def list_accrual_prepayments(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM accrual_prepayments WHERE company_id = ? ORDER BY posting_date DESC",
+        (company_id,),
+    ).fetchall()
+    return jsonify([_serialize_accrual_prepayment(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/accrual-prepayments", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def create_accrual_prepayment(company_id):
+    """Guided month-end posting: the user picks a kind, an expense account, and a balance-sheet
+    account — this builds the correct journal instead of asking them to know which side is debit
+    and which is credit. An accrual (cost incurred, no bill yet) debits the expense and credits a
+    liability, then auto-reverses on reversal_date so the real invoice (when it lands) isn't
+    double-counted. A prepayment release (an asset already paid for, recognising one period's
+    slice of it as expense) debits the expense and credits the asset, with no reversal — there's
+    nothing to reverse, it's simply moving value off the balance sheet into the P&L."""
+    data = request.get_json(force=True) or {}
+    kind = data.get("kind")
+    description = (data.get("description") or "").strip()
+    amount = data.get("amount")
+    expense_account = data.get("expenseAccount")
+    balance_sheet_account = data.get("balanceSheetAccount")
+    posting_date = data.get("postingDate")
+    reversal_date = data.get("reversalDate") or ""
+
+    if kind not in ("accrual", "prepayment"):
+        return jsonify({"error": 'Kind must be "accrual" or "prepayment".'}), 400
+    if not all([description, posting_date, expense_account, balance_sheet_account]) or not amount or float(amount) <= 0:
+        return jsonify({"error": "Description, posting date, both accounts, and a positive amount are required."}), 400
+    if kind == "accrual" and not reversal_date:
+        return jsonify({"error": "An accrual needs a reversal date — the date the real invoice is expected so this estimate gets backed out."}), 400
+
+    db = get_db()
+    expense_type = get_account_by_name(db, company_id, expense_account)
+    bs_type = get_account_by_name(db, company_id, balance_sheet_account)
+    if expense_type and expense_type["type"] not in ("expense", "cogs"):
+        return jsonify({"error": f'"{expense_account}" isn\'t an expense account — pick the cost this relates to.'}), 400
+    if bs_type:
+        expected = ("current_liability", "noncurrent_liability") if kind == "accrual" else ("current_asset", "noncurrent_asset")
+        if bs_type["type"] not in expected:
+            wanted = "a liability (what you owe)" if kind == "accrual" else "an asset (what's already been paid for)"
+            return jsonify({"error": f'"{balance_sheet_account}" should be {wanted} for a {kind}.'}), 400
+
+    try:
+        tx_id = post_ledger_transaction(db, company_id, posting_date, description, amount, expense_account, balance_sheet_account)
+    except LedgerError as e:
+        return jsonify({"error": e.message}), e.status
+
+    cur = db.execute(
+        "INSERT INTO accrual_prepayments (company_id, kind, description, amount_pence, expense_account, "
+        "balance_sheet_account, posting_date, reversal_date, initial_tx_id) VALUES (?,?,?,?,?,?,?,?,?)",
+        (company_id, kind, description, to_pence(amount), expense_account, balance_sheet_account,
+         posting_date, reversal_date, tx_id),
+    )
+    db.commit()
+    return jsonify({"id": cur.lastrowid, "initialTransactionId": tx_id})
+
+
+@app.route("/api/companies/<int:company_id>/accrual-prepayments/<int:ap_id>", methods=["DELETE"])
+@login_required
+@company_required
+@write_required
+def delete_accrual_prepayment(company_id, ap_id):
+    db = get_db()
+    db.execute("DELETE FROM accrual_prepayments WHERE id = ? AND company_id = ?", (ap_id, company_id))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+def run_accrual_reversals_for_company(db, company):
+    """Auto-reverses every due, not-yet-reversed accrual — flips the original expense/liability
+    journal so the estimate cancels out once the real invoice is expected to have landed. Mirrors
+    run_recurring_journals_for_company: runs from both the on-demand route and the scheduler."""
+    company_id = company["id"]
+    g.company = company
+    today = datetime.date.today().isoformat()
+    due = db.execute(
+        "SELECT * FROM accrual_prepayments WHERE company_id = ? AND kind = 'accrual' AND reversed = 0 "
+        "AND reversal_date != '' AND reversal_date <= ?",
+        (company_id, today),
+    ).fetchall()
+
+    reversed_rows, skipped = [], []
+    for ap in due:
+        try:
+            tx_id = post_ledger_transaction(
+                db, company_id, ap["reversal_date"], f"Reversal: {ap['description']}",
+                from_pence(ap["amount_pence"]), ap["balance_sheet_account"], ap["expense_account"],
+            )
+        except LedgerError as e:
+            skipped.append({"accrualPrepaymentId": ap["id"], "reason": e.message})
+            continue
+        db.execute(
+            "UPDATE accrual_prepayments SET reversed = 1, reversal_tx_id = ? WHERE id = ?",
+            (tx_id, ap["id"]),
+        )
+        reversed_rows.append({"accrualPrepaymentId": ap["id"], "transactionId": tx_id})
+
+    db.commit()
+    return {"reversed": reversed_rows, "skipped": skipped}
+
+
+@app.route("/api/companies/<int:company_id>/accrual-prepayments/run-reversals", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def run_accrual_reversals_route(company_id):
+    return jsonify(run_accrual_reversals_for_company(get_db(), g.company))
+
+
 @app.route("/api/companies/<int:company_id>/period-close", methods=["POST"])
 @login_required
 @company_required
@@ -6084,6 +6238,10 @@ def _scheduler_tick():
                     run_recurring_invoices_for_company(conn, company)
                 except Exception:
                     logging.exception("Scheduler: recurring invoices failed for company %s", company["id"])
+                try:
+                    run_accrual_reversals_for_company(conn, company)
+                except Exception:
+                    logging.exception("Scheduler: accrual reversals failed for company %s", company["id"])
                 try:
                     run_notifications_for_company(conn, company)
                 except Exception:
