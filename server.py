@@ -901,6 +901,13 @@ def init_db():
         db.execute("ALTER TABLE companies ADD COLUMN ai_provider TEXT DEFAULT 'claude'")
         db.execute("ALTER TABLE companies ADD COLUMN ollama_url TEXT DEFAULT 'http://localhost:11434'")
         db.execute("ALTER TABLE companies ADD COLUMN ollama_model TEXT DEFAULT 'llama3.2-vision'")
+    if "entity_type" not in company_cols:
+        # Legal/entity structure — a separate dimension from business_type (which is an industry
+        # template for chart-of-accounts seeding). Drives which features even make sense to show:
+        # a sole trader can't issue dividends or file a CT600, a limited company doesn't file an
+        # SA103. Defaults to limited_company (the fuller feature set) rather than sole_trader, so
+        # existing companies don't suddenly lose a feature they were already using.
+        db.execute("ALTER TABLE companies ADD COLUMN entity_type TEXT DEFAULT 'limited_company'")
     if "stripe_secret_key" not in company_cols:
         # #7: Stripe Checkout, called directly via its REST API (urllib, no SDK dependency) —
         # encrypted at rest like every other API credential here. Needs the user's own Stripe
@@ -1516,7 +1523,7 @@ def list_companies():
         "smtp_host, smtp_port, smtp_username, smtp_password, smtp_from_email, notifications_enabled, notify_email, "
         "brand_logo_path, brand_color, brand_display_name, brand_address, brand_payment_terms, brand_bank_details, brand_template, ai_provider, ollama_url, ollama_model, "
         "stripe_secret_key, stripe_publishable_key, stripe_webhook_secret, stripe_payment_account, auto_chase_overdue_invoices, "
-        "business_type, show_cis_tools, show_fx_tools, tour_completed, "
+        "business_type, entity_type, show_cis_tools, show_fx_tools, tour_completed, "
         "'owner' as permission "
         "FROM companies WHERE user_id = ? "
         "UNION ALL "
@@ -1526,7 +1533,7 @@ def list_companies():
         "c.smtp_host, c.smtp_port, c.smtp_username, c.smtp_password, c.smtp_from_email, c.notifications_enabled, c.notify_email, "
         "c.brand_logo_path, c.brand_color, c.brand_display_name, c.brand_address, c.brand_payment_terms, c.brand_bank_details, c.brand_template, c.ai_provider, c.ollama_url, c.ollama_model, "
         "c.stripe_secret_key, c.stripe_publishable_key, c.stripe_webhook_secret, c.stripe_payment_account, c.auto_chase_overdue_invoices, "
-        "c.business_type, c.show_cis_tools, c.show_fx_tools, c.tour_completed, "
+        "c.business_type, c.entity_type, c.show_cis_tools, c.show_fx_tools, c.tour_completed, "
         "cm.permission "
         "FROM companies c JOIN company_members cm ON cm.company_id = c.id "
         "WHERE cm.user_id = ? "
@@ -1562,10 +1569,12 @@ def create_company():
     business_type = data.get("businessType") or "general"
     if business_type not in CHART_TEMPLATES:
         business_type = "general"
+    entity_type = data.get("entityType") if data.get("entityType") in ("sole_trader", "limited_company", "charity") else "limited_company"
     db = get_db()
     cur = db.execute(
-        "INSERT INTO companies (user_id, name, business_type, show_cis_tools) VALUES (?, ?, ?, ?)",
-        (session["user_id"], name, business_type, 1 if business_type == "construction" else 0),
+        "INSERT INTO companies (user_id, name, business_type, entity_type, show_cis_tools, fund_accounting_enabled) VALUES (?, ?, ?, ?, ?, ?)",
+        (session["user_id"], name, business_type, entity_type, 1 if business_type == "construction" else 0,
+         1 if entity_type == "charity" else 0),
     )
     company_id = cur.lastrowid
     seed_default_chart(db, company_id, business_type)
@@ -1595,9 +1604,9 @@ def create_company():
     db.commit()
     return jsonify({
         "id": company_id, "name": name, "default_credit_account": "", "ai_api_key_set": False,
-        "locked_until": "", "period_start_date": "", "fund_accounting_enabled": 0,
+        "locked_until": "", "period_start_date": "", "fund_accounting_enabled": 1 if entity_type == "charity" else 0,
         "plaid_client_id": "", "plaid_secret_set": False, "plaid_env": "sandbox", "permission": "owner",
-        "confidence_threshold": 0.7, "cost_centres_enabled": 0,
+        "confidence_threshold": 0.7, "cost_centres_enabled": 0, "business_type": business_type, "entity_type": entity_type,
     })
 
 
@@ -1677,6 +1686,13 @@ def update_settings(company_id):
             "UPDATE companies SET ai_provider = ?, ollama_url = ?, ollama_model = ? WHERE id = ?",
             (provider, data.get("ollamaUrl") or "http://localhost:11434", data.get("ollamaModel") or "llama3.2-vision", company_id),
         )
+    if "entityType" in data:
+        entity_type = data.get("entityType") if data.get("entityType") in ("sole_trader", "limited_company", "charity") else "limited_company"
+        db.execute("UPDATE companies SET entity_type = ? WHERE id = ?", (entity_type, company_id))
+        # Charity implies fund accounting by default — the user can still turn it back off
+        # explicitly via the fund accounting toggle, this is just a sensible starting point.
+        if entity_type == "charity" and not data.get("fundAccountingEnabled") and not g.company["fund_accounting_enabled"]:
+            db.execute("UPDATE companies SET fund_accounting_enabled = 1 WHERE id = ?", (company_id,))
     if data.get("plaidSecret"):
         db.execute("UPDATE companies SET plaid_secret = ? WHERE id = ?", (encrypt_secret(data["plaidSecret"]), company_id))
     elif data.get("clearPlaidSecret"):

@@ -697,7 +697,7 @@
       <div id="pr-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" id="dividend-panel" style="margin-top:20px;">
       <h2>Dividend</h2>
       <div class="sub" style="margin-bottom:12px;">Posts DR Retained Earnings against CR Dividends Payable (declared, not yet paid) or CR a bank account (paid immediately). Blocked if the amount exceeds distributable reserves (cumulative net profit, less dividends already posted) — posting an unlawful dividend has real consequences for directors.</div>
       <div class="row2">
@@ -1294,10 +1294,10 @@
         <div><label>Capital allowances claimed</label><input type="number" id="tax-capital-allowances" step="0.01" min="0" placeholder="0.00" oninput="renderTaxComputation()"></div>
         <div><label>Tax rate</label>
           <select id="tax-rate" onchange="renderTaxComputation()">
-            <option value="19">19% — UK small profits rate</option>
-            <option value="25">25% — UK main rate</option>
-            <option value="20">20% — basic rate (sole trader income tax, rough estimate)</option>
-            <option value="40">40% — higher rate (sole trader income tax, rough estimate)</option>
+            <option value="19" data-entity="limited_company">19% — UK small profits rate</option>
+            <option value="25" data-entity="limited_company">25% — UK main rate</option>
+            <option value="20" data-entity="sole_trader">20% — basic rate (sole trader income tax, rough estimate)</option>
+            <option value="40" data-entity="sole_trader">40% — higher rate (sole trader income tax, rough estimate)</option>
           </select>
         </div>
       </div>
@@ -1311,7 +1311,7 @@
       <table class="trial" id="cis-table" style="margin-top:10px;"></table>
     </div>
 
-    <div class="panel" style="margin-top:20px;">
+    <div class="panel" id="sa103-panel" style="margin-top:20px;">
       <h2>Self Assessment Helper (SA103)</h2>
       <div class="sub" style="margin-bottom:12px;">For sole traders: maps P&amp;L accounts to SA103 self-employment boxes by keyword, using the Financial Statements period above. A starting point for your return, not a substitute for checking each account lands in the right box.</div>
       <button class="btn-secondary" onclick="renderSelfAssessment()">Map to SA103</button>
@@ -1461,6 +1461,14 @@
       <h2 style="margin-top:24px;">Books Start Date</h2>
       <div class="sub" style="margin-bottom:8px;">The date your Opening Balances are "as of" — shown as the brought-forward point on the Cash Flow Statement.</div>
       <input type="date" id="f-period-start" oninput="saveSettings()">
+
+      <h2 style="margin-top:24px;">Legal Structure</h2>
+      <div class="sub" style="margin-bottom:8px;">Drives which features show up: dividends only make sense for a limited company, the SA103 helper only for a sole trader. Choosing "Charity" turns fund accounting on by default (you can still turn it back off below).</div>
+      <select id="f-entity-type" onchange="saveSettings(); applyEntityTypeVisibility();">
+        <option value="limited_company">Limited company</option>
+        <option value="sole_trader">Sole trader</option>
+        <option value="charity">Charity</option>
+      </select>
 
       <h2 style="margin-top:24px;">Fund Accounting</h2>
       <div class="sub" style="margin-bottom:8px;">For charities/nonprofits: tag transactions with a fund (restricted/designated/unrestricted) and get a Statement of Financial Activities. Off by default — turning it on changes nothing else about how this company works.</div>
@@ -1823,6 +1831,12 @@ ollama pull llama3.2-vision</pre>
       <input type="text" id="ob-company-name" placeholder="e.g. Example Trading Ltd">
       <label>What kind of business is this?</label>
       <div id="ob-business-types" style="display:flex; flex-direction:column; gap:6px; margin-top:4px;"></div>
+      <label style="margin-top:14px;">Legal structure <span style="color:var(--muted); font-weight:400;">(drives which features you see — dividends only show for a limited company, SA103 only for a sole trader, fund accounting turns on by default for a charity)</span></label>
+      <select id="ob-entity-type" onchange="obEntityType=this.value">
+        <option value="limited_company" selected>Limited company</option>
+        <option value="sole_trader">Sole trader</option>
+        <option value="charity">Charity</option>
+      </select>
     </div>
 
     <div id="ob-step-2" style="display:none;">
@@ -2344,10 +2358,13 @@ async function loadFirmHealthSummaries() {
 let obStep = 1;
 let obTemplates = [];
 let obBusinessType = 'general';
+let obEntityType = 'limited_company';
 
 async function openOnboarding() {
   obStep = 1;
   obBusinessType = 'general';
+  obEntityType = 'limited_company';
+  document.getElementById('ob-entity-type').value = 'limited_company';
   document.getElementById('ob-company-name').value = '';
   document.getElementById('ob-balance-rows').innerHTML = '';
   document.getElementById('ob-error').textContent = '';
@@ -2413,7 +2430,7 @@ async function onboardingNext() {
   try {
     const company = await api('/api/companies', {
       method: 'POST',
-      body: JSON.stringify({ name, businessType: obBusinessType, openingBalances: onboardingBalanceRows() }),
+      body: JSON.stringify({ name, businessType: obBusinessType, entityType: obEntityType, openingBalances: onboardingBalanceRows() }),
     });
     closeOnboarding();
     await loadCompanies();
@@ -2447,6 +2464,8 @@ async function openCompany(id) {
   onAiProviderChange();
   document.getElementById('f-locked-until').value = currentCompany.locked_until || '';
   document.getElementById('f-period-start').value = currentCompany.period_start_date || '';
+  document.getElementById('f-entity-type').value = currentCompany.entity_type || 'limited_company';
+  applyEntityTypeVisibility();
   document.getElementById('f-fund-accounting').checked = !!currentCompany.fund_accounting_enabled;
   toggleFundAccountingUI();
   document.getElementById('f-cost-centres').checked = !!currentCompany.cost_centres_enabled;
@@ -2520,6 +2539,7 @@ function buildSettingsPayload(extra) {
     defaultCreditAccount: document.getElementById('f-default-credit').value.trim(),
     lockedUntil: document.getElementById('f-locked-until').value,
     periodStartDate: document.getElementById('f-period-start').value,
+    entityType: document.getElementById('f-entity-type').value,
     fundAccountingEnabled: document.getElementById('f-fund-accounting').checked,
     costCentresEnabled: document.getElementById('f-cost-centres').checked,
     confidenceThreshold: parseFloat(document.getElementById('f-confidence-threshold').value),
@@ -2583,6 +2603,14 @@ async function saveSettings() {
   currentCompany.default_credit_account = document.getElementById('f-default-credit').value.trim();
   currentCompany.locked_until = document.getElementById('f-locked-until').value;
   currentCompany.period_start_date = document.getElementById('f-period-start').value;
+  const switchingToCharity = document.getElementById('f-entity-type').value === 'charity'
+    && currentCompany.entity_type !== 'charity' && !document.getElementById('f-fund-accounting').checked;
+  currentCompany.entity_type = document.getElementById('f-entity-type').value;
+  if (switchingToCharity) {
+    document.getElementById('f-fund-accounting').checked = true;
+    toggleFundAccountingUI();
+  }
+  applyEntityTypeVisibility();
   currentCompany.fund_accounting_enabled = document.getElementById('f-fund-accounting').checked;
   currentCompany.show_cis_tools = document.getElementById('show-cis-tools').checked;
   applyCisVisibility();
@@ -7280,6 +7308,31 @@ function applyFxVisibility() {
   const show = hasForeignCurrency || !!currentCompany.show_fx_tools;
   const panel = document.getElementById('fx-revaluation-panel');
   if (panel) panel.style.display = show ? '' : 'none';
+}
+
+// Sole trader: no dividends (only a company can issue one — sole traders take drawings),
+// no corporation tax rates (income tax rates instead). Limited company: no SA103 (that's a
+// personal self-employment return, not what a company files). Charity: same as sole trader for
+// dividends (a charity can't pay shareholders), and the income-tax-rate framing doesn't really
+// fit either, so it gets the same trimmed tax-rate list as sole trader (closer of the two).
+function applyEntityTypeVisibility() {
+  if (!currentCompany) return;
+  const entityType = currentCompany.entity_type || 'limited_company';
+  const dividendPanel = document.getElementById('dividend-panel');
+  if (dividendPanel) dividendPanel.style.display = entityType === 'limited_company' ? '' : 'none';
+  const sa103Panel = document.getElementById('sa103-panel');
+  if (sa103Panel) sa103Panel.style.display = entityType === 'limited_company' ? 'none' : '';
+  const taxRateSelect = document.getElementById('tax-rate');
+  if (taxRateSelect) {
+    const wantEntity = entityType === 'limited_company' ? 'limited_company' : 'sole_trader';
+    let firstVisible = null;
+    [...taxRateSelect.options].forEach(opt => {
+      const matches = opt.dataset.entity === wantEntity;
+      opt.hidden = !matches;
+      if (matches && !firstVisible) firstVisible = opt.value;
+    });
+    if (taxRateSelect.selectedOptions[0]?.hidden && firstVisible) taxRateSelect.value = firstVisible;
+  }
 }
 
 function toggleAccountantTools() {
