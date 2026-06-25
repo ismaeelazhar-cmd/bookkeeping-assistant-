@@ -3110,7 +3110,7 @@ function renderTrialBalance() {
     const bal = debitTotal - creditTotal;
     const balLabel = bal === 0 ? '—' : (bal > 0 ? `Dr ${fmt(bal)}` : `Cr ${fmt(-bal)}`);
     return `<tr><td><a href="#" onclick="drillDownAccount('${name.replace(/'/g, "\\'")}'); return false;" style="color:var(--text); text-decoration:underline dotted;">${escapeHtml(name)}</a></td><td class="num" style="color:var(--debit)">${fmt(debitTotal)}</td><td class="num" style="color:var(--credit)">${fmt(creditTotal)}</td><td class="num">${balLabel}</td></tr>`;
-  }).join('') || `<tr><td colspan="4" class="empty">No transactions yet.</td></tr>`;
+  }).join('') || `<tr><td colspan="4" class="empty">No transactions yet — post one in the New Transaction form, or paste lines into the Movements Inbox.</td></tr>`;
   const statusEl = document.getElementById('trial-status');
   if (!names.length) { statusEl.textContent = ''; return; }
   const balanced = Math.abs(debitSum - creditSum) < 0.005;
@@ -4833,7 +4833,7 @@ function renderRatios() {
   if (!table) return;
   const accounts = buildAccounts();
   const names = Object.keys(accounts);
-  if (!names.length) { table.innerHTML = '<tr><td class="empty">No transactions yet.</td></tr>'; return; }
+  if (!names.length) { table.innerHTML = '<tr><td class="empty">No transactions yet — post one in the New Transaction form, or paste lines into the Movements Inbox.</td></tr>'; return; }
 
   let currentAssets = 0, quickAssets = 0, currentLiabilities = 0, revenue = 0, cogs = 0, expenses = 0;
   let receivables = 0, payables = 0;
@@ -4901,7 +4901,7 @@ function rerenderDrillDown() {
   const accounts = buildAccounts();
   const acc = accounts[name];
   const body = document.getElementById('drilldown-body');
-  if (!acc) { body.innerHTML = '<tr><td colspan="5" class="empty">No transactions.</td></tr>'; return; }
+  if (!acc) { body.innerHTML = '<tr><td colspan="5" class="empty">No transactions posted to this account yet.</td></tr>'; return; }
 
   const isDebitNormal = DEBIT_NORMAL[getAccountType(name)];
   const allLines = [
@@ -5502,7 +5502,7 @@ function renderStockItems() {
       <td class="num">${fmt(i.averageUnitCost)}</td>
       <td class="num">${fmt(i.valueOnHand)}</td>
       <td><button class="btn-danger" onclick="deleteStockItem(${i.id}, '${i.name.replace(/'/g, "\\'")}')">✕</button></td>
-    </tr>`).join('') : '<tr><td colspan="5" class="empty">No stock items yet.</td></tr>';
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">No stock items yet — add one below to start tracking quantity and cost on hand.</td></tr>';
 }
 
 function populateStockItemSelects() {
@@ -5786,7 +5786,7 @@ async function deleteContact(id, name) {
 
 function renderInvoicesBills() {
   const body = document.getElementById('ib-body');
-  if (!invoicesBills.length) { body.innerHTML = '<tr><td colspan="8" class="empty">No invoices or bills yet.</td></tr>'; return; }
+  if (!invoicesBills.length) { body.innerHTML = '<tr><td colspan="8" class="empty">No invoices or bills yet — create your first one in the form below.</td></tr>'; return; }
   const statusColor = { draft: 'var(--muted)', sent: 'var(--debit)', overdue: 'var(--bad)', paid: 'var(--good)' };
   body.innerHTML = invoicesBills.map(d => {
     const actions = [];
@@ -6539,7 +6539,7 @@ function renderBankConnections() {
         <button class="btn-secondary" onclick="syncBankConnection(${c.id})">Sync now</button>
         <button class="btn-danger" onclick="deleteBankConnection(${c.id})">✕</button>
       </span>
-    </div>`).join('') : '<div class="empty">No bank accounts connected yet.</div>';
+    </div>`).join('') : '<div class="empty">No bank accounts connected yet — click "Connect a bank" above to link one via Plaid, or import statement lines manually under Bank Reconciliation.</div>';
 }
 
 async function connectBankAccount() {
@@ -6637,7 +6637,7 @@ function renderFunds() {
       <td>${escapeHtml(f.name)}</td>
       <td>${escapeHtml(f.type)}</td>
       <td><button class="btn-danger" onclick="deleteFund(${f.id}, '${f.name.replace(/'/g, "\\'")}')">✕</button></td>
-    </tr>`).join('') : '<tr><td colspan="3" class="empty">No funds yet.</td></tr>';
+    </tr>`).join('') : '<tr><td colspan="3" class="empty">No funds yet — add one below to start tagging restricted/unrestricted income and spend.</td></tr>';
 }
 
 async function addFund() {
@@ -6780,7 +6780,7 @@ function renderDeptPnl() {
     }
   }
   const names = Object.keys(byDept).sort();
-  if (!names.length) { table.innerHTML = '<tr><td class="empty">No transactions yet.</td></tr>'; return; }
+  if (!names.length) { table.innerHTML = '<tr><td class="empty">No department-tagged transactions yet — tag a transaction with a department in the New Transaction form to see it broken down here.</td></tr>'; return; }
   let html = '<thead><tr><td><b>Department</b></td><td class="num"><b>Revenue</b></td><td class="num"><b>COGS</b></td><td class="num"><b>Expenses</b></td><td class="num"><b>Net</b></td></tr></thead><tbody>';
   for (const name of names) {
     const b = byDept[name];
