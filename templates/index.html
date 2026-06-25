@@ -901,7 +901,7 @@
         <h2 style="margin-top:0; font-size:13px;">Create a new invoice / bill</h2>
         <div class="sub" style="margin-bottom:12px;">Starts as a draft (no ledger effect). "Send" posts it to Trade Receivables/Payables (with VAT if set). "Mark Paid" settles it against the account you choose.</div>
         <div class="row2">
-          <div><label>Kind</label><select id="ib-kind" onchange="toggleCreditNoteLinkField()"><option value="invoice">Invoice (to a customer)</option><option value="bill">Bill (from a supplier)</option><option value="credit_note">Credit note (return/correction)</option></select></div>
+          <div><label>Kind</label><select id="ib-kind" onchange="toggleCreditNoteLinkField()"><option value="invoice">Invoice (to a customer)</option><option value="bill">Bill (from a supplier)</option><option value="credit_note">Credit note (return/correction)</option><option value="quote">Quote / estimate (no ledger effect yet)</option></select></div>
           <div><label>Contact</label><select id="ib-contact" onchange="applyContactPaymentTerms()"></select></div>
         </div>
         <div id="ib-link-row" style="display:none;">
@@ -5420,8 +5420,13 @@ function renderInvoicesBills() {
   const statusColor = { draft: 'var(--muted)', sent: 'var(--debit)', overdue: 'var(--bad)', paid: 'var(--good)' };
   body.innerHTML = invoicesBills.map(d => {
     const actions = [];
-    if (d.status === 'draft') actions.push(`<button class="btn-secondary" onclick="sendInvoiceBill(${d.id})">Send</button>`);
-    if (d.status === 'sent') actions.push(`<button class="btn-secondary" onclick="payInvoiceBill(${d.id})">Mark paid</button>`);
+    if (d.kind === 'quote') {
+      if (d.status === 'draft') actions.push(`<button class="btn-secondary" onclick="sendInvoiceBill(${d.id})">Send</button>`);
+      if (d.status !== 'converted') actions.push(`<button class="btn-primary" style="margin:0;" onclick="convertQuoteToInvoice(${d.id})">Convert to invoice</button>`);
+    } else {
+      if (d.status === 'draft') actions.push(`<button class="btn-secondary" onclick="sendInvoiceBill(${d.id})">Send</button>`);
+      if (d.status === 'sent') actions.push(`<button class="btn-secondary" onclick="payInvoiceBill(${d.id})">Mark paid</button>`);
+    }
     if (d.status !== 'draft') {
       actions.push(`<a href="/api/companies/${currentCompany.id}/invoices-bills/${d.id}/pdf" target="_blank" class="btn-secondary" style="display:inline-block; text-decoration:none;">PDF</a>`);
       actions.push(`<button class="btn-secondary" onclick="emailInvoiceBill(${d.id})">Email</button>`);
@@ -5429,7 +5434,7 @@ function renderInvoicesBills() {
       if (d.kind === 'invoice' && d.displayStatus === 'overdue') actions.push(`<button class="btn-secondary" style="color:var(--bad);" onclick="remindInvoiceBill(${d.id})">Remind</button>`);
     }
     actions.push(`<button class="btn-danger" onclick="deleteInvoiceBill(${d.id})">✕</button>`);
-    const kindLabel = { invoice: 'Invoice', bill: 'Bill', credit_note: 'Credit note' }[d.kind] || d.kind;
+    const kindLabel = { invoice: 'Invoice', bill: 'Bill', credit_note: 'Credit note', quote: 'Quote' }[d.kind] || d.kind;
     return `<tr>
       <td>${escapeHtml(kindLabel)}</td>
       <td>${escapeHtml(d.contactName)}</td>
@@ -5607,6 +5612,15 @@ async function payInvoiceBill(id) {
 async function deleteInvoiceBill(id) {
   if (!(await confirmAction('Delete this invoice/bill? Any linked ledger transactions will be voided, not left orphaned.'))) return;
   await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}`, { method: 'DELETE' });
+  await refreshAll();
+}
+
+async function convertQuoteToInvoice(id) {
+  if (!(await confirmAction('Convert this quote to a real invoice? This creates a new draft invoice with today\'s date — the quote itself is unaffected except being marked converted.', 'Convert'))) return;
+  try {
+    await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/convert-to-invoice`, { method: 'POST' });
+    showToast('Converted — a new draft invoice has been created.', 'success');
+  } catch (e) { showToast(e.message, 'error'); return; }
   await refreshAll();
 }
 

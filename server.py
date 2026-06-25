@@ -3379,7 +3379,7 @@ def generate_invoice_pdf(company_row, doc_row, contact_row, line_items=None):
 
     display_name = company_row["brand_display_name"] or company_row["name"]
     pdf.set_font("Helvetica", "B", 18)
-    label = {"invoice": "INVOICE", "bill": "BILL", "credit_note": "CREDIT NOTE"}.get(doc_row["kind"], "DOCUMENT")
+    label = {"invoice": "INVOICE", "bill": "BILL", "credit_note": "CREDIT NOTE", "quote": "QUOTE"}.get(doc_row["kind"], "DOCUMENT")
     pdf.cell(0, 10, f"{label} #{doc_row['id']:04d}", ln=True, align="R")
 
     pdf.set_font("Helvetica", "B", 14)
@@ -3518,8 +3518,8 @@ def create_invoice_bill(company_id):
         data.get("kind"), data.get("contactId"), data.get("date"), data.get("dueDate"),
         data.get("desc"), data.get("amount"), data.get("account"),
     )
-    if kind not in ("invoice", "bill", "credit_note"):
-        return jsonify({"error": "kind must be 'invoice', 'bill', or 'credit_note'."}), 400
+    if kind not in ("invoice", "bill", "credit_note", "quote"):
+        return jsonify({"error": "kind must be 'invoice', 'bill', 'credit_note', or 'quote'."}), 400
 
     line_items, line_items_total_pence = None, None
     raw_line_items = data.get("lineItems")
@@ -3546,7 +3546,7 @@ def create_invoice_bill(company_id):
             return jsonify({"error": "A credit note must link to an existing invoice or bill."}), 400
         effective_kind = linked_doc["kind"]  # a credit note against an invoice behaves like a (reversed) invoice, etc.
 
-    account = resolve_account(db, company_id, account, "revenue" if effective_kind == "invoice" else "expense")
+    account = resolve_account(db, company_id, account, "revenue" if effective_kind in ("invoice", "quote") else "expense")
     cur = db.execute(
         "INSERT INTO invoices_bills (company_id, kind, contact_id, date, due_date, desc, amount_pence, account, vat_rate, linked_doc_id) "
         "VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -3724,6 +3724,14 @@ def send_invoice_bill(company_id, doc_id):
     if doc["status"] != "draft":
         return jsonify({"error": "Only a draft can be sent."}), 400
 
+    if doc["kind"] == "quote":
+        # A quote/estimate is purely informational — agree a price before any ledger effect —
+        # so "send" just flips its status, with nothing posted. It becomes real money (and a
+        # real posting) only via "Convert to invoice".
+        db.execute("UPDATE invoices_bills SET status = 'sent' WHERE id = ?", (doc_id,))
+        db.commit()
+        return jsonify({"ok": True, "transactionId": None})
+
     amount = from_pence(doc["amount_pence"])
     effective_kind = doc["kind"]
     if doc["kind"] == "credit_note":
@@ -3786,6 +3794,8 @@ def pay_invoice_bill(company_id, doc_id):
         return jsonify({"error": "Not found."}), 404
     if doc["status"] != "sent":
         return jsonify({"error": "Only a sent invoice/bill can be marked paid."}), 400
+    if doc["kind"] == "quote":
+        return jsonify({"error": "A quote has no ledger effect to settle — convert it to an invoice first."}), 400
 
     amount = from_pence(doc["amount_pence"])
     if cis_deduction < 0 or cis_deduction > amount:
@@ -3846,6 +3856,46 @@ def pay_invoice_bill(company_id, doc_id):
     )
     db.commit()
     return jsonify({"ok": True, "transactionId": tx_id})
+
+
+@app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>/convert-to-invoice", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def convert_quote_to_invoice(company_id, doc_id):
+    """A quote becomes real money only here — copies its contact/desc/amount/account/VAT/line
+    items into a brand-new draft invoice (today's date, due date from the contact's payment
+    terms if set, else 30 days), and marks the quote 'converted' so it stops showing as an open
+    quote without pretending it was deleted."""
+    db = get_db()
+    quote = db.execute(
+        "SELECT * FROM invoices_bills WHERE id = ? AND company_id = ? AND kind = 'quote'", (doc_id, company_id)
+    ).fetchone()
+    if quote is None:
+        return jsonify({"error": "Quote not found."}), 404
+    if quote["status"] == "converted":
+        return jsonify({"error": "This quote has already been converted to an invoice."}), 400
+
+    contact = db.execute("SELECT payment_terms_days FROM contacts WHERE id = ?", (quote["contact_id"],)).fetchone()
+    terms_days = (contact["payment_terms_days"] if contact else None) or 30
+    issue_date = datetime.date.today().isoformat()
+    due_date = (datetime.date.today() + datetime.timedelta(days=terms_days)).isoformat()
+
+    cur = db.execute(
+        "INSERT INTO invoices_bills (company_id, kind, contact_id, date, due_date, desc, amount_pence, account, vat_rate, linked_doc_id) "
+        "VALUES (?, 'invoice', ?, ?, ?, ?, ?, ?, ?, ?)",
+        (company_id, quote["contact_id"], issue_date, due_date, quote["desc"], quote["amount_pence"], quote["account"], quote["vat_rate"], quote["id"]),
+    )
+    new_doc_id = cur.lastrowid
+    line_items = _load_line_items(db, quote["id"])
+    if line_items:
+        db.executemany(
+            "INSERT INTO invoice_line_items (doc_id, description, quantity, unit_price_pence, sort_order) VALUES (?,?,?,?,?)",
+            [(new_doc_id, li["description"], li["quantity"], li["unit_price_pence"], i) for i, li in enumerate(line_items)],
+        )
+    db.execute("UPDATE invoices_bills SET status = 'converted' WHERE id = ?", (doc_id,))
+    db.commit()
+    return jsonify({"id": new_doc_id})
 
 
 @app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>", methods=["DELETE"])
@@ -3978,7 +4028,7 @@ def build_invoice_email_draft(db, company, doc, contact, reminder=False):
     """The default to/subject/body for an invoice email — pulled out on its own so the compose
     modal can show (and let the user edit) exactly what would be sent, instead of it being
     assembled invisibly inside send_invoice_email."""
-    label = {"invoice": "Invoice", "bill": "Bill", "credit_note": "Credit note"}.get(doc["kind"], "Document")
+    label = {"invoice": "Invoice", "bill": "Bill", "credit_note": "Credit note", "quote": "Quote"}.get(doc["kind"], "Document")
     amount = from_pence(doc["amount_pence"])
     display_name = company["brand_display_name"] or company["name"]
 
@@ -4407,7 +4457,7 @@ def aging_report(company_id):
         "SELECT ib.id, ib.kind, ib.contact_id as contactId, c.name as contactName, ib.due_date as dueDate, "
         "ib.amount_pence as amountPence "
         "FROM invoices_bills ib JOIN contacts c ON c.id = ib.contact_id "
-        "WHERE ib.company_id = ? AND ib.status = 'sent'",
+        "WHERE ib.company_id = ? AND ib.status = 'sent' AND ib.kind IN ('invoice', 'bill')",
         (company_id,),
     ).fetchall()
     # applied credit notes reduce what's actually still outstanding on the invoice/bill they're
