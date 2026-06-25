@@ -4388,6 +4388,27 @@ function removeWhatIfScenario(index) {
   renderCashFlowForecast();
 }
 
+// Average days late per customer, computed from their own paid-invoice history (due date vs
+// the date the settling payment transaction actually landed) — not a guess, and not applied
+// to a customer with no payment history yet (defaults to 0 days, i.e. trust the due date until
+// proven otherwise). Bills/suppliers aren't included: the forecast asks "when will I actually
+// receive this", and you control when you pay a bill, not when a customer pays you.
+function computeCustomerPaymentLagDays() {
+  const lagsByContact = {};
+  for (const d of invoicesBills) {
+    if (d.kind !== 'invoice' || d.status !== 'paid' || !d.paymentTransactionId) continue;
+    const paymentTx = transactions.find(t => t.id === d.paymentTransactionId);
+    if (!paymentTx) continue;
+    const lagDays = (new Date(paymentTx.date) - new Date(d.dueDate)) / 86400000;
+    (lagsByContact[d.contactId] = lagsByContact[d.contactId] || []).push(lagDays);
+  }
+  const avgByContact = {};
+  for (const [contactId, lags] of Object.entries(lagsByContact)) {
+    avgByContact[contactId] = Math.round(lags.reduce((s, v) => s + v, 0) / lags.length);
+  }
+  return avgByContact;
+}
+
 function renderCashFlowForecast() {
   const el = document.getElementById('forecast-bars');
   if (!el) return;
@@ -4397,7 +4418,9 @@ function renderCashFlowForecast() {
 
   const today = new Date().toISOString().slice(0, 10);
   const addDays = n => { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+  const addDaysTo = (dateStr, n) => { const d = new Date(dateStr); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
   const windows = [30, 60, 90];
+  const paymentLagByContact = computeCustomerPaymentLagDays();
 
   const listEl = document.getElementById('whatif-list');
   if (listEl) {
@@ -4419,8 +4442,17 @@ function renderCashFlowForecast() {
 
   const rows = windows.map(days => {
     const horizon = addDays(days);
-    const receivables = invoicesBills
-      .filter(d => d.kind === 'invoice' && d.status === 'sent' && d.dueDate >= today && d.dueDate <= horizon)
+    const sentInvoices = invoicesBills.filter(d => d.kind === 'invoice' && d.status === 'sent');
+    const receivables = sentInvoices
+      .filter(d => d.dueDate >= today && d.dueDate <= horizon)
+      .reduce((s, d) => s + d.amount, 0);
+    // "Expected" shifts each invoice's date by that customer's own historical average lag —
+    // a customer who's always 10 days late is still projected as 10 days late, not on-time.
+    const receivablesExpected = sentInvoices
+      .filter(d => {
+        const expectedDate = addDaysTo(d.dueDate, paymentLagByContact[d.contactId] || 0);
+        return expectedDate >= today && expectedDate <= horizon;
+      })
       .reduce((s, d) => s + d.amount, 0);
     const payables = invoicesBills
       .filter(d => d.kind === 'bill' && d.status === 'sent' && d.dueDate >= today && d.dueDate <= horizon)
@@ -4429,12 +4461,13 @@ function renderCashFlowForecast() {
       .filter(rj => rj.nextDue >= today && rj.nextDue <= horizon)
       .reduce((s, rj) => s + recurringCashEffect(rj), 0);
     const scenarioEffect = whatIfScenarios.filter(s => s.days <= days).reduce((s, sc) => s + sc.amount, 0);
-    const projected = currentCash + receivables - payables + recurring;
+    const projected = currentCash + receivablesExpected - payables + recurring;
+    const projectedContractual = currentCash + receivables - payables + recurring;
     const projectedWithScenario = projected + scenarioEffect;
-    return { days, receivables, payables, recurring, projected, projectedWithScenario, scenarioEffect };
+    return { days, receivables, receivablesExpected, payables, recurring, projected, projectedContractual, projectedWithScenario, scenarioEffect };
   });
 
-  const maxAbs = Math.max(Math.abs(currentCash), ...rows.map(r => Math.max(Math.abs(r.projected), Math.abs(r.projectedWithScenario))), 1);
+  const maxAbs = Math.max(Math.abs(currentCash), ...rows.map(r => Math.max(Math.abs(r.projected), Math.abs(r.projectedContractual), Math.abs(r.projectedWithScenario))), 1);
   const barWidth = v => `${Math.min(100, Math.abs(v) / maxAbs * 100)}%`;
   const barRow = (label, value, color) => `
     <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
@@ -4446,11 +4479,14 @@ function renderCashFlowForecast() {
     </div>`;
 
   const hasScenario = whatIfScenarios.length > 0;
+  const hasLagData = Object.keys(paymentLagByContact).length > 0;
   el.innerHTML = barRow('Today', currentCash) + rows.map(r =>
-    barRow(`${r.days} days`, r.projected) + (hasScenario ? barRow(`+ scenario`, r.projectedWithScenario, 'var(--accent)') : '')
+    barRow(`${r.days}d expected`, r.projected) +
+    (hasLagData ? barRow(`${r.days}d contractual`, r.projectedContractual, 'var(--muted)') : '') +
+    (hasScenario ? barRow(`+ scenario`, r.projectedWithScenario, 'var(--accent)') : '')
   ).join('') +
-    `<div class="sub" style="margin-top:6px;">Receivables/payables/recurring-journal commitments due within each window: ` +
-    rows.map(r => `${r.days}d → +${fmt(r.receivables)} / -${fmt(r.payables)} / ${r.recurring >= 0 ? '+' : ''}${fmt(r.recurring)} recurring`).join(' · ') + `</div>`;
+    `<div class="sub" style="margin-top:6px;">${hasLagData ? '"Expected" shifts each invoice by that customer\'s own average payment lag; "contractual" uses the due date as-is. ' : ''}Receivables/payables/recurring-journal commitments due within each window: ` +
+    rows.map(r => `${r.days}d → +${fmt(r.receivablesExpected)} / -${fmt(r.payables)} / ${r.recurring >= 0 ? '+' : ''}${fmt(r.recurring)} recurring`).join(' · ') + `</div>`;
 }
 
 function renderComparativePeriod() {
