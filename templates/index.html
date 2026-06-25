@@ -669,6 +669,37 @@
         </div>
 
         <div class="panel" style="margin-top:20px;" data-advanced="1">
+          <h2>Recurring Journals</h2>
+          <div class="sub" style="margin-bottom:12px;">For anything on a fixed cadence that isn't an invoice — rent, loan interest, subscriptions. Posts itself automatically once due (checked hourly); "Run due now" triggers that same check immediately instead of waiting.</div>
+          <table class="inbox">
+            <thead><tr><th>Label</th><th>Frequency</th><th>Next due</th><th class="num">Amount</th><th>Debit</th><th>Credit</th><th></th></tr></thead>
+            <tbody id="recurring-journals-body"></tbody>
+          </table>
+          <div class="panel" style="background:var(--panel-soft); margin-top:14px; box-shadow:none;">
+            <h2 style="margin-top:0; font-size:13px;">Set up a recurring journal</h2>
+            <label>Label</label>
+            <input type="text" id="rj-label" placeholder="e.g. Office rent">
+            <div class="row2">
+              <div><label>Debit</label><select id="rj-debit"></select></div>
+              <div><label>Credit</label><select id="rj-credit"></select></div>
+            </div>
+            <div class="row2">
+              <div><label>Amount</label><input type="number" id="rj-amount" step="0.01" min="0" placeholder="0.00"></div>
+              <div><label>Frequency</label>
+                <select id="rj-frequency"><option value="weekly">Weekly</option><option value="monthly" selected>Monthly</option><option value="quarterly">Quarterly</option><option value="annually">Annually</option></select>
+              </div>
+            </div>
+            <div class="row2">
+              <div><label>First due date</label><input type="date" id="rj-next-due"></div>
+              <div><label>Ends <span style="color:var(--muted); font-weight:400;">(optional)</span></label><input type="date" id="rj-end-date"></div>
+            </div>
+            <button class="btn-primary" onclick="addRecurringJournal()">Set up recurring journal</button>
+            <button class="btn-secondary" onclick="runRecurringJournalsNow()">Run due now</button>
+            <div id="rj-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-top:20px;" data-advanced="1">
           <h2><span class="term-tip" data-tip="A list of every account and its balance, used to check the books actually balance — total debits should always equal total credits.">Trial Balance</span> <span class="pill" id="trial-status"></span></h2>
           <table class="trial">
             <thead><tr><td><b>Account</b></td><td class="num"><b>Total Debit</b></td><td class="num"><b>Total Credit</b></td><td class="num"><b>Balance</b></td></tr></thead>
@@ -2986,7 +3017,7 @@ function getAccountType(name) {
 function populateAccountSelects() {
   const sorted = [...chartAccounts].sort((a, b) => a.name.localeCompare(b.name));
   const optionsHtml = sorted.map(a => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)} (${a.code})</option>`).join('');
-  ['f-default-credit', 'brec-account', 'fa-account', 'ib-account', 'cj-pivot-account', 'po-account', 'budget-new-account', 'ri-account', 'ap-expense-account', 'ap-bs-account'].forEach(id => {
+  ['f-default-credit', 'brec-account', 'fa-account', 'ib-account', 'cj-pivot-account', 'po-account', 'budget-new-account', 'ri-account', 'ap-expense-account', 'ap-bs-account', 'rj-debit', 'rj-credit'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     const prev = el.value;
@@ -4587,6 +4618,63 @@ let recurringJournals = [];
 
 async function loadRecurringJournals() {
   recurringJournals = await api(`/api/companies/${currentCompany.id}/recurring-journals`);
+  renderRecurringJournals();
+}
+
+function renderRecurringJournals() {
+  const body = document.getElementById('recurring-journals-body');
+  if (!body) return;
+  body.innerHTML = recurringJournals.length ? recurringJournals.map(rj => `
+    <tr>
+      <td>${escapeHtml(rj.label)}</td>
+      <td>${escapeHtml(rj.frequency)}</td>
+      <td>${fmtDate(rj.nextDue)}</td>
+      <td class="num">${fmt(rj.amount)}</td>
+      <td>${escapeHtml(rj.debit)}</td>
+      <td>${escapeHtml(rj.credit)}</td>
+      <td><button class="btn-danger" onclick="deleteRecurringJournalUI(${rj.id})">✕</button></td>
+    </tr>`).join('') : '<tr><td colspan="7" class="empty">No recurring journals set up yet.</td></tr>';
+}
+
+async function addRecurringJournal() {
+  const statusEl = document.getElementById('rj-status');
+  const body = {
+    label: document.getElementById('rj-label').value.trim(),
+    debit: document.getElementById('rj-debit').value,
+    credit: document.getElementById('rj-credit').value,
+    amount: parseFloat(document.getElementById('rj-amount').value),
+    frequency: document.getElementById('rj-frequency').value,
+    nextDue: document.getElementById('rj-next-due').value,
+    endDate: document.getElementById('rj-end-date').value,
+  };
+  try {
+    await api(`/api/companies/${currentCompany.id}/recurring-journals`, { method: 'POST', body: JSON.stringify(body) });
+  } catch (e) {
+    statusEl.textContent = e.message;
+    statusEl.style.color = 'var(--danger)';
+    return;
+  }
+  statusEl.textContent = '';
+  document.getElementById('rj-label').value = '';
+  document.getElementById('rj-amount').value = '';
+  document.getElementById('rj-end-date').value = '';
+  await loadRecurringJournals();
+  showToast('Recurring journal set up.', 'success');
+}
+
+async function deleteRecurringJournalUI(id) {
+  if (!(await confirmAction('Delete this recurring journal? Already-posted entries are not affected.', 'Delete'))) return;
+  await api(`/api/companies/${currentCompany.id}/recurring-journals/${id}`, { method: 'DELETE' });
+  await loadRecurringJournals();
+}
+
+async function runRecurringJournalsNow() {
+  const statusEl = document.getElementById('rj-status');
+  statusEl.textContent = 'Checking for due journals…';
+  const result = await api(`/api/companies/${currentCompany.id}/period-close`, { method: 'POST' });
+  statusEl.textContent = `Posted ${result.posted.length}, queued ${result.queued.length}, skipped ${result.skipped.length} (locked period).`;
+  await loadRecurringJournals();
+  await refreshAll();
 }
 
 // ---------- accruals & prepayments wizard ----------
