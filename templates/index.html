@@ -1135,6 +1135,17 @@
     </div>
 
     <div class="panel" style="margin-top:20px;">
+      <h2>Month-End Narrative</h2>
+      <div class="sub" style="margin-bottom:12px;">An AI-written summary of what moved this month vs last month — biggest cost increase, notable revenue change, one takeaway. Computed from real period-over-period figures; Claude only writes it up. Needs a Claude API key set under Settings → AI settings.</div>
+      <div class="row2" style="align-items:end;">
+        <div><label>Month</label><input type="month" id="narrative-period"></div>
+        <button class="btn-primary" onclick="generateMonthEndNarrative()">Generate</button>
+      </div>
+      <div id="narrative-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+      <div id="narrative-body" style="margin-top:10px; white-space:pre-wrap;"></div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
       <div class="report-actions">
         <button class="btn-secondary" onclick="exportCSV()">Export CSV</button>
         <button class="btn-secondary" onclick="emailJournalCSV()">✉ Email CSV</button>
@@ -4584,6 +4595,25 @@ function accountNetBalance(acc, type) {
 function lastTxDate(acc) {
   const dates = [...acc.debits, ...acc.credits].map(t => t.date);
   return dates.length ? dates.reduce((max, d) => d > max ? d : max, dates[0]) : '';
+}
+
+// ---------- Month-end AI narrative ----------
+
+async function generateMonthEndNarrative() {
+  const period = document.getElementById('narrative-period').value;
+  const statusEl = document.getElementById('narrative-status');
+  const bodyEl = document.getElementById('narrative-body');
+  if (!period) { statusEl.textContent = 'Pick a month first.'; return; }
+  if (!currentCompany.ai_api_key_set) { statusEl.textContent = 'Add a Claude API key under Settings → AI settings first.'; return; }
+  statusEl.textContent = 'Comparing this month against last month…';
+  bodyEl.textContent = '';
+  try {
+    const result = await api(`/api/companies/${currentCompany.id}/month-end-narrative`, { method: 'POST', body: JSON.stringify({ period }) });
+    statusEl.textContent = '';
+    bodyEl.textContent = result.narrative;
+  } catch (e) {
+    statusEl.textContent = e.message;
+  }
 }
 
 // ---------- Month-end checklist ----------

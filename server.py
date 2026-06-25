@@ -4,6 +4,7 @@ import secrets
 import json
 import logging
 import datetime
+import calendar
 from pathlib import Path
 from urllib.parse import urlparse
 from functools import wraps
@@ -3338,7 +3339,64 @@ Ledger CSV:
     except urllib.error.URLError as e:
         return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
 
-    return jsonify({"answer": answer.strip(), "transactionsConsidered": min(len(rows), MAX_ROWS), "truncated": truncated})
+@app.route("/api/companies/<int:company_id>/month-end-narrative", methods=["POST"])
+@login_required
+@company_required
+@rate_limit(max_attempts=20, window_seconds=3600)
+def month_end_narrative(company_id):
+    """"Your biggest cost increase this month was X, up Y%" — a short AI-written summary instead
+    of making the user read the P&L themselves to spot what moved. Computed from real
+    period-over-period deltas (this month vs the prior month) server-side, then handed to Claude
+    just to write it up in plain English — the model isn't asked to compute the numbers itself,
+    only to narrate ones already computed, so it can't quietly get the arithmetic wrong."""
+    data = request.get_json(silent=True) or {}
+    period = data.get("period") or datetime.date.today().strftime("%Y-%m")
+    if not re.match(r"^\d{4}-\d{2}$", period):
+        return jsonify({"error": "Period must be in YYYY-MM format."}), 400
+    api_key = decrypt_secret(g.company["ai_api_key"])
+    if not api_key:
+        return jsonify({"error": "No Claude API key set for this company — add one in settings."}), 400
+
+    year, month = map(int, period.split("-"))
+    from_date = datetime.date(year, month, 1)
+    to_date = datetime.date(year, month, calendar.monthrange(year, month)[1])
+    prev_to = from_date - datetime.timedelta(days=1)
+    prev_from = prev_to.replace(day=1)
+
+    db = get_db()
+    current = compute_period_pnl_by_account(db, company_id, from_date.isoformat(), to_date.isoformat())
+    previous = compute_period_pnl_by_account(db, company_id, prev_from.isoformat(), prev_to.isoformat())
+    if not current:
+        return jsonify({"error": f"No transactions in {period} to summarise."}), 400
+
+    all_accounts = sorted(set(current) | set(previous))
+    rows = []
+    for acc in all_accounts:
+        cur_bal = current.get(acc, {}).get("balance", 0)
+        prev_bal = previous.get(acc, {}).get("balance", 0)
+        acc_type = current.get(acc, {}).get("type") or previous.get(acc, {}).get("type")
+        pct_change = ((cur_bal - prev_bal) / prev_bal * 100) if prev_bal else None
+        rows.append(f"{acc} ({acc_type}): this month {cur_bal:.2f}, last month {prev_bal:.2f}"
+                    + (f", change {pct_change:+.0f}%" if pct_change is not None else ", new this month" if cur_bal else ""))
+
+    prompt = f"""You are a financial assistant writing a short month-end summary for a small UK business owner.
+Period: {period}. Below is each revenue/cost-of-sales/expense account's total for this month vs the prior month.
+
+{chr(10).join(rows)}
+
+Write a plain-English summary, 3-5 sentences, highlighting: the biggest cost increase (by amount or % — use
+judgement on which is more meaningful), any notable revenue change, and one brief overall takeaway. Cite actual
+figures from the data above — do not invent numbers. If nothing material changed, say so plainly rather than
+manufacturing a story."""
+
+    try:
+        narrative = call_claude(api_key, [{"role": "user", "content": prompt}], max_tokens=512)
+    except urllib.error.HTTPError as e:
+        return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
+    except urllib.error.URLError as e:
+        return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
+
+    return jsonify({"narrative": narrative.strip(), "period": period})
 
 
 # ---------- attachments ----------
@@ -5057,6 +5115,31 @@ def cis_statements(company_id):
         d["net"] = round(gross - cis, 2)
         out.append(d)
     return jsonify(out)
+
+
+def compute_period_pnl_by_account(db, company_id, from_date, to_date):
+    """Revenue/COGS/expense balance per account for one date range (a flow, not a cumulative
+    balance sheet figure) — the building block for period-over-period comparisons like the
+    month-end AI narrative, without needing the client to have already computed it."""
+    types_by_name = {r["name"]: r["type"] for r in db.execute(
+        "SELECT name, type FROM accounts WHERE company_id = ?", (company_id,)
+    ).fetchall()}
+    by_account = {}
+    for tx in db.execute(
+        "SELECT amount_pence, debit, credit FROM transactions WHERE company_id = ? AND voided_at IS NULL "
+        "AND date >= ? AND date <= ?",
+        (company_id, from_date, to_date),
+    ).fetchall():
+        amount = from_pence(tx["amount_pence"])
+        for account, side in ((tx["debit"], "debit"), (tx["credit"], "credit")):
+            t = types_by_name.get(account)
+            if t not in ("revenue", "cogs", "expense"):
+                continue
+            debit_normal = t in ("cogs", "expense")
+            sign = 1 if (side == "debit") == debit_normal else -1
+            by_account.setdefault(account, {"type": t, "balance": 0})
+            by_account[account]["balance"] += sign * amount
+    return by_account
 
 
 def compute_company_financials(db, company_id):
