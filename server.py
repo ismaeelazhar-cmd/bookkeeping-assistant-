@@ -5662,15 +5662,37 @@ def delete_fixed_asset(company_id, asset_id):
     return jsonify({"ok": True})
 
 
+def calculate_monthly_depreciation_charge(asset, accumulated_so_far):
+    """One month's depreciation charge for a fixed asset, in pounds — straight-line (even split
+    of cost-minus-residual over useful life) or reducing-balance (a fixed annual % of the
+    asset's CURRENT net book value, applied monthly), capped so a charge can never take the
+    asset below its residual value even on the last run. The one place this calculation lives —
+    both run_depreciation (single-asset, on demand) and the bulk "run for this month" UI action
+    call this instead of each keeping their own copy that could quietly drift apart."""
+    cost = from_pence(asset["cost_pence"])
+    residual = from_pence(asset["residual_value_pence"])
+    depreciable = cost - residual
+    remaining = depreciable - accumulated_so_far
+    if remaining <= 0.005:
+        return 0.0
+    if asset["method"] == "reducing_balance":
+        annual_rate = 1 / asset["useful_life_years"]
+        charge = (cost - accumulated_so_far) * (annual_rate / 12)
+    else:
+        charge = depreciable / asset["useful_life_years"] / 12
+    return round(min(charge, remaining), 2)
+
+
 @app.route("/api/companies/<int:company_id>/fixed-assets/<int:asset_id>/run-depreciation", methods=["POST"])
 @login_required
 @company_required
 @write_required
 def run_depreciation(company_id, asset_id):
-    """Posts one straight-line monthly depreciation charge for a single asset: Dr depreciation
-    account / Cr accumulated depreciation account, tagged with the given (or today's) date. Capped
-    at the asset's remaining depreciable amount (cost - residual - depreciation already posted) so
-    repeated runs can't depreciate an asset below its residual value."""
+    """Posts one month's depreciation charge for a single asset: Dr depreciation account / Cr
+    accumulated depreciation account, tagged with the given (or today's) date. Capped at the
+    asset's remaining depreciable amount so repeated runs can't depreciate it below residual
+    value, and skips silently (rather than double-posting) if this exact month's charge for this
+    asset has already been posted."""
     db = get_db()
     asset = db.execute(
         "SELECT * FROM fixed_assets WHERE id = ? AND company_id = ?", (asset_id, company_id)
@@ -5679,28 +5701,36 @@ def run_depreciation(company_id, asset_id):
         return jsonify({"error": "Not found."}), 404
     data = request.get_json(force=True) or {}
     run_date = data.get("date") or datetime.date.today().isoformat()
+    if asset["purchase_date"] > run_date:
+        return jsonify({"error": f"{asset['name']} wasn't owned yet as of {run_date}."}), 400
 
-    depreciable_pence = asset["cost_pence"] - asset["residual_value_pence"]
-    already_posted = db.execute(
+    month_label = run_date[:7]
+    desc = f"Depreciation — {month_label} — {asset['name']}"
+    already_this_month = db.execute(
+        "SELECT 1 FROM transactions WHERE company_id = ? AND desc = ? AND voided_at IS NULL",
+        (company_id, desc),
+    ).fetchone()
+    if already_this_month:
+        return jsonify({"error": f"{asset['name']} already has a depreciation entry posted for {month_label}.", "alreadyPosted": True}), 400
+
+    already_posted_pence = db.execute(
         "SELECT COALESCE(SUM(amount_pence), 0) as total FROM transactions "
         "WHERE company_id = ? AND credit = ? AND voided_at IS NULL",
         (company_id, asset["accum_account"]),
     ).fetchone()["total"]
-    remaining_pence = depreciable_pence - already_posted
-    charge_pence = round(depreciable_pence / asset["useful_life_years"] / 12)
-    charge_pence = max(0, min(charge_pence, remaining_pence))
-    if charge_pence <= 0:
-        return jsonify({"error": "This asset is already fully depreciated."}), 400
+    charge = calculate_monthly_depreciation_charge(asset, from_pence(already_posted_pence))
+    if charge <= 0:
+        return jsonify({"error": f"{asset['name']} is already fully depreciated."}), 400
 
     try:
         tx_id = post_ledger_transaction(
-            db, company_id, run_date, f"Depreciation — {asset['name']}", from_pence(charge_pence),
+            db, company_id, run_date, desc, charge,
             asset["depreciation_account"], asset["accum_account"],
         )
     except LedgerError as e:
         return jsonify({"error": e.message}), e.status
     db.commit()
-    return jsonify({"transactionId": tx_id, "amount": from_pence(charge_pence)})
+    return jsonify({"transactionId": tx_id, "amount": charge})
 
 
 # ---------- full data export ----------
@@ -6216,36 +6246,6 @@ def create_reconciliation(company_id):
         )
     db.commit()
     return jsonify({"id": cur.lastrowid})
-
-
-@app.route("/api/companies/<int:company_id>/reconciliations/<int:rec_id>/clear-line", methods=["PUT"])
-@login_required
-@company_required
-@write_required
-def clear_reconciliation_line(company_id, rec_id):
-    db = get_db()
-    rec = db.execute(
-        "SELECT id FROM bank_reconciliations WHERE id = ? AND company_id = ?", (rec_id, company_id)
-    ).fetchone()
-    if rec is None:
-        return jsonify({"error": "Reconciliation not found."}), 404
-    data = request.get_json(force=True) or {}
-    line_id = data.get("lineId")
-    tx_id = data.get("transactionId")
-    if not line_id:
-        return jsonify({"error": "lineId is required."}), 400
-    if tx_id is not None:
-        tx = db.execute(
-            "SELECT id FROM transactions WHERE id = ? AND company_id = ?", (tx_id, company_id)
-        ).fetchone()
-        if tx is None:
-            return jsonify({"error": "Transaction not found."}), 404
-    db.execute(
-        "UPDATE bank_lines SET matched_transaction_id = ? WHERE id = ? AND company_id = ?",
-        (tx_id, line_id, company_id),
-    )
-    db.commit()
-    return jsonify({"ok": True})
 
 
 @app.route("/api/companies/<int:company_id>/reconciliations/<int:rec_id>/close", methods=["POST"])

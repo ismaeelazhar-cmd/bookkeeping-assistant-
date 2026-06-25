@@ -6338,45 +6338,33 @@ function endOfMonth(monthStr) {
 }
 
 async function runDepreciation() {
+  // Calls the per-asset run-depreciation endpoint once per asset instead of recomputing the
+  // straight-line/reducing-balance math here in JS — that calculation now lives in exactly one
+  // place (calculate_monthly_depreciation_charge in server.py), not duplicated and at risk of
+  // quietly drifting from what the backend would compute if called directly.
   const monthStr = document.getElementById('fa-run-month').value;
   const statusEl = document.getElementById('fa-run-status');
   if (!monthStr) { statusEl.textContent = 'Pick a month first.'; return; }
   const runDate = endOfMonth(monthStr);
 
-  const items = [];
+  let posted = 0;
   const skippedAlready = [];
+  const otherSkips = [];
   for (const a of fixedAssets) {
-    if (a.purchaseDate > runDate) continue; // not owned yet
-    const desc = `Depreciation — ${monthStr} — ${a.name}`;
-    if (transactions.some(t => t.desc === desc)) { skippedAlready.push(a.name); continue; }
-
-    const depreciable = a.cost - (a.residualValue || 0);
-    const accumSoFar = accumulatedDepreciation(a.accumAccount);
-    const remaining = depreciable - accumSoFar;
-    if (remaining <= 0.005) continue; // fully depreciated
-
-    let charge;
-    if (a.method === 'reducing_balance') {
-      const annualRate = 1 / a.usefulLifeYears;
-      charge = (a.cost - accumSoFar) * (annualRate / 12);
-    } else {
-      charge = depreciable / a.usefulLifeYears / 12;
+    try {
+      await api(`/api/companies/${currentCompany.id}/fixed-assets/${a.id}/run-depreciation`, {
+        method: 'POST', body: JSON.stringify({ date: runDate }),
+      });
+      posted++;
+    } catch (e) {
+      if (/already has a depreciation entry/.test(e.message)) skippedAlready.push(a.name);
+      else otherSkips.push(`${a.name}: ${e.message}`);
     }
-    charge = Math.min(charge, remaining);
-    if (charge <= 0.005) continue;
-
-    items.push({ date: runDate, desc, amount: charge, debit: a.depreciationAccount, credit: a.accumAccount, taxYear: '' });
   }
 
-  if (!items.length) {
-    statusEl.textContent = skippedAlready.length ? `Already run for ${skippedAlready.join(', ')}.` : 'Nothing to depreciate for that month.';
-    return;
-  }
-
-  const result = await api(`/api/companies/${currentCompany.id}/transactions/bulk`, { method: 'POST', body: JSON.stringify(items) });
-  statusEl.textContent = `Posted depreciation for ${result.inserted} asset(s).` +
-    (skippedAlready.length ? ` Skipped ${skippedAlready.join(', ')} (already run for this month).` : '') +
-    (result.skippedLocked ? ` ${result.skippedLocked} fell in a locked period.` : '');
+  statusEl.textContent = (posted ? `Posted depreciation for ${posted} asset(s).` : 'Nothing to depreciate for that month.') +
+    (skippedAlready.length ? ` Already run for ${skippedAlready.join(', ')}.` : '') +
+    (otherSkips.length ? ` ${otherSkips.join('; ')}` : '');
   await refreshAll();
 }
 
