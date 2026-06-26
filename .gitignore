@@ -8,4 +8,5 @@ uploads/
 backups/
 .secret_key
 .encryption_key
+.signup_locked
 .pytest_cache/

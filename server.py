@@ -61,6 +61,7 @@ UPLOADS_DIR.mkdir(exist_ok=True)
 BACKUPS_DIR = DATA_DIR / "backups"
 BACKUPS_DIR.mkdir(exist_ok=True)
 BACKUP_RETENTION_DAYS = 30
+SIGNUP_LOCK_FILE = DATA_DIR / ".signup_locked"
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # 10MB
 
 def load_or_create_secret_key():
@@ -1405,6 +1406,11 @@ def index():
 @app.route("/api/signup", methods=["POST"])
 @rate_limit(max_attempts=10, window_seconds=300)
 def signup():
+    # A plain file flag rather than an env var so closing signups doesn't need a server
+    # restart — just touch/remove SIGNUP_LOCK_FILE on a running instance.
+    if SIGNUP_LOCK_FILE.exists():
+        return jsonify({"error": "Signups are closed on this instance right now."}), 403
+
     data = request.get_json(force=True) or {}
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
