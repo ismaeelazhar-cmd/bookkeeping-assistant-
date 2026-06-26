@@ -518,7 +518,7 @@
 
     <div class="panel" id="section-ask" style="margin-bottom:16px;">
       <h2>Ask Your Ledger</h2>
-      <div class="sub" style="margin-bottom:10px;">Ask a plain-English question — e.g. "how much did I spend on travel last quarter" or "what's my biggest expense this year". Conversational: follow-up questions carry context from earlier in the chat. Claude reads your actual transactions to answer; needs a Claude API key set under Settings → AI settings.</div>
+      <div class="sub" style="margin-bottom:10px;">Ask a plain-English question — e.g. "how much did I spend on travel last quarter" or "what's my biggest expense this year". Conversational: follow-up questions carry context from earlier in the chat. Reads your actual transactions to answer; needs an AI provider turned on under Settings → AI Features (Claude, paid, or Ollama, free and local — your choice).</div>
       <div id="ask-history" style="max-height:260px; overflow-y:auto; margin-bottom:10px;"></div>
       <div class="row2">
         <input type="text" id="ask-question" placeholder="Ask a question about this company's ledger…" onkeydown="if(event.key==='Enter'){askLedger();}">
@@ -919,7 +919,7 @@
         <button class="btn-secondary" style="width:100%; margin-top:0;" onclick="parseFreeformMovements()">Work it out (rules)</button>
         <button class="btn-primary" style="width:100%; margin-top:0;" onclick="analyzeWithAI()">✨ Analyze with AI</button>
       </div>
-      <div class="sub" style="margin-top:6px;">Needs a Claude API key — set one under Settings → AI settings.</div>
+      <div class="sub" style="margin-top:6px;">Needs an AI provider turned on under Settings → AI Features (Claude, paid, or Ollama, free and local).</div>
       <div id="inbox-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
       <div id="inbox-table-wrap" style="display:none;">
         <table class="inbox">
@@ -1354,7 +1354,7 @@
 
     <div class="panel" style="margin-top:20px;">
       <h2>Month-End Narrative</h2>
-      <div class="sub" style="margin-bottom:12px;">An AI-written summary of what moved this month vs last month — biggest cost increase, notable revenue change, one takeaway. Computed from real period-over-period figures; Claude only writes it up. Needs a Claude API key set under Settings → AI settings.</div>
+      <div class="sub" style="margin-bottom:12px;">An AI-written summary of what moved this month vs last month — biggest cost increase, notable revenue change, one takeaway. Computed from real period-over-period figures; the AI only writes it up. Needs an AI provider turned on under Settings → AI Features (Claude, paid, or Ollama, free and local).</div>
       <div class="row2" style="align-items:end;">
         <div><label>Month</label><input type="month" id="narrative-period"></div>
         <button class="btn-primary" onclick="generateMonthEndNarrative()">Generate</button>
@@ -3945,6 +3945,9 @@ function renderDashboard() {
 // of receivables is overdue, how stale bank reconciliation is) so the single number means
 // something rather than just restating the cash balance.
 function computeHealthScore() {
+  if (transactions.length === 0 && invoicesBills.length === 0 && reconciliations.length === 0) {
+    return { total: null, components: [] };
+  }
   const accounts = buildAccounts();
   const names = Object.keys(accounts);
   const cash = names.filter(n => getAccountType(n) === 'cash').reduce((s, n) => s + accountNetBalance(accounts[n], 'cash'), 0);
@@ -3992,6 +3995,14 @@ function renderHealthScore() {
   const card = document.getElementById('health-score-number');
   if (!card) return;
   const { total, components } = computeHealthScore();
+  if (total === null) {
+    document.getElementById('health-score-number').textContent = '—';
+    document.getElementById('health-score-number').style.color = 'var(--muted)';
+    document.getElementById('health-score-fill').style.width = '0%';
+    document.getElementById('health-score-breakdown').innerHTML =
+      '<span>Not enough data yet — post a transaction, send an invoice, or reconcile the bank to start scoring.</span>';
+    return;
+  }
   const color = total >= 70 ? 'var(--good)' : total >= 40 ? '#B45309' : 'var(--bad)';
   document.getElementById('health-score-number').textContent = total;
   document.getElementById('health-score-number').style.color = color;
@@ -4439,7 +4450,7 @@ async function postSelectedCandidates() {
 
 async function analyzeWithAI() {
   const statusEl = document.getElementById('inbox-status');
-  if (!currentCompany.ai_api_key_set) { statusEl.textContent = 'Add your Claude API key under "AI settings" first.'; return; }
+  if (!currentCompany.ai_api_key_set) { statusEl.textContent = 'Turn on an AI provider under "AI settings" first (Claude, paid, or Ollama, free).'; return; }
   const text = document.getElementById('movement-text').value.trim();
   if (!text) { statusEl.textContent = 'Nothing to analyze — write, paste, or upload a PDF of movements first.'; return; }
   statusEl.textContent = 'Asking Claude to work out the debits and credits…';
@@ -4593,7 +4604,7 @@ async function askLedger() {
   const question = input.value.trim();
   const statusEl = document.getElementById('ask-status');
   if (!question) return;
-  if (!currentCompany.ai_api_key_set) { statusEl.textContent = 'Add a Claude API key under Movements Inbox → AI settings first.'; return; }
+  if (!currentCompany.ai_api_key_set) { statusEl.textContent = 'Turn on an AI provider under Settings → AI Features first (Claude, paid, or Ollama, free).'; return; }
   statusEl.textContent = 'Reading the ledger…';
   input.value = '';
 
@@ -5169,7 +5180,7 @@ async function generateMonthEndNarrative() {
   const statusEl = document.getElementById('narrative-status');
   const bodyEl = document.getElementById('narrative-body');
   if (!period) { statusEl.textContent = 'Pick a month first.'; return; }
-  if (!currentCompany.ai_api_key_set) { statusEl.textContent = 'Add a Claude API key under Settings → AI settings first.'; return; }
+  if (!currentCompany.ai_api_key_set) { statusEl.textContent = 'Turn on an AI provider under Settings → AI Features first (Claude, paid, or Ollama, free).'; return; }
   statusEl.textContent = 'Comparing this month against last month…';
   bodyEl.textContent = '';
   try {
@@ -7459,7 +7470,7 @@ async function renderAttachmentsModal() {
 
 async function extractAttachment(attachmentId) {
   const statusEl = document.getElementById('attachments-modal-status');
-  if (!currentCompany.ai_api_key_set) { statusEl.textContent = 'Add a Claude API key under AI settings (in Movements Inbox) first.'; return; }
+  if (!currentCompany.ai_api_key_set) { statusEl.textContent = 'Turn on an AI provider under AI settings (in Movements Inbox) first — Claude, paid, or Ollama, free.'; return; }
   statusEl.textContent = 'Reading receipt…';
   let extracted;
   try {
