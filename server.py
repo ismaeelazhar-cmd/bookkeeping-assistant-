@@ -27,6 +27,10 @@ from flask import Flask, request, jsonify, session, send_from_directory, g, has_
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+from cryptography.exceptions import InvalidSignature
 from fpdf import FPDF
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -6068,13 +6072,77 @@ def sync_bank_connection_route(company_id, connection_id):
     return jsonify({"inserted": inserted})
 
 
+_plaid_webhook_key_cache = {}  # kid -> JWK dict; Plaid's docs recommend caching these, they rotate rarely
+
+
+def _b64url_decode(s):
+    padding = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + padding)
+
+
+def verify_plaid_webhook(company, signed_jwt, raw_body):
+    """Plaid's documented webhook verification scheme: the Plaid-Verification header is a JWT
+    (alg ES256) whose payload's request_body_sha256 claim must match the SHA-256 of the exact
+    raw request body, signed with a key fetched (and cached by kid) from Plaid's own
+    /webhook_verification_key/get endpoint. Raises PlaidError on any failure — caller treats that
+    as "don't trust this payload", not as a hard 500."""
+    try:
+        header_b64, payload_b64, sig_b64 = signed_jwt.split(".")
+        header = json.loads(_b64url_decode(header_b64))
+        payload = json.loads(_b64url_decode(payload_b64))
+        signature = _b64url_decode(sig_b64)
+    except (ValueError, json.JSONDecodeError) as e:
+        raise PlaidError(f"Malformed webhook verification JWT: {e}", 401)
+
+    if header.get("alg") != "ES256":
+        raise PlaidError(f"Unexpected JWT alg {header.get('alg')!r} — expected ES256.", 401)
+    kid = header.get("kid")
+    if not kid:
+        raise PlaidError("Webhook JWT has no kid.", 401)
+
+    # Replay window: Plaid's own guidance is to reject anything older than 5 minutes.
+    iat = payload.get("iat")
+    if not isinstance(iat, (int, float)) or abs(time.time() - iat) > 300:
+        raise PlaidError("Webhook JWT is missing or has a stale iat — possible replay.", 401)
+
+    jwk = _plaid_webhook_key_cache.get(kid)
+    if jwk is None:
+        result = call_plaid(company, "/webhook_verification_key/get", {"key_id": kid})
+        jwk = result.get("key")
+        if not jwk or jwk.get("crv") != "P-256":
+            raise PlaidError("Could not fetch a usable webhook verification key from Plaid.", 401)
+        _plaid_webhook_key_cache[kid] = jwk
+
+    x = int.from_bytes(_b64url_decode(jwk["x"]), "big")
+    y = int.from_bytes(_b64url_decode(jwk["y"]), "big")
+    public_key = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1()).public_key()
+
+    # JWT ECDSA signatures are raw (r || s), 32 bytes each — cryptography wants DER, so re-encode.
+    r = int.from_bytes(signature[:32], "big")
+    s = int.from_bytes(signature[32:], "big")
+    der_signature = encode_dss_signature(r, s)
+
+    signed_data = f"{header_b64}.{payload_b64}".encode("ascii")
+    try:
+        public_key.verify(der_signature, signed_data, ec.ECDSA(hashes.SHA256()))
+    except InvalidSignature:
+        raise PlaidError("Webhook JWT signature did not verify.", 401)
+
+    expected_hash = hashlib.sha256(raw_body).hexdigest()
+    if payload.get("request_body_sha256") != expected_hash:
+        raise PlaidError("Webhook body hash did not match the signed JWT — payload may have been tampered with.", 401)
+
+
 @app.route("/api/plaid/webhook", methods=["POST"])
 def plaid_webhook():
     """Plaid calls this server-to-server the moment new transactions are ready — this is the
     actual "real-time" half of the feature; the manual Sync button above is the fallback for
-    local/sandbox testing where Plaid's servers can't reach a localhost URL.
-    NOTE: production use should verify the Plaid-Verification JWT header before trusting this
-    payload — not implemented here, flagged as a known gap for a deployed instance."""
+    local/sandbox testing where Plaid's servers can't reach a localhost URL. Verifies the
+    Plaid-Verification JWT header (see verify_plaid_webhook) before trusting the payload —
+    without this, anyone who learns or guesses an item_id could POST a fake "new transactions"
+    event and trigger a sync at will (harmless in itself since sync only pulls real data from
+    Plaid, but still not a request that should be actionable without proof Plaid sent it)."""
+    raw_body = request.get_data()
     data = request.get_json(force=True) or {}
     if data.get("webhook_type") != "TRANSACTIONS":
         return jsonify({"ok": True})  # ignore webhook types we don't act on (ITEM_ERROR, etc.)
@@ -6085,6 +6153,16 @@ def plaid_webhook():
     if conn is None:
         return jsonify({"ok": True})
     company = db.execute("SELECT * FROM companies WHERE id = ?", (conn["company_id"],)).fetchone()
+
+    signed_jwt = request.headers.get("Plaid-Verification")
+    if not signed_jwt:
+        return jsonify({"error": "Missing Plaid-Verification header."}), 401
+    try:
+        verify_plaid_webhook(company, signed_jwt, raw_body)
+    except PlaidError as e:
+        logging.warning("Rejected Plaid webhook for item %s: %s", item_id, e.message)
+        return jsonify({"error": e.message}), e.status
+
     try:
         sync_bank_connection(db, company, conn["id"])
     except PlaidError:
