@@ -58,6 +58,9 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "data.sqlite"
 UPLOADS_DIR = DATA_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
+BACKUPS_DIR = DATA_DIR / "backups"
+BACKUPS_DIR.mkdir(exist_ok=True)
+BACKUP_RETENTION_DAYS = 30
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # 10MB
 
 def load_or_create_secret_key():
@@ -473,6 +476,17 @@ def init_db():
             event_key TEXT NOT NULL,
             sent_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(company_id, event_key)
+        );
+
+        -- One row per company per day a backup actually ran, claimed the same
+        -- claim-before-write way as notification_log so the scheduler can't double-write
+        -- if more than one worker process ends up running it.
+        CREATE TABLE IF NOT EXISTS backup_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            backup_date TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            UNIQUE(company_id, backup_date)
         );
 
         CREATE TABLE IF NOT EXISTS mileage_log (
@@ -5880,6 +5894,41 @@ def export_company_data(company_id):
     return jsonify(build_company_export(get_db(), company_id))
 
 
+def run_scheduled_backups_for_company(db, company):
+    """Called once a day per company from the background scheduler — the export endpoint
+    above already existed, but nothing called it on a timer until now. Claims a backup_log
+    row before writing, same atomic pattern as notification_log, so two worker processes
+    can't both write (and both think they own) today's backup for a company."""
+    company_id = company["id"]
+    today = datetime.date.today().isoformat()
+    claimed = db.execute(
+        "INSERT INTO backup_log (company_id, backup_date, file_path) VALUES (?, ?, '') "
+        "ON CONFLICT(company_id, backup_date) DO NOTHING",
+        (company_id, today),
+    ).rowcount
+    db.commit()
+    if not claimed:
+        return False
+
+    company_dir = BACKUPS_DIR / str(company_id)
+    company_dir.mkdir(parents=True, exist_ok=True)
+    file_path = company_dir / f"{today}.json"
+    export = build_company_export(db, company_id)
+    file_path.write_text(json.dumps(export, indent=2))
+    db.execute("UPDATE backup_log SET file_path = ? WHERE company_id = ? AND backup_date = ?",
+               (str(file_path), company_id, today))
+    db.commit()
+
+    cutoff = (datetime.date.today() - datetime.timedelta(days=BACKUP_RETENTION_DAYS)).isoformat()
+    for old_row in db.execute(
+        "SELECT id, file_path FROM backup_log WHERE company_id = ? AND backup_date < ?", (company_id, cutoff)
+    ).fetchall():
+        Path(old_row["file_path"]).unlink(missing_ok=True)
+        db.execute("DELETE FROM backup_log WHERE id = ?", (old_row["id"],))
+    db.commit()
+    return True
+
+
 @app.route("/api/companies/<int:company_id>/email-export", methods=["POST"])
 @login_required
 @company_required
@@ -7516,6 +7565,10 @@ def _scheduler_tick():
                     run_notifications_for_company(conn, company)
                 except Exception:
                     logging.exception("Scheduler: notification check failed for company %s", company["id"])
+                try:
+                    run_scheduled_backups_for_company(conn, company)
+                except Exception:
+                    logging.exception("Scheduler: backup failed for company %s", company["id"])
     finally:
         conn.close()
 

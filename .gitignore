@@ -5,6 +5,7 @@ server.log
 __pycache__/
 *.pyc
 uploads/
+backups/
 .secret_key
 .encryption_key
 .pytest_cache/
