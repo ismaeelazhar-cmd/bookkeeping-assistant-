@@ -303,9 +303,9 @@
   </div>
   <div class="panel auth-card" id="auth-card-2fa" style="display:none;">
     <h1>Two-factor code</h1>
-    <div class="sub">Enter the 6-digit code from your authenticator app.</div>
+    <div class="sub">Enter the 6-digit code from your authenticator app — or one of your backup codes (e.g. "WJ4K-7QXN") if you've lost access to it.</div>
     <label>Code</label>
-    <input type="text" id="auth-2fa-code" maxlength="6" inputmode="numeric" autocomplete="one-time-code" onkeydown="if(event.key==='Enter') submit2faLogin();">
+    <input type="text" id="auth-2fa-code" maxlength="9" autocomplete="one-time-code" onkeydown="if(event.key==='Enter') submit2faLogin();">
     <button class="btn-primary" onclick="submit2faLogin()">Verify</button>
     <div class="err" id="auth-2fa-error"></div>
   </div>
@@ -349,13 +349,28 @@
       <input type="text" id="twofa-confirm-code" maxlength="6" inputmode="numeric">
       <button class="btn-primary" onclick="confirm2fa()">Confirm and enable</button>
     </div>
-    <div id="twofa-disable-block" style="display:none;">
+    <div id="twofa-backup-codes-block" style="display:none;">
+      <div class="sub" id="twofa-backup-remaining" style="margin-bottom:8px;"></div>
+      <label>Enter your current 6-digit code to generate a fresh set of backup codes (invalidates any unused ones from before)</label>
+      <input type="text" id="twofa-regen-code" maxlength="6" inputmode="numeric">
+      <button class="btn-secondary" style="width:100%;" onclick="regenerateBackupCodes()">Regenerate backup codes</button>
+    </div>
+    <div id="twofa-disable-block" style="display:none; margin-top:14px;">
       <label>Enter your current 6-digit code to disable 2FA</label>
       <input type="text" id="twofa-disable-code" maxlength="6" inputmode="numeric">
       <button class="btn-secondary" style="width:100%;" onclick="disable2fa()">Disable 2FA</button>
     </div>
     <button class="btn-primary" id="twofa-enable-btn" style="display:none;" onclick="start2faSetup()">Enable 2FA</button>
     <div class="err" id="twofa-error"></div>
+  </div>
+</div>
+
+<div id="backup-codes-overlay" style="display:none; position:fixed; inset:0; background:rgba(43,40,37,0.6); z-index:90; align-items:center; justify-content:center;">
+  <div class="panel" style="width:440px; max-height:84vh; overflow:auto;">
+    <h1 style="margin-bottom:4px;">Save your backup codes</h1>
+    <div class="sub">Each one logs you in once if you lose access to your authenticator app — they will <strong>not</strong> be shown again. Write them down or save them somewhere safe right now.</div>
+    <div id="backup-codes-list" style="font-family:var(--font-mono); font-size:15px; line-height:1.9; background:var(--panel-soft); border-radius:8px; padding:14px; margin:10px 0; text-align:center;"></div>
+    <button class="btn-primary" onclick="document.getElementById('backup-codes-overlay').style.display='none';">I've saved these</button>
   </div>
 </div>
 
@@ -2435,12 +2450,23 @@ function closeConsolReport() {
 
 // ---------- 2FA management ----------
 
+function showBackupCodesOverlay(codes) {
+  document.getElementById('backup-codes-list').innerHTML = codes.map(escapeHtml).join('<br>');
+  document.getElementById('backup-codes-overlay').style.display = 'flex';
+}
+
 async function refresh2faStatus() {
-  const { enabled } = await api('/api/2fa/status');
+  const { enabled, backupCodesRemaining } = await api('/api/2fa/status');
   document.getElementById('twofa-status-text').textContent = enabled
     ? 'Two-factor authentication is ON.' : 'Two-factor authentication is OFF.';
   document.getElementById('twofa-enable-btn').style.display = enabled ? 'none' : '';
   document.getElementById('twofa-disable-block').style.display = enabled ? '' : 'none';
+  document.getElementById('twofa-backup-codes-block').style.display = enabled ? '' : 'none';
+  if (enabled) {
+    document.getElementById('twofa-backup-remaining').textContent =
+      `${backupCodesRemaining} backup code${backupCodesRemaining === 1 ? '' : 's'} remaining.` +
+      (backupCodesRemaining <= 2 ? ' Running low — consider regenerating a fresh set.' : '');
+  }
   document.getElementById('twofa-setup-block').style.display = 'none';
 }
 
@@ -2455,12 +2481,27 @@ async function start2faSetup() {
 async function confirm2fa() {
   const code = document.getElementById('twofa-confirm-code').value.trim();
   const errEl = document.getElementById('twofa-error');
+  let data;
   try {
-    await api('/api/2fa/confirm', { method: 'POST', body: JSON.stringify({ code }) });
+    data = await api('/api/2fa/confirm', { method: 'POST', body: JSON.stringify({ code }) });
   } catch (e) { errEl.textContent = e.message; return; }
   errEl.textContent = '';
   document.getElementById('twofa-confirm-code').value = '';
   await refresh2faStatus();
+  if (data.backupCodes) showBackupCodesOverlay(data.backupCodes);
+}
+
+async function regenerateBackupCodes() {
+  const code = document.getElementById('twofa-regen-code').value.trim();
+  const errEl = document.getElementById('twofa-error');
+  let data;
+  try {
+    data = await api('/api/2fa/backup-codes/regenerate', { method: 'POST', body: JSON.stringify({ code }) });
+  } catch (e) { errEl.textContent = e.message; return; }
+  errEl.textContent = '';
+  document.getElementById('twofa-regen-code').value = '';
+  await refresh2faStatus();
+  showBackupCodesOverlay(data.backupCodes);
 }
 
 async function disable2fa() {

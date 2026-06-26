@@ -750,6 +750,12 @@ def init_db():
     if "totp_secret" not in user_cols:
         db.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT NULL")
         db.execute("ALTER TABLE users ADD COLUMN totp_pending_secret TEXT DEFAULT NULL")
+    if "totp_backup_codes_json" not in user_cols:
+        # Recovery path for losing the authenticator device — without this, losing it means
+        # losing account access entirely (no password-reset-equivalent exists for 2FA itself).
+        # Stores HASHED codes (same generate_password_hash as the account password), never the
+        # plaintext — codes are shown to the user exactly once, at generation time.
+        db.execute("ALTER TABLE users ADD COLUMN totp_backup_codes_json TEXT DEFAULT '[]'")
     company_cols = {row[1] for row in db.execute("PRAGMA table_info(companies)").fetchall()}
     if "fund_accounting_enabled" not in company_cols:
         db.execute("ALTER TABLE companies ADD COLUMN fund_accounting_enabled INTEGER DEFAULT 0")
@@ -1249,6 +1255,37 @@ def totp_uri(secret, email):
     return f"otpauth://totp/Bookkeeping%20App:{email}?secret={secret}&issuer=Bookkeeping%20App&digits=6&period=30"
 
 
+def generate_backup_codes(count=10):
+    """Recovery codes for losing the authenticator device — readable in groups of 4 (e.g.
+    "WJ4K-7QXN") to make them easier to transcribe by hand onto paper. Returns (plaintext_codes,
+    hashed_codes) — only the hashed list is ever stored; the plaintext list is shown to the user
+    exactly once, at the call site, and discarded."""
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I — easy to misread when handwritten
+    codes = []
+    for _ in range(count):
+        raw = "".join(secrets.choice(alphabet) for _ in range(8))
+        codes.append(f"{raw[:4]}-{raw[4:]}")
+    hashed = [generate_password_hash(c, method="pbkdf2:sha256") for c in codes]
+    return codes, hashed
+
+
+def consume_backup_code(db, user_id, hashed_codes_json, code):
+    """Checks `code` against the user's remaining hashed backup codes; if it matches, removes
+    that one (single-use) and persists the shorter list. Returns True if it matched."""
+    try:
+        hashed_codes = json.loads(hashed_codes_json or "[]")
+    except json.JSONDecodeError:
+        hashed_codes = []
+    normalized = code.strip().upper()
+    for h in hashed_codes:
+        if check_password_hash(h, normalized):
+            hashed_codes.remove(h)
+            db.execute("UPDATE users SET totp_backup_codes_json = ? WHERE id = ?", (json.dumps(hashed_codes), user_id))
+            db.commit()
+            return True
+    return False
+
+
 # ---------- auth helpers ----------
 
 # ---------- basic rate limiting (Stage 7) ----------
@@ -1511,7 +1548,10 @@ def login_2fa():
         return jsonify({"error": "No pending 2FA login — log in with your password first."}), 400
     db = get_db()
     user = db.execute("SELECT * FROM users WHERE id = ?", (pending_id,)).fetchone()
-    if user is None or not verify_totp(user["totp_secret"], code):
+    valid = user is not None and (
+        verify_totp(user["totp_secret"], code) or consume_backup_code(db, user["id"], user["totp_backup_codes_json"], code)
+    )
+    if not valid:
         return jsonify({"error": "Invalid code."}), 401
     session.pop("pending_2fa_user_id", None)
     session["user_id"] = user["id"]
@@ -1538,8 +1578,12 @@ def me():
 @login_required
 def twofa_status():
     db = get_db()
-    user = db.execute("SELECT totp_secret FROM users WHERE id = ?", (session["user_id"],)).fetchone()
-    return jsonify({"enabled": bool(user["totp_secret"])})
+    user = db.execute("SELECT totp_secret, totp_backup_codes_json FROM users WHERE id = ?", (session["user_id"],)).fetchone()
+    try:
+        backup_codes_remaining = len(json.loads(user["totp_backup_codes_json"] or "[]"))
+    except json.JSONDecodeError:
+        backup_codes_remaining = 0
+    return jsonify({"enabled": bool(user["totp_secret"]), "backupCodesRemaining": backup_codes_remaining})
 
 
 @app.route("/api/2fa/setup", methods=["POST"])
@@ -1563,12 +1607,14 @@ def twofa_confirm():
         return jsonify({"error": "Start setup first."}), 400
     if not verify_totp(user["totp_pending_secret"], code):
         return jsonify({"error": "Invalid code — check your authenticator app and try again."}), 400
+    plaintext_codes, hashed_codes = generate_backup_codes()
     db.execute(
-        "UPDATE users SET totp_secret = totp_pending_secret, totp_pending_secret = NULL WHERE id = ?",
-        (session["user_id"],),
+        "UPDATE users SET totp_secret = totp_pending_secret, totp_pending_secret = NULL, totp_backup_codes_json = ? WHERE id = ?",
+        (json.dumps(hashed_codes), session["user_id"]),
     )
     db.commit()
-    return jsonify({"ok": True})
+    # Plaintext codes are returned exactly once, here — never stored, never retrievable again.
+    return jsonify({"ok": True, "backupCodes": plaintext_codes})
 
 
 @app.route("/api/2fa/disable", methods=["POST"])
@@ -1582,9 +1628,33 @@ def twofa_disable():
         return jsonify({"error": "2FA isn't enabled."}), 400
     if not verify_totp(user["totp_secret"], code):
         return jsonify({"error": "Invalid code."}), 400
-    db.execute("UPDATE users SET totp_secret = NULL, totp_pending_secret = NULL WHERE id = ?", (session["user_id"],))
+    db.execute(
+        "UPDATE users SET totp_secret = NULL, totp_pending_secret = NULL, totp_backup_codes_json = '[]' WHERE id = ?",
+        (session["user_id"],),
+    )
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/api/2fa/backup-codes/regenerate", methods=["POST"])
+@login_required
+def twofa_regenerate_backup_codes():
+    """Invalidates all existing backup codes and issues a fresh set — for after using one, or if
+    the old set might have been seen by someone else. Requires a valid TOTP code first (proof
+    the caller still has the authenticator, not just an active session) since these codes are
+    themselves a full account-recovery credential."""
+    data = request.get_json(force=True) or {}
+    code = (data.get("code") or "").strip()
+    db = get_db()
+    user = db.execute("SELECT totp_secret FROM users WHERE id = ?", (session["user_id"],)).fetchone()
+    if not user["totp_secret"]:
+        return jsonify({"error": "2FA isn't enabled."}), 400
+    if not verify_totp(user["totp_secret"], code):
+        return jsonify({"error": "Invalid code."}), 400
+    plaintext_codes, hashed_codes = generate_backup_codes()
+    db.execute("UPDATE users SET totp_backup_codes_json = ? WHERE id = ?", (json.dumps(hashed_codes), session["user_id"]))
+    db.commit()
+    return jsonify({"backupCodes": plaintext_codes})
 
 
 # ---------- companies ----------

@@ -119,3 +119,63 @@ def test_2fa_disable(client):
     res = client.post("/api/2fa/disable", json={"code": totp_now(secret)})
     assert res.status_code == 200
     assert client.get("/api/2fa/status").get_json()["enabled"] is False
+
+
+def test_2fa_backup_code_recovers_lost_authenticator(client):
+    """The whole point: losing the authenticator device shouldn't mean losing account access."""
+    signup(client)
+    setup = client.post("/api/2fa/setup").get_json()
+    secret = setup["secret"]
+    confirm = client.post("/api/2fa/confirm", json={"code": totp_now(secret)})
+    backup_codes = confirm.get_json()["backupCodes"]
+    assert len(backup_codes) == 10
+    assert client.get("/api/2fa/status").get_json()["backupCodesRemaining"] == 10
+
+    client.post("/api/logout")
+    login(client)
+    # no access to the authenticator (secret) at all here — only a saved backup code
+    res = client.post("/api/login/2fa", json={"code": backup_codes[0]})
+    assert res.status_code == 200
+    assert client.get("/api/me").get_json()["user"]["email"] == "owner@example.com"
+    assert client.get("/api/2fa/status").get_json()["backupCodesRemaining"] == 9  # single-use
+
+
+def test_2fa_backup_code_cannot_be_reused(client):
+    signup(client)
+    setup = client.post("/api/2fa/setup").get_json()
+    secret = setup["secret"]
+    confirm = client.post("/api/2fa/confirm", json={"code": totp_now(secret)})
+    code = confirm.get_json()["backupCodes"][0]
+
+    client.post("/api/logout")
+    login(client)
+    client.post("/api/login/2fa", json={"code": code})
+
+    client.post("/api/logout")
+    login(client)
+    res = client.post("/api/login/2fa", json={"code": code})  # same code again
+    assert res.status_code == 401
+
+
+def test_2fa_backup_codes_regenerate_invalidates_old_set(client):
+    signup(client)
+    setup = client.post("/api/2fa/setup").get_json()
+    secret = setup["secret"]
+    confirm = client.post("/api/2fa/confirm", json={"code": totp_now(secret)})
+    old_code = confirm.get_json()["backupCodes"][0]
+
+    regen = client.post("/api/2fa/backup-codes/regenerate", json={"code": totp_now(secret)})
+    assert regen.status_code == 200
+    new_codes = regen.get_json()["backupCodes"]
+    assert len(new_codes) == 10
+    assert old_code not in new_codes
+
+    client.post("/api/logout")
+    login(client)
+    res = client.post("/api/login/2fa", json={"code": old_code})
+    assert res.status_code == 401  # the old set is gone entirely, not just the one code
+
+    client.post("/api/logout")
+    login(client)
+    res2 = client.post("/api/login/2fa", json={"code": new_codes[0]})
+    assert res2.status_code == 200
