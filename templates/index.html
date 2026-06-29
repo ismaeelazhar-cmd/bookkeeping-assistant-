@@ -4373,12 +4373,26 @@ function parseMovementLine(line) {
 
   const amountMatches = [...line.matchAll(/-?£?\$?\d[\d,]*\.\d{2}|-?£?\$?\d+/g)];
   if (!amountMatches.length) return null;
-  let best = amountMatches[0];
-  for (const m of amountMatches) if (Math.abs(parseAmount(m[0])) > Math.abs(parseAmount(best[0]))) best = m;
+  // Real bank statement lines (PDF or CSV) are almost always Date | Description | Amount |
+  // Running balance — and the balance, which only ever grows, is very often a bigger number
+  // than the transaction itself. Picking "whichever number is biggest" (the old rule) means
+  // misreading the balance as the amount on exactly the statements this feature exists for.
+  // The balance column is reliably the rightmost number, so when there's more than one number
+  // on the line, treat the last as the balance and pick the amount from what's left.
+  let amountCandidates = amountMatches;
+  let balanceMatch = null;
+  if (amountMatches.length > 1) {
+    balanceMatch = amountMatches[amountMatches.length - 1];
+    amountCandidates = amountMatches.slice(0, -1);
+  }
+  let best = amountCandidates[0];
+  for (const m of amountCandidates) if (Math.abs(parseAmount(m[0])) > Math.abs(parseAmount(best[0]))) best = m;
   const amount = Math.abs(parseAmount(best[0]));
   if (!amount) return null;
 
-  let desc = line.replace(best[0], ' ').replace(/\s{2,}/g, ' ').trim().replace(/^[-,\s]+|[-,\s]+$/g, '');
+  let desc = line.replace(best[0], ' ');
+  if (balanceMatch) desc = desc.replace(balanceMatch[0], ' ');
+  desc = desc.replace(/\s{2,}/g, ' ').trim().replace(/^[-,\s]+|[-,\s]+$/g, '');
   if (!desc) desc = 'Movement';
   const cat = categorize(desc);
   return { id: Date.now() + Math.random().toString(36).slice(2, 7), date, desc, amount, debit: cat.debit, credit: cat.credit, confidence: cat.confidence, reason: cat.reason, selected: true };
