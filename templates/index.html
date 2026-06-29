@@ -998,7 +998,7 @@
   </div>
 
   <div class="page" data-page="accounts" style="display:none;">
-    <div class="panel" data-advanced="1">
+    <div class="panel">
       <h2>Chart of Accounts</h2>
       <div class="sub" style="margin-bottom:12px;">The single list of accounts this company can use — every debit/credit field elsewhere is chosen from here, not typed, so "Cash" and "cash" can never silently become two different accounts. The type drives the Statement of Profit or Loss / Statement of Financial Position / Cash Flow Statement.</div>
       <input type="text" id="coa-filter" placeholder="Filter accounts…" oninput="renderChartOfAccounts()" style="margin-bottom:10px;">
@@ -2676,7 +2676,7 @@ async function openCompany(id) {
   showPage('dashboard');
   document.getElementById('ai-api-key').value = '';
   document.getElementById('ai-key-status').textContent = currentCompany.claude_key_set ? 'A key is set.' : 'No key set yet.';
-  document.getElementById('ai-provider').value = currentCompany.ai_provider || 'claude';
+  document.getElementById('ai-provider').value = currentCompany.ai_provider || 'ollama';
   document.getElementById('ollama-url').value = currentCompany.ollama_url || 'http://localhost:11434';
   document.getElementById('ollama-model').value = currentCompany.ollama_model || 'llama3.2-vision';
   onAiProviderChange();

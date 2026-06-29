@@ -923,7 +923,9 @@ def init_db():
         # machine (or any server they point at), no API cost ever, at the price of lower OCR/
         # categorization accuracy than Claude. ollama_url defaults to the standard local port —
         # works out of the box for anyone running `ollama serve` on the same machine as this app.
-        db.execute("ALTER TABLE companies ADD COLUMN ai_provider TEXT DEFAULT 'claude'")
+        # Defaults to ollama (not claude) so a brand-new company never gets asked for a paid API
+        # key before it's even been decided whether AI features are wanted at all.
+        db.execute("ALTER TABLE companies ADD COLUMN ai_provider TEXT DEFAULT 'ollama'")
         db.execute("ALTER TABLE companies ADD COLUMN ollama_url TEXT DEFAULT 'http://localhost:11434'")
         db.execute("ALTER TABLE companies ADD COLUMN ollama_model TEXT DEFAULT 'llama3.2-vision'")
     if "entity_type" not in company_cols:
@@ -1511,7 +1513,7 @@ def start_demo():
     user_id = cur.lastrowid
 
     company_cur = db.execute(
-        "INSERT INTO companies (user_id, name) VALUES (?, ?)", (user_id, "Riverside Plumbing & Heating (Demo)")
+        "INSERT INTO companies (user_id, name, ai_provider) VALUES (?, ?, 'ollama')", (user_id, "Riverside Plumbing & Heating (Demo)")
     )
     company_id = company_cur.lastrowid
     seed_default_chart(db, company_id, "service")
@@ -1739,7 +1741,14 @@ def create_company():
     entity_type = data.get("entityType") if data.get("entityType") in ("sole_trader", "limited_company", "charity") else "limited_company"
     db = get_db()
     cur = db.execute(
-        "INSERT INTO companies (user_id, name, business_type, entity_type, show_cis_tools, fund_accounting_enabled) VALUES (?, ?, ?, ?, ?, ?)",
+        # ai_provider is set explicitly here rather than relying on the column's DEFAULT —
+        # that default was baked into the table the first time the ai_provider migration ran on
+        # this database, so changing the migration's DEFAULT string later has no effect on an
+        # already-migrated table (SQLite doesn't retroactively apply a changed ALTER TABLE
+        # default). Setting it on every insert avoids a brand-new company silently inheriting
+        # whatever default happened to exist when this database was first created.
+        "INSERT INTO companies (user_id, name, business_type, entity_type, show_cis_tools, fund_accounting_enabled, ai_provider) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'ollama')",
         (session["user_id"], name, business_type, entity_type, 1 if business_type == "construction" else 0,
          1 if entity_type == "charity" else 0),
     )

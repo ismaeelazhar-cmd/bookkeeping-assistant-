@@ -1,4 +1,14 @@
-from conftest import signup, login
+from conftest import signup, login, create_company
+
+
+def test_new_company_defaults_to_free_ai_provider(client):
+    """A brand-new company shouldn't be asked for a paid Claude key before anyone has even
+    decided whether they want AI features — Ollama (free, local, no key) is the default."""
+    signup(client)
+    create_company(client)
+    companies = client.get("/api/companies").get_json()
+    assert companies[0]["ai_provider"] == "ollama"
+    assert companies[0]["ai_api_key_set"] is True  # Ollama's defaults are pre-filled, so this reads as "ready"
 
 
 def test_signup_creates_session(client):
