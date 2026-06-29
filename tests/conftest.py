@@ -16,6 +16,10 @@ def client(tmp_path, monkeypatch):
     can't bleed state into each other regardless of execution order."""
     db_path = tmp_path / "test.sqlite"
     monkeypatch.setattr(server_module, "DB_PATH", db_path)
+    # SIGNUP_LOCK_FILE is a fixed path computed once at import time (not request-scoped like
+    # DB_PATH), so without this override every test would check the real on-disk lock file —
+    # whatever state a live deployment on this same machine happens to be in.
+    monkeypatch.setattr(server_module, "SIGNUP_LOCK_FILE", tmp_path / ".signup_locked")
     server_module._rate_limit_buckets.clear()
     server_module.init_db()
     server_module.app.config["TESTING"] = True

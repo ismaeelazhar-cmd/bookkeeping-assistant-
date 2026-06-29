@@ -2272,13 +2272,31 @@ async function showTourStep() {
   const target = document.querySelector(step.selector);
   const highlight = document.getElementById('tour-highlight');
   const card = document.getElementById('tour-card');
+
+  // Fill the text content before measuring the card — its height depends on how long this
+  // step's copy is, and the Next/Skip buttons going off-screen (the original bug here) was
+  // caused by guessing a fixed card height instead of measuring the real one.
+  document.getElementById('tour-step-count').textContent = `${tourIndex + 1} / ${TOUR_STEPS.length}`;
+  document.getElementById('tour-title').textContent = step.title;
+  document.getElementById('tour-text').textContent = step.text;
+  document.getElementById('tour-back-btn').style.display = tourIndex === 0 ? 'none' : 'inline-block';
+  document.getElementById('tour-next-btn').textContent = tourIndex === TOUR_STEPS.length - 1 ? 'Done' : 'Next';
+
+  const margin = 14;
+  // The mobile bottom nav bar covers part of the viewport on narrow screens — treat its height
+  // as off-limits too, or the card's buttons end up visually (and on some browsers, physically)
+  // underneath it.
+  const bottomNav = document.getElementById('mobile-bottom-nav');
+  const bottomNavHeight = (bottomNav && getComputedStyle(bottomNav).display !== 'none') ? bottomNav.offsetHeight : 0;
+  const usableHeight = window.innerHeight - bottomNavHeight;
   if (!target) {
     // selector not on this page/state right now (e.g. quick entry not toggled on yet) — still
     // show the explanation, just centered, rather than skipping the step silently.
     highlight.style.display = 'none';
-    card.style.top = '40%';
-    card.style.left = '50%';
-    card.style.transform = 'translate(-50%, -50%)';
+    card.style.transform = 'none';
+    const cardHeight = card.offsetHeight;
+    card.style.top = `${Math.max(margin, (usableHeight - cardHeight) / 2)}px`;
+    card.style.left = `${Math.max(margin, (window.innerWidth - card.offsetWidth) / 2)}px`;
   } else {
     const rect = target.getBoundingClientRect();
     highlight.style.display = 'block';
@@ -2286,18 +2304,22 @@ async function showTourStep() {
     highlight.style.left = `${rect.left - 6}px`;
     highlight.style.width = `${rect.width + 12}px`;
     highlight.style.height = `${rect.height + 12}px`;
-    const cardTop = Math.min(window.innerHeight - 220, rect.bottom + 14);
-    const cardLeft = Math.min(window.innerWidth - 320, Math.max(20, rect.left));
+    card.style.transform = 'none';
+    const cardHeight = card.offsetHeight;
+    const cardWidth = card.offsetWidth;
+    // Prefer placing the card below the highlighted element, but flip above it if there isn't
+    // enough room below — and always clamp against the real measured height/width so the
+    // buttons at the bottom of the card can never end up below the visible (non-nav-covered) viewport.
+    let cardTop = rect.bottom + margin;
+    if (cardTop + cardHeight > usableHeight - margin) {
+      cardTop = rect.top - cardHeight - margin;
+    }
+    cardTop = Math.min(Math.max(margin, cardTop), usableHeight - cardHeight - margin);
+    const cardLeft = Math.min(window.innerWidth - cardWidth - margin, Math.max(margin, rect.left));
     card.style.top = `${cardTop}px`;
     card.style.left = `${cardLeft}px`;
-    card.style.transform = 'none';
     target.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }
-  document.getElementById('tour-step-count').textContent = `${tourIndex + 1} / ${TOUR_STEPS.length}`;
-  document.getElementById('tour-title').textContent = step.title;
-  document.getElementById('tour-text').textContent = step.text;
-  document.getElementById('tour-back-btn').style.display = tourIndex === 0 ? 'none' : 'inline-block';
-  document.getElementById('tour-next-btn').textContent = tourIndex === TOUR_STEPS.length - 1 ? 'Done' : 'Next';
 }
 
 function openShortcutsModal() { document.getElementById('shortcuts-overlay').style.display = 'flex'; }

@@ -4,7 +4,20 @@ import base64
 import struct
 import time
 
+import server as server_module
 from conftest import signup, login, create_company, post_transaction
+
+
+def test_signup_blocked_when_lock_file_present(client):
+    server_module.SIGNUP_LOCK_FILE.touch()
+    res = signup(client, "locked-out@example.com")
+    assert res.status_code == 403
+
+
+def test_signup_works_when_lock_file_absent(client):
+    assert not server_module.SIGNUP_LOCK_FILE.exists()
+    res = signup(client, "fresh-signup@example.com")
+    assert res.status_code == 200
 
 
 def make_company_with_member(client, permission="view"):
