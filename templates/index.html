@@ -4341,7 +4341,7 @@ const KEYWORD_RULES = [
   { kws: ['payment received', 'received payment', 'receipt'], debit: 'Cash', credit: 'Trade Recievables' },
 ];
 
-function categorize(desc) {
+function categorize(desc, isOutgoing = true) {
   const key = normalizeDesc(desc);
   if (presets[key]) {
     return { debit: presets[key].debit, credit: presets[key].credit, confidence: 'high', reason: `Exact match to a previous "${desc}" entry you posted.` };
@@ -4359,7 +4359,14 @@ function categorize(desc) {
     const hit = rule.kws.find(kw => key.includes(kw));
     if (hit) return { debit: rule.debit, credit: rule.credit, confidence: 'high', reason: `Matched the keyword rule "${hit}" → ${rule.debit} / ${rule.credit}.` };
   }
-  return { debit: 'Uncategorized', credit: currentCompany.default_credit_account || 'Cash', confidence: 'low', reason: 'No previous entry or keyword rule matched this description — needs manual review.' };
+  // No keyword/preset/rule signal at all — fall back on whether the statement itself marked
+  // this as money out (debit an expense, credit Cash) or money in (debit Cash, credit the
+  // unknown income side) rather than always assuming outgoing, which silently books every
+  // unrecognised incoming payment backwards.
+  const cashAccount = currentCompany.default_credit_account || 'Cash';
+  return isOutgoing
+    ? { debit: 'Uncategorized', credit: cashAccount, confidence: 'low', reason: 'No previous entry or keyword rule matched this description — needs manual review.' }
+    : { debit: cashAccount, credit: 'Uncategorized', confidence: 'low', reason: 'No previous entry or keyword rule matched this description — needs manual review.' };
 }
 
 // ---------- user-defined categorisation rules ("Amazon always -> Office Supplies") ----------
@@ -4407,42 +4414,62 @@ let candidates = [];
 
 function parseAmount(token) { return parseFloat(String(token).replace(/[,£$]/g, '')); }
 
+// Statement boilerplate that should never be treated as a transaction even though it can
+// contain both a date-shaped number and a decimal amount (e.g. "Closing balance as at
+// 31/12/2026: 12,345.67"). Deliberately excludes real transaction-type prefixes like "direct
+// debit", "standing order", "faster payment", "card payment" — those legitimately start real
+// transaction rows and must keep matching.
+const STATEMENT_BOILERPLATE_RE = /\b(statement of account|opening balance|closing balance|available balance|cleared balance|balance brought forward|balance carried forward|balance b\/f|balance c\/f|total (payments|receipts|deposits|withdrawals)|page \d+ of \d+|sort code|account number|\biban\b|\bswift\b|vat (no|number)|registered (in|office)|terms and conditions|customer services|calls may be recorded|overdraft (limit|rate)|interest rate)\b/i;
+
 function parseMovementLine(line) {
   line = line.trim();
   if (!line) return null;
-  let date = '';
-  const dateMatch = line.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-  if (dateMatch) {
-    let [, d, m, y] = dateMatch;
-    if (y.length === 2) y = '20' + y;
-    date = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
-    line = line.replace(dateMatch[0], ' ');
-  } else date = new Date().toISOString().slice(0, 10);
+  if (STATEMENT_BOILERPLATE_RE.test(line)) return null;
+  // Real transaction rows are short (a date, a merchant/reference string, an amount) — a long
+  // line is almost always a wrapped disclaimer/T&Cs sentence that happens to contain numbers.
+  if (line.length > 120) return null;
 
-  const amountMatches = [...line.matchAll(/-?£?\$?\d[\d,]*\.\d{2}|-?£?\$?\d+/g)];
-  if (!amountMatches.length) return null;
+  const dateMatch = line.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if (!dateMatch) return null; // no date at all — never defaulted to "today" anymore, since that's what let boilerplate through
+  let [, d, m, y] = dateMatch;
+  d = parseInt(d, 10); m = parseInt(m, 10);
+  if (m < 1 || m > 12 || d < 1 || d > 31) return null; // date-shaped but not a real date — e.g. a reference number
+  if (y.length === 2) y = '20' + y;
+  const date = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  line = line.replace(dateMatch[0], ' ');
+
+  // Require at least one decimal (pence-formatted) number before treating this as a transaction
+  // at all — UK statements always show money to the penny, even round amounts ("500.00"), so a
+  // line with only bare integers (page numbers, short reference codes) isn't a transaction.
+  const decimalMatches = [...line.matchAll(/-?£?\$?\d[\d,]*\.\d{2}/g)];
+  if (!decimalMatches.length) return null;
+
   // Real bank statement lines (PDF or CSV) are almost always Date | Description | Amount |
   // Running balance — and the balance, which only ever grows, is very often a bigger number
   // than the transaction itself. Picking "whichever number is biggest" (the old rule) means
   // misreading the balance as the amount on exactly the statements this feature exists for.
   // The balance column is reliably the rightmost number, so when there's more than one number
   // on the line, treat the last as the balance and pick the amount from what's left.
-  let amountCandidates = amountMatches;
+  let amountCandidates = decimalMatches;
   let balanceMatch = null;
-  if (amountMatches.length > 1) {
-    balanceMatch = amountMatches[amountMatches.length - 1];
-    amountCandidates = amountMatches.slice(0, -1);
+  if (decimalMatches.length > 1) {
+    balanceMatch = decimalMatches[decimalMatches.length - 1];
+    amountCandidates = decimalMatches.slice(0, -1);
   }
   let best = amountCandidates[0];
   for (const m of amountCandidates) if (Math.abs(parseAmount(m[0])) > Math.abs(parseAmount(best[0]))) best = m;
-  const amount = Math.abs(parseAmount(best[0]));
+  const signedAmount = parseAmount(best[0]);
+  const amount = Math.abs(signedAmount);
   if (!amount) return null;
+  const isOutgoing = signedAmount < 0; // most UK statements prefix money-out with a minus sign; an unsigned positive number is treated as money in
 
   let desc = line.replace(best[0], ' ');
   if (balanceMatch) desc = desc.replace(balanceMatch[0], ' ');
   desc = desc.replace(/\s{2,}/g, ' ').trim().replace(/^[-,\s]+|[-,\s]+$/g, '');
-  if (!desc) desc = 'Movement';
-  const cat = categorize(desc);
+  // Fewer than 3 real letters left means this was probably a stray reference number, not a
+  // description — e.g. "Ref: 4471-2026" with the amount stripped out leaves almost nothing.
+  if ((desc.match(/[a-z]/gi) || []).length < 3) return null;
+  const cat = categorize(desc, isOutgoing);
   return { id: Date.now() + Math.random().toString(36).slice(2, 7), date, desc, amount, debit: cat.debit, credit: cat.credit, confidence: cat.confidence, reason: cat.reason, selected: true };
 }
 
@@ -4578,7 +4605,7 @@ async function handlePdfUpload(event) {
     const parsed = allLines.map(parseMovementLine).filter(Boolean);
     candidates = candidates.concat(parsed);
     document.getElementById('movement-text').value = allLines.filter(l => l.trim()).join('\n');
-    statusEl.textContent = `Extracted ${parsed.length} candidate movement(s) from ${allLines.length} line(s) using rules. The raw lines are also in the box above — click "Analyze with AI" for a smarter pass.`;
+    statusEl.textContent = `Extracted ${parsed.length} of ${allLines.length} line(s) as transactions — the rest looked like statement headers/footers and were skipped. The raw lines are also in the box above — click "Analyze with AI" for a smarter pass.`;
     renderCandidates();
   } catch (e) {
     statusEl.textContent = 'Could not read that PDF: ' + e.message;
