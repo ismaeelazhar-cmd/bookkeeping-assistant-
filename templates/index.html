@@ -3266,32 +3266,80 @@ function initQuickEntryToggle() {
   applyQuickEntryMode(on);
 }
 
+function applyScannedReceiptFields(extracted, statusEl) {
+  if (extracted.posted) {
+    statusEl.textContent = `Posted automatically as ${extracted.debit} / ${extracted.credit} (${fmt(extracted.amount)}) — receipt attached.`;
+    showToast('Receipt read, categorised, and posted to the ledger.', 'success');
+    refreshAll();
+    return;
+  }
+  if (extracted.date) document.getElementById('f-date').value = extracted.date;
+  if (extracted.desc) document.getElementById('f-desc').value = extracted.desc;
+  if (extracted.amount != null) document.getElementById('f-amount').value = extracted.amount;
+  if (extracted.debit) document.getElementById('f-debit').value = extracted.debit;
+  if (extracted.credit) document.getElementById('f-credit').value = extracted.credit;
+  statusEl.textContent = extracted.debit
+    ? `Filled in from the receipt — categorised as ${extracted.debit} / ${extracted.credit} from your rules. Check it over, then post.`
+    : 'Filled in from the receipt — check it over, pick a category, then post.';
+  document.getElementById(extracted.debit ? 'f-amount' : 'f-debit').focus();
+}
+
 async function scanReceiptForQuickEntry(event) {
   const file = event.target.files[0];
   if (!file) return;
   const statusEl = document.getElementById('quick-receipt-status');
+
+  if (file.size > 10 * 1024 * 1024) {
+    statusEl.textContent = 'That file is over 10MB — please upload a smaller one.';
+    event.target.value = '';
+    return;
+  }
+
   statusEl.textContent = 'Reading receipt…';
-  const formData = new FormData();
-  formData.append('file', file);
   try {
-    const res = await fetch(`/api/companies/${currentCompany.id}/scan-receipt`, { method: 'POST', body: formData, credentials: 'same-origin' });
-    const extracted = await res.json();
-    if (!res.ok) throw new Error(extracted.error || 'Could not read that receipt.');
-    if (extracted.posted) {
-      statusEl.textContent = `Posted automatically as ${extracted.debit} / ${extracted.credit} (${fmt(extracted.amount)}) — receipt attached.`;
-      showToast('Receipt read, categorised, and posted to the ledger.', 'success');
-      await refreshAll();
+    // Free, no-AI path first: real text is extractable from a PDF (pdf.js) or a photo (in-browser
+    // OCR) for the large majority of receipts, so AI is a fallback for the hard cases now, not a
+    // requirement for the common one — this also means receipts still work with no AI provider
+    // configured at all, and no Ollama/Claude round trip for the usual case.
+    let lines = null;
+    if (file.type === 'application/pdf') {
+      lines = await extractPdfTextLines(file);
+    } else if (file.type.startsWith('image/')) {
+      try {
+        lines = await extractImageTextLines(file);
+      } catch (ocrErr) {
+        lines = null; // OCR library failed to load or recognize — fall through to the AI path below
+      }
+    }
+    const extractedLocally = lines ? parseReceiptText(lines) : null;
+
+    if (extractedLocally) {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('date', extractedLocally.date);
+      formData.append('desc', extractedLocally.desc);
+      formData.append('amount', extractedLocally.amount);
+      const res = await fetch(`/api/companies/${currentCompany.id}/scan-receipt-extracted`, { method: 'POST', body: formData, credentials: 'same-origin' });
+      const extracted = await res.json();
+      if (!res.ok) throw new Error(extracted.error || 'Could not read that receipt.');
+      applyScannedReceiptFields(extracted, statusEl);
       return;
     }
-    if (extracted.date) document.getElementById('f-date').value = extracted.date;
-    if (extracted.desc) document.getElementById('f-desc').value = extracted.desc;
-    if (extracted.amount != null) document.getElementById('f-amount').value = extracted.amount;
-    if (extracted.debit) document.getElementById('f-debit').value = extracted.debit;
-    if (extracted.credit) document.getElementById('f-credit').value = extracted.credit;
-    statusEl.textContent = extracted.debit
-      ? `Filled in from the receipt — categorised as ${extracted.debit} / ${extracted.credit} from your rules. Check it over, then post.`
-      : 'Filled in from the receipt — check it over, pick a category, then post.';
-    document.getElementById(extracted.debit ? 'f-amount' : 'f-debit').focus();
+
+    // Couldn't pull a usable date+amount out of the file directly — fall back to the AI-based
+    // endpoint (Claude, or Ollama if configured and actually reachable) as a last resort.
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch(`/api/companies/${currentCompany.id}/scan-receipt`, { method: 'POST', body: formData, credentials: 'same-origin' });
+    const extracted = await res.json();
+    if (!res.ok) {
+      if (!currentCompany.ai_api_key_set) {
+        statusEl.textContent = "Couldn't read this automatically — enter the details below.";
+        return;
+      }
+      throw new Error(extracted.error || 'Could not read that receipt.');
+    }
+    applyScannedReceiptFields(extracted, statusEl);
   } catch (e) {
     statusEl.textContent = e.message;
   } finally {
@@ -4398,6 +4446,66 @@ function parseMovementLine(line) {
   return { id: Date.now() + Math.random().toString(36).slice(2, 7), date, desc, amount, debit: cat.debit, credit: cat.credit, confidence: cat.confidence, reason: cat.reason, selected: true };
 }
 
+function parseReceiptText(lines) {
+  // Sibling to parseMovementLine, but for a whole receipt (one document, one amount) rather
+  // than one bank-statement line per transaction. Returns null rather than a best-effort guess
+  // when a date+amount pair can't be found — the caller treats null as "extraction genuinely
+  // failed", not "extraction found a zero", and falls back to the AI-based scan endpoint.
+  lines = (lines || []).map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return null;
+
+  let date = '';
+  for (const line of lines) {
+    const dateMatch = line.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+    if (dateMatch) {
+      let [, d, m, y] = dateMatch;
+      if (y.length === 2) y = '20' + y;
+      date = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+      break;
+    }
+  }
+  if (!date) return null;
+
+  // Unlike a bank statement, a receipt has no running-balance column to be fooled by — but it
+  // does have subtotal/tax lines above the real total, so prefer whichever number sits on a
+  // line that reads like a grand total, and only fall back to "biggest number on the receipt"
+  // when no such line is found.
+  const totalLineRe = /total|amount due|balance due|amount payable|grand total/i;
+  const numberRe = /-?£?\$?\d[\d,]*\.\d{2}|-?£?\$?\d+/g;
+  let best = null;
+  for (const line of lines) {
+    if (!totalLineRe.test(line)) continue;
+    const matches = [...line.matchAll(numberRe)];
+    for (const m of matches) {
+      const val = Math.abs(parseAmount(m[0]));
+      if (val && (!best || val > best)) best = val;
+    }
+  }
+  if (best == null) {
+    for (const line of lines) {
+      const matches = [...line.matchAll(numberRe)];
+      for (const m of matches) {
+        const val = Math.abs(parseAmount(m[0]));
+        if (val && (!best || val > best)) best = val;
+      }
+    }
+  }
+  if (best == null) return null;
+  const amount = best;
+
+  // The vendor name is almost always the first substantial line at the top of a receipt — skip
+  // blank lines and lines that are pure numbers/punctuation (e.g. a leading receipt number).
+  let desc = '';
+  for (const line of lines) {
+    const stripped = line.replace(/[\d\s\-,.:/£$#]/g, '');
+    if (stripped.length >= 3) { desc = line.trim(); break; }
+  }
+  if (!desc) desc = 'Receipt';
+
+  const cat = categorize(desc);
+  return { date, desc, amount, debit: cat.debit, credit: cat.credit, confidence: cat.confidence, reason: cat.reason };
+}
+
 function parseFreeformMovements() {
   const text = document.getElementById('movement-text').value;
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
@@ -4410,32 +4518,67 @@ function parseFreeformMovements() {
   renderCandidates();
 }
 
+async function extractPdfTextLines(file) {
+  // Shared by every "upload a PDF and pull real text out of it" flow (bank statement import,
+  // bank reconciliation import, receipt scanning) — one pdf.js text-extraction routine instead
+  // of three copies drifting apart. Groups text items by their y-position on the page so words
+  // on the same visual line end up in the same string, in top-to-bottom reading order.
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let allLines = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    const rows = {};
+    for (const item of content.items) {
+      const y = Math.round(item.transform[5]);
+      if (!rows[y]) rows[y] = [];
+      rows[y].push(item.str);
+    }
+    const ys = Object.keys(rows).map(Number).sort((a, b) => b - a);
+    for (const y of ys) allLines.push(rows[y].join(' '));
+  }
+  return allLines;
+}
+
+let _tesseractLoadPromise = null;
+function loadTesseract() {
+  // Tesseract.js is a multi-MB WASM download — loaded on first actual use (scanning a photo
+  // receipt) rather than a <script> tag on every page load, since most visits never touch OCR.
+  if (window.Tesseract) return Promise.resolve();
+  if (_tesseractLoadPromise) return _tesseractLoadPromise;
+  _tesseractLoadPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js';
+    script.onload = resolve;
+    script.onerror = () => reject(new Error('Could not load the OCR library — check your connection and try again.'));
+    document.head.appendChild(script);
+  });
+  return _tesseractLoadPromise;
+}
+
+async function extractImageTextLines(file) {
+  // Free, in-browser OCR for photo receipts (no API key, no server round trip, works on any
+  // deployment) — the image equivalent of extractPdfTextLines() above. Lower accuracy than a
+  // real vision model on messy/crumpled receipts, but real and free, and parseReceiptText()
+  // below is tolerant of noisy OCR output since it only needs a date and a total.
+  await loadTesseract();
+  const { data } = await window.Tesseract.recognize(file, 'eng');
+  return (data.text || '').split('\n');
+}
+
 async function handlePdfUpload(event) {
   const file = event.target.files[0];
   if (!file) return;
   const statusEl = document.getElementById('inbox-status');
   statusEl.textContent = 'Reading PDF…';
   try {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-    const buf = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-    let allLines = [];
-    for (let p = 1; p <= pdf.numPages; p++) {
-      const page = await pdf.getPage(p);
-      const content = await page.getTextContent();
-      const rows = {};
-      for (const item of content.items) {
-        const y = Math.round(item.transform[5]);
-        if (!rows[y]) rows[y] = [];
-        rows[y].push(item.str);
-      }
-      const ys = Object.keys(rows).map(Number).sort((a, b) => b - a);
-      for (const y of ys) allLines.push(rows[y].join(' '));
-    }
+    const allLines = await extractPdfTextLines(file);
     const parsed = allLines.map(parseMovementLine).filter(Boolean);
     candidates = candidates.concat(parsed);
     document.getElementById('movement-text').value = allLines.filter(l => l.trim()).join('\n');
-    statusEl.textContent = `Extracted ${parsed.length} candidate movement(s) from ${pdf.numPages} page(s) using rules. The raw lines are also in the box above — click "Analyze with AI" for a smarter pass.`;
+    statusEl.textContent = `Extracted ${parsed.length} candidate movement(s) from ${allLines.length} line(s) using rules. The raw lines are also in the box above — click "Analyze with AI" for a smarter pass.`;
     renderCandidates();
   } catch (e) {
     statusEl.textContent = 'Could not read that PDF: ' + e.message;
@@ -4717,22 +4860,7 @@ async function handleBrecPdfUpload(event) {
   const statusEl = document.getElementById('brec-status');
   statusEl.textContent = 'Reading PDF…';
   try {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-    const buf = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-    let allLines = [];
-    for (let p = 1; p <= pdf.numPages; p++) {
-      const page = await pdf.getPage(p);
-      const content = await page.getTextContent();
-      const rows = {};
-      for (const item of content.items) {
-        const y = Math.round(item.transform[5]);
-        if (!rows[y]) rows[y] = [];
-        rows[y].push(item.str);
-      }
-      const ys = Object.keys(rows).map(Number).sort((a, b) => b - a);
-      for (const y of ys) allLines.push(rows[y].join(' '));
-    }
+    const allLines = await extractPdfTextLines(file);
     document.getElementById('brec-text').value = allLines.filter(l => l.trim()).join('\n');
     statusEl.textContent = `Extracted ${allLines.length} line(s) — check the signs (minus = money out) before importing, then click "Import lines".`;
   } catch (e) {

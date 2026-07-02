@@ -3863,37 +3863,12 @@ def extract_attachment(company_id, attachment_id):
     return jsonify(extracted)
 
 
-@app.route("/api/companies/<int:company_id>/scan-receipt", methods=["POST"])
-@login_required
-@company_required
-@write_required
-def scan_receipt(company_id):
-    """Quick-entry receipt capture: OCR a photo/PDF and, when a categorization rule or learned
-    preset confidently identifies the accounts for it, post the transaction AND save the file as
-    its attachment in one step — the user's only job is to hand over the receipt. Without a
-    confident match, this falls back to the old behaviour (return extracted fields, post nothing,
-    keep no file) rather than guessing accounts with no signal at all, the same "auto-post only
-    when confident, otherwise ask" rule the bank feed importer follows."""
-    file = request.files.get("file")
-    if file is None or not file.filename:
-        return jsonify({"error": "No file uploaded."}), 400
-    mime_type = file.mimetype or mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
-    if mime_type not in ALLOWED_ATTACHMENT_TYPES:
-        return jsonify({"error": f"Unsupported file type: {mime_type}. Allowed: PDF, PNG, JPEG, HEIC, WEBP."}), 400
-    file_bytes = file.read()
-
-    try:
-        extracted = extract_receipt_fields(g.company, mime_type, file_bytes)
-    except (ValueError, OllamaError) as e:
-        return jsonify({"error": str(e)}), 400
-    except urllib.error.HTTPError as e:
-        return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
-    except urllib.error.URLError as e:
-        return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
-    except json.JSONDecodeError:
-        return jsonify({"error": "The AI's response wasn't valid JSON."}), 502
-
-    db = get_db()
+def finalize_scanned_receipt(db, company_id, file, mime_type, file_bytes, extracted):
+    """Shared tail end of receipt scanning, regardless of whether the fields came from an AI
+    call or from free client-side extraction (PDF text / in-browser OCR): look up a
+    categorization match, auto-post and attach the file when confident, otherwise just hand the
+    fields back for manual review — the same "auto-post only when confident, otherwise ask" rule
+    the bank feed importer follows. Mutates and returns `extracted` in place."""
     suggestion = suggest_accounts_for_desc(db, company_id, extracted.get("desc"))
     if suggestion:
         extracted.update(suggestion)
@@ -3920,7 +3895,73 @@ def scan_receipt(company_id):
             db.commit()
             extracted["posted"] = True
             extracted["transactionId"] = tx_id
-    return jsonify(extracted)
+    return extracted
+
+
+@app.route("/api/companies/<int:company_id>/scan-receipt", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def scan_receipt(company_id):
+    """Quick-entry receipt capture: OCR a photo/PDF and, when a categorization rule or learned
+    preset confidently identifies the accounts for it, post the transaction AND save the file as
+    its attachment in one step — the user's only job is to hand over the receipt. Without a
+    confident match, this falls back to the old behaviour (return extracted fields, post nothing,
+    keep no file) rather than guessing accounts with no signal at all. This is the AI-based path —
+    the frontend tries free client-side extraction (PDF text / in-browser OCR) first via
+    /scan-receipt-extracted below, and only falls back to this endpoint when that fails."""
+    file = request.files.get("file")
+    if file is None or not file.filename:
+        return jsonify({"error": "No file uploaded."}), 400
+    mime_type = file.mimetype or mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
+    if mime_type not in ALLOWED_ATTACHMENT_TYPES:
+        return jsonify({"error": f"Unsupported file type: {mime_type}. Allowed: PDF, PNG, JPEG, HEIC, WEBP."}), 400
+    file_bytes = file.read()
+
+    try:
+        extracted = extract_receipt_fields(g.company, mime_type, file_bytes)
+    except (ValueError, OllamaError) as e:
+        return jsonify({"error": str(e)}), 400
+    except urllib.error.HTTPError as e:
+        return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
+    except urllib.error.URLError as e:
+        return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
+    except json.JSONDecodeError:
+        return jsonify({"error": "The AI's response wasn't valid JSON."}), 502
+
+    db = get_db()
+    return jsonify(finalize_scanned_receipt(db, company_id, file, mime_type, file_bytes, extracted))
+
+
+@app.route("/api/companies/<int:company_id>/scan-receipt-extracted", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def scan_receipt_extracted(company_id):
+    """Free path: the frontend already pulled date/desc/amount out of the file itself (real PDF
+    text via pdf.js, or in-browser OCR for a photo) — no AI call happens here at all, just the
+    same categorize-and-auto-post tail every scanned receipt goes through."""
+    file = request.files.get("file")
+    if file is None or not file.filename:
+        return jsonify({"error": "No file uploaded."}), 400
+    mime_type = file.mimetype or mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
+    if mime_type not in ALLOWED_ATTACHMENT_TYPES:
+        return jsonify({"error": f"Unsupported file type: {mime_type}. Allowed: PDF, PNG, JPEG, HEIC, WEBP."}), 400
+    file_bytes = file.read()
+
+    date = (request.form.get("date") or "").strip()
+    desc = (request.form.get("desc") or "").strip()
+    amount_raw = request.form.get("amount")
+    try:
+        amount = float(amount_raw) if amount_raw not in (None, "") else None
+    except ValueError:
+        amount = None
+    if not date or not desc or not amount:
+        return jsonify({"error": "Missing extracted date, description, or amount."}), 400
+
+    extracted = {"date": date, "desc": desc, "amount": amount}
+    db = get_db()
+    return jsonify(finalize_scanned_receipt(db, company_id, file, mime_type, file_bytes, extracted))
 
 
 @app.route("/api/companies/<int:company_id>/attachments/<int:attachment_id>", methods=["DELETE"])
