@@ -5511,6 +5511,62 @@ def delete_budget(company_id, budget_id):
     return jsonify({"ok": True})
 
 
+def _add_months(d, months):
+    total_months = d.month - 1 + months
+    year = d.year + total_months // 12
+    month = total_months % 12 + 1
+    day = min(d.day, [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28,
+                      31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1])
+    return datetime.date(year, month, day)
+
+
+def _most_recently_completed_period_end(period_start_date, today):
+    """The company's own accounting period anchor (period_start_date) gives the month/day its
+    fiscal year starts on — this finds when the most recently COMPLETED accounting year ended
+    (the day before whichever occurrence of that anchor has already passed), the reference point
+    UK Corporation Tax payment/filing deadlines are both counted from."""
+    if not period_start_date:
+        return None
+    anchor = datetime.date.fromisoformat(period_start_date)
+    this_year_anchor = datetime.date(today.year, anchor.month, anchor.day)
+    if today >= this_year_anchor:
+        return this_year_anchor - datetime.timedelta(days=1)
+    last_year_anchor = datetime.date(today.year - 1, anchor.month, anchor.day)
+    return last_year_anchor - datetime.timedelta(days=1)
+
+
+def compute_statutory_deadlines(company, today):
+    """UK statutory deadlines beyond VAT (which run_notifications_for_company already computes
+    from live HMRC obligations data): Corporation Tax payment/filing for limited companies, and
+    Self Assessment payment/filing for sole traders — both computed from dates already on the
+    company record, no external API needed. Returns a list of {label, due} dicts for whichever
+    deadlines fall within the next 30 days; charities get neither (no CT on charitable income,
+    no personal Self Assessment for the entity itself)."""
+    deadlines = []
+    entity_type = company["entity_type"] or "limited_company"
+    window_end = today + datetime.timedelta(days=30)
+
+    if entity_type == "limited_company":
+        period_end = _most_recently_completed_period_end(company["period_start_date"], today)
+        if period_end:
+            payment_due = _add_months(period_end, 9) + datetime.timedelta(days=1)
+            filing_due = _add_months(period_end, 12)
+            if today <= payment_due <= window_end:
+                deadlines.append({"label": f"Corporation Tax payment due for the year ended {period_end.isoformat()}", "due": payment_due.isoformat()})
+            if today <= filing_due <= window_end:
+                deadlines.append({"label": f"CT600 filing due for the year ended {period_end.isoformat()}", "due": filing_due.isoformat()})
+    elif entity_type == "sole_trader":
+        # Self Assessment's payment and filing deadline is always 31 January, following the 6
+        # April-5 April tax year it covers — independent of the company's own period_start_date,
+        # since this is a personal (not company) tax year fixed by HMRC.
+        jan_31_this_year = datetime.date(today.year, 1, 31)
+        sa_deadline = jan_31_this_year if today <= jan_31_this_year else datetime.date(today.year + 1, 1, 31)
+        if today <= sa_deadline <= window_end:
+            deadlines.append({"label": "Self Assessment payment and filing due", "due": sa_deadline.isoformat()})
+
+    return deadlines
+
+
 def run_notifications_for_company(db, company, force=False, fallback_email=None):
     """#9: the actual notification/chasing logic, independent of Flask's request context so it
     can run both from the on-demand route AND the background scheduler (run_scheduler_loop)
@@ -5598,6 +5654,9 @@ def run_notifications_for_company(db, company, force=False, fallback_email=None)
     stale_cutoff = (datetime.date.today() - datetime.timedelta(days=35)).isoformat()
     if not last_reconciled or last_reconciled < stale_cutoff:
         lines.append(f"Bank reconciliation hasn't been closed since {last_reconciled or 'ever'} — over a month ago.")
+
+    for deadline in compute_statutory_deadlines(company, today_date):
+        lines.append(f"{deadline['label']} on {deadline['due']}.")
 
     db.execute("UPDATE companies SET last_notification_run = ? WHERE id = ?", (today, company_id))
     db.commit()
