@@ -6316,6 +6316,46 @@ def delete_bank_connection(company_id, connection_id):
     return jsonify({"ok": True})
 
 
+def maybe_queue_invoice_payment_suggestion(db, company_id, cash_account, date, desc, amount):
+    """When money lands in the bank for exactly the amount of exactly ONE outstanding invoice,
+    suggest marking that invoice paid — the missing link between "customer paid by bank
+    transfer" and "the app knows". Suggest-and-confirm via the clarification queue, never
+    silently auto-pay: wrongly marking the wrong invoice paid (two invoices at the same amount,
+    a coincidental deposit) costs far more than the one click this saves. Returns True if a
+    suggestion was queued, so callers can skip the normal categorization path for this line.
+    (Stripe checkout payments are already auto-marked paid by the signature-verified webhook —
+    this covers plain bank transfers.)"""
+    if amount <= 0:
+        return False
+    matching = db.execute(
+        "SELECT id, desc FROM invoices_bills WHERE company_id = ? AND kind = 'invoice' AND status = 'sent' "
+        "AND amount_pence = ?",
+        (company_id, to_pence(amount)),
+    ).fetchall()
+    if len(matching) != 1:
+        return False  # zero = nothing to suggest; several = ambiguous, don't guess between them
+    invoice = matching[0]
+    already_suggested = db.execute(
+        "SELECT 1 FROM clarification_queue WHERE company_id = ? AND source = 'invoice_payment' "
+        "AND status = 'pending' AND raw_line_json LIKE ?",
+        (company_id, f'%"invoiceId": {invoice["id"]}%'),
+    ).fetchone()
+    if already_suggested:
+        return False
+    db.execute(
+        "INSERT INTO clarification_queue (company_id, source, raw_line_json, suggested_debit, "
+        "suggested_credit, suggested_amount_pence, confidence, reason) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            company_id, "invoice_payment",
+            json.dumps({"date": date, "desc": desc, "amount": amount, "invoiceId": invoice["id"]}),
+            cash_account, "Trade Receivables", to_pence(amount), 0.8,
+            f'This bank receipt is exactly the amount of your outstanding invoice "{invoice["desc"]}" '
+            f"(#{invoice['id']:04d}) — looks like the customer paying it.",
+        ),
+    )
+    return True
+
+
 def queue_plaid_line_if_unsure(db, company_id, cash_account, date, desc, amount, line_id=None):
     """The user shouldn't have to pick debit/credit for every bank feed line by hand — this is
     the automated path for that. A known description (exact match against a learned preset) is
@@ -6324,6 +6364,9 @@ def queue_plaid_line_if_unsure(db, company_id, cash_account, date, desc, amount,
     the ledger with no human step at all. Only a genuinely new, unrecognised description falls
     through to the clarification queue — posting that one automatically based on nothing but the
     sign of the amount would be a silent guess."""
+    if maybe_queue_invoice_payment_suggestion(db, company_id, cash_account, date, desc, amount):
+        return  # queued as a probable invoice payment — don't also categorize/post it as ordinary income
+
     preset = db.execute(
         "SELECT debit, credit FROM presets WHERE company_id = ? AND desc_key = ?",
         (company_id, desc.strip().lower()),
@@ -6571,6 +6614,7 @@ def bulk_create_bank_lines(company_id):
                 "INSERT INTO bank_lines (company_id, cash_account, date, desc, amount_pence) VALUES (?,?,?,?,?)",
                 (company_id, cash_account, date, desc, to_pence(amount)),
             )
+        maybe_queue_invoice_payment_suggestion(db, company_id, cash_account, date, desc, float(amount))
         inserted += 1
     db.commit()
     return jsonify({"inserted": inserted})

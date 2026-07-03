@@ -4871,7 +4871,24 @@ function renderClarificationQueue() {
   }
   wrap.style.display = '';
   document.getElementById('clarification-queue-count').textContent = `${clarificationQueue.length} pending`;
-  body.innerHTML = clarificationQueue.map(item => `
+  body.innerHTML = clarificationQueue.map(item => {
+    if (item.source === 'invoice_payment') {
+      // A probable customer payment — one confirm marks the invoice paid via the existing /pay
+      // endpoint (posting Cash / Trade Receivables), instead of asking for debit/credit inputs.
+      return `
+    <div class="panel" style="margin-bottom:10px; border-left:3px solid var(--good);">
+      <div style="display:flex; justify-content:space-between; align-items:baseline;">
+        <div><strong>${fmtDate(item.rawLine.date || '')}</strong> — ${escapeHtml(item.rawLine.desc || '')} <span class="money">${fmt(item.suggestedAmount)}</span></div>
+        <span class="badge badge-high">likely invoice payment</span>
+      </div>
+      <div class="sub" style="margin:4px 0 8px;">${escapeHtml(item.reason || '')}</div>
+      <div class="toolbar" style="margin-top:8px;">
+        <button class="btn-primary" onclick="confirmInvoicePayment(${item.id}, ${item.rawLine.invoiceId}, '${escapeHtml(item.rawLine.date || '')}')">Yes — mark invoice #${String(item.rawLine.invoiceId).padStart(4, '0')} paid</button>
+        <button class="btn-secondary" onclick="skipClarification(${item.id})">No, it's something else</button>
+      </div>
+    </div>`;
+    }
+    return `
     <div class="panel" style="margin-bottom:10px; border-left:3px solid var(--color-danger);">
       <div style="display:flex; justify-content:space-between; align-items:baseline;">
         <div><strong>${fmtDate(item.rawLine.date || '')}</strong> — ${escapeHtml(item.rawLine.desc || '')} <span class="money">${fmt(item.suggestedAmount)}</span></div>
@@ -4886,7 +4903,20 @@ function renderClarificationQueue() {
         <button class="btn-primary" onclick="resolveClarification(${item.id})">Post with these accounts</button>
         <button class="btn-secondary" onclick="skipClarification(${item.id})">Skip for now</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+}
+
+async function confirmInvoicePayment(itemId, invoiceId, date) {
+  try {
+    await api(`/api/companies/${currentCompany.id}/invoices-bills/${invoiceId}/pay`, {
+      method: 'POST', body: JSON.stringify({ date: date || undefined })
+    });
+    await api(`/api/companies/${currentCompany.id}/clarification-queue/${itemId}/skip`, { method: 'POST' });
+  } catch (e) { showToast(e.message, 'error'); return; }
+  showToast('Invoice marked paid — the payment is on the ledger.', 'success');
+  await refreshAll();
+  await loadClarificationQueue();
 }
 
 async function resolveClarification(itemId) {
