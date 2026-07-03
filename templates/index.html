@@ -467,6 +467,27 @@
       </div>
     </div>
 
+    <div class="panel" id="business-pulse-card" style="margin-bottom:16px;">
+      <h2>Your Business Pulse <span class="pill" id="pulse-date"></span></h2>
+      <div class="sub" style="margin-bottom:10px;">Your regular brief — wins, what's owed, where cash is heading, and any deadlines. Always up to date here; you can also get it by email on your chosen days under Settings → Notifications.</div>
+      <div id="business-pulse-body"><div class="empty">Loading…</div></div>
+    </div>
+
+    <div class="panel" id="business-context-card" style="margin-bottom:16px; display:none; border-left:3px solid var(--accent);">
+      <h2>Tell me a little about the business</h2>
+      <div class="sub" style="margin-bottom:10px;">Thirty seconds, once — it makes every answer and summary more relevant to you. Skip it if you'd rather not.</div>
+      <label>What does the business sell?</label>
+      <input type="text" id="ctx-sells" placeholder="e.g. plumbing and heating services for homes">
+      <label>Biggest headache right now?</label>
+      <input type="text" id="ctx-headache" placeholder="e.g. customers paying late">
+      <label>Main goal this year?</label>
+      <input type="text" id="ctx-goal" placeholder="e.g. take on a second engineer">
+      <div class="toolbar" style="margin-top:10px;">
+        <button class="btn-primary" style="margin-top:0; width:auto;" onclick="saveBusinessContext()">Save</button>
+        <button class="btn-secondary" onclick="dismissBusinessContextCard()">Skip</button>
+      </div>
+    </div>
+
     <div id="dashboard" class="row2" style="grid-template-columns: repeat(5, 1fr); margin-bottom:16px;">
       <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--text);">
         <div class="sub" style="margin:0; display:flex; align-items:center; gap:6px;"><span style="font-size:15px;">💰</span>Cash position</div>
@@ -1483,6 +1504,13 @@
     </div>
 
     <div class="panel" style="margin-top:20px;">
+      <h2>Margins &amp; Pricing</h2>
+      <div class="sub" style="margin-bottom:12px;">Are you actually making money on what you sell, and is it getting better or worse? Gross margin is what's left of revenue after the direct cost of what you sold — before overheads. The pricing line shows the maths of a price change; whether to change prices is your call.</div>
+      <div style="overflow-x:auto;"><table class="trial" id="margins-table"></table></div>
+      <div id="pricing-scenario" class="sub" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
       <h2>Cash Flow Forecast</h2>
       <div class="sub" style="margin-bottom:12px;">Projected cash position: current cash, plus outstanding receivables/payables and recurring journal commitments due within each window. Not a guarantee — customers and suppliers don't always pay on the due date.</div>
       <div id="forecast-bars"></div>
@@ -1684,6 +1712,9 @@
         <option value="charity">Charity</option>
       </select>
 
+      <label style="margin-top:14px;">About your business <span style="color:var(--muted); font-weight:400;">(optional — makes AI answers and summaries more relevant)</span></label>
+      <textarea id="f-business-context" rows="3" placeholder="e.g. We sell: plumbing services. Biggest headache: late payers. Main goal this year: hire a second engineer." oninput="saveSettings()"></textarea>
+
       <h2 style="margin-top:24px;">Fund Accounting</h2>
       <div class="sub" style="margin-bottom:8px;">For charities/nonprofits: tag transactions with a fund (restricted/designated/unrestricted) and get a Statement of Financial Activities. Off by default — turning it on changes nothing else about how this company works.</div>
       <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); margin:0;">
@@ -1836,13 +1867,37 @@ ollama pull llama3.2-vision</pre>
 
     </div>
     <div data-settings-subpage="team">
+    <div class="panel" style="margin-top:20px;">
+      <h2>Automation &amp; Approvals</h2>
+      <div class="sub" style="margin-bottom:12px;">What runs by itself, what waits for your say-so, and what always needs an explicit confirmation. You're in control of the first two tiers; the third is policy and can't be loosened.</div>
+
+      <h2 style="font-size:13px;">Runs automatically — no approval needed</h2>
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); margin:6px 0;">
+        <input type="checkbox" id="auto-post-rules-enabled" style="width:auto;" onchange="saveSettings()"> Post bank feed lines automatically when they match one of your categorization rules
+      </label>
+      <div class="sub" style="margin:0 0 8px;">Off = rule matches still get the right accounts pre-filled, but wait in the review queue for a one-click confirm instead of posting silently.</div>
+      <div class="sub" style="margin:0 0 8px;">Also automatic (managed on their own panels): scheduled payroll, monthly depreciation, recurring journals &amp; invoices, accrual reversals, daily backups, and the Business Pulse.</div>
+
+      <h2 style="font-size:13px; margin-top:14px;">Suggested first — you approve each one</h2>
+      <div class="sub" style="margin:0 0 8px;">Bank line categorisation suggestions, reconciliation auto-match, "this looks like an invoice payment" confirmations, and rule-creation offers. Invoice auto-chase emails are controlled by the toggle in Notifications below.</div>
+
+      <h2 style="font-size:13px; margin-top:14px;">Always asks — every single time</h2>
+      <div class="sub" style="margin:0;">HMRC filings, dividends, marking things paid, and deleting data always need an explicit confirmation. That's policy, not a setting.</div>
+    </div>
+
     <div class="panel" id="settings-notifications-panel" style="margin-top:20px;">
       <h2>Notifications</h2>
-      <div class="sub" style="margin-bottom:10px;">A daily digest email — overdue invoices, a VAT deadline within 7 days (if HMRC is connected), and a nudge if bank reconciliation has gone stale. Checked once a day when the dashboard loads; needs an outbound email server below.</div>
+      <div class="sub" style="margin-bottom:10px;">Your Business Pulse always shows on the Home page — this section controls the optional email copy: overdue invoices, deadlines within 7 days, a stale-reconciliation nudge, and the 30-day cash outlook. Needs an outbound email server below.</div>
       <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); margin:0 0 10px;">
-        <input type="checkbox" id="notify-enabled" style="width:auto;" onchange="saveSettings()"> Enable daily digest
+        <input type="checkbox" id="notify-enabled" style="width:auto;" onchange="saveSettings()"> Email me the pulse
       </label>
-      <label>Send digest to</label>
+      <label>How often</label>
+      <select id="pulse-frequency" onchange="saveSettings()">
+        <option value="daily">Daily (only when there's something to report)</option>
+        <option value="weekly_monday">Weekly — Monday morning brief</option>
+        <option value="weekly_friday">Weekly — Friday wrap-up</option>
+      </select>
+      <label>Send it to</label>
       <input type="email" id="notify-email" placeholder="you@example.com" oninput="saveSettings()">
 
       <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); margin:16px 0 0;">
@@ -2781,6 +2836,9 @@ async function openCompany(id) {
   document.getElementById('brand-bank-details').value = currentCompany.brand_bank_details || '';
   renderBrandLogoPreview();
   document.getElementById('notify-enabled').checked = !!currentCompany.notifications_enabled;
+  document.getElementById('pulse-frequency').value = currentCompany.pulse_frequency || 'daily';
+  document.getElementById('auto-post-rules-enabled').checked = currentCompany.auto_post_rules_enabled !== 0;
+  document.getElementById('f-business-context').value = currentCompany.business_context || '';
   document.getElementById('auto-chase-enabled').checked = !!currentCompany.auto_chase_overdue_invoices;
   document.getElementById('show-cis-tools').checked = !!currentCompany.show_cis_tools;
   applyCisVisibility();
@@ -2832,6 +2890,7 @@ function buildSettingsPayload(extra) {
     lockedUntil: document.getElementById('f-locked-until').value,
     periodStartDate: document.getElementById('f-period-start').value,
     entityType: document.getElementById('f-entity-type').value,
+    businessContext: document.getElementById('f-business-context').value.trim(),
     fundAccountingEnabled: document.getElementById('f-fund-accounting').checked,
     costCentresEnabled: document.getElementById('f-cost-centres').checked,
     confidenceThreshold: parseFloat(document.getElementById('f-confidence-threshold').value),
@@ -2850,6 +2909,8 @@ function buildSettingsPayload(extra) {
     brandPaymentTerms: document.getElementById('brand-payment-terms').value,
     brandBankDetails: document.getElementById('brand-bank-details').value,
     notificationsEnabled: document.getElementById('notify-enabled').checked,
+    pulseFrequency: document.getElementById('pulse-frequency').value,
+    autoPostRulesEnabled: document.getElementById('auto-post-rules-enabled').checked,
     autoChaseOverdueInvoices: document.getElementById('auto-chase-enabled').checked,
     showCisTools: document.getElementById('show-cis-tools').checked,
     showFxTools: document.getElementById('show-fx-tools').checked,
@@ -3295,10 +3356,65 @@ async function refreshAll() {
   await loadCategorizationRules();
   renderCashFlowForecast();
   renderMonthlyPnL();
+  renderMarginsPanel();
   await loadStockItems();
   await loadMileageLog();
   await loadVatFilings();
   runNotificationsCheckQuietly();
+  loadBusinessPulse();
+  renderBusinessContextCard();
+}
+
+async function loadBusinessPulse() {
+  const body = document.getElementById('business-pulse-body');
+  if (!body) return;
+  let pulse;
+  try {
+    pulse = await api(`/api/companies/${currentCompany.id}/business-pulse`);
+  } catch (e) { body.innerHTML = '<div class="empty">Couldn\'t load the pulse just now.</div>'; return; }
+  document.getElementById('pulse-date').textContent = fmtDate(pulse.generatedAt);
+  if (!pulse.lines.length) {
+    body.innerHTML = '<div class="empty">All quiet — nothing owed, nothing due, nothing to chase. 🎉</div>';
+    return;
+  }
+  const tone = { win: 'var(--good)', warn: 'var(--bad)', info: 'var(--muted)' };
+  const icon = { win: '✅', warn: '⚠️', info: '·' };
+  body.innerHTML = pulse.lines.map(l => `
+    <div style="display:flex; gap:8px; padding:4px 0; font-size:13px;">
+      <span style="flex:0 0 auto;">${icon[l.kind] || '·'}</span>
+      <span style="color:${l.kind === 'info' ? 'var(--text)' : tone[l.kind]};">${escapeHtml(l.text)}</span>
+    </div>`).join('');
+}
+
+function businessContextDismissKey() { return `businessContextDismissed:${currentCompany.id}`; }
+
+function renderBusinessContextCard() {
+  const card = document.getElementById('business-context-card');
+  if (!card) return;
+  const dismissed = localStorage.getItem(businessContextDismissKey()) === '1';
+  card.style.display = (!currentCompany.business_context && !dismissed) ? '' : 'none';
+}
+
+async function saveBusinessContext() {
+  const parts = [
+    ['We sell', document.getElementById('ctx-sells').value.trim()],
+    ['Biggest headache', document.getElementById('ctx-headache').value.trim()],
+    ['Main goal this year', document.getElementById('ctx-goal').value.trim()],
+  ].filter(([, v]) => v).map(([label, v]) => `${label}: ${v}`);
+  if (!parts.length) { dismissBusinessContextCard(); return; }
+  const context = parts.join('. ');
+  document.getElementById('f-business-context').value = context; // keep the Settings copy in sync so a later saveSettings() can't clobber this
+  await api(`/api/companies/${currentCompany.id}/settings`, {
+    method: 'PUT', body: JSON.stringify(buildSettingsPayload({ businessContext: context })),
+  });
+  currentCompany.business_context = context;
+  renderBusinessContextCard();
+  showToast('Saved — answers and summaries will use this from now on.', 'success');
+}
+
+function dismissBusinessContextCard() {
+  localStorage.setItem(businessContextDismissKey(), '1');
+  renderBusinessContextCard();
 }
 
 // ---------- daily notifications digest (#9) — fires once per dashboard session; the backend
@@ -4977,14 +5093,101 @@ function renderAskHistory() {
   el.scrollTop = el.scrollHeight;
 }
 
+// ---------- Router: instant answers and action shortcuts, checked before any AI call ----------
+// The most common owner questions ("who owes me money?", "how much tax do I owe?") have exact
+// answers already sitting in the loaded data — answering them instantly, with zero AI provider
+// required, beats sending them to a model. Action phrases ("chase my invoices") offer to DO the
+// thing rather than talk about it. Anything unmatched falls through to the AI as before.
+
+function tryInstantAnswer(q) {
+  if (/who owes me|owed to me|outstanding invoices|unpaid invoices/.test(q)) {
+    const open = invoicesBills.filter(d => d.kind === 'invoice' && d.status === 'sent');
+    if (!open.length) return 'Nobody — there are no unpaid invoices right now. 🎉';
+    const total = open.reduce((s, d) => s + d.amount, 0);
+    const top = open.slice(0, 5).map(d => `  • #${String(d.id).padStart(4, '0')} ${d.desc} — ${fmt(d.amount)}, due ${fmtDate(d.dueDate)}`).join('\n');
+    return `${open.length} unpaid invoice(s), totalling ${fmt(total)}:\n${top}${open.length > 5 ? `\n  …and ${open.length - 5} more on the Invoices page.` : ''}`;
+  }
+  if (/what do i owe|unpaid bills|outstanding bills/.test(q)) {
+    const open = invoicesBills.filter(d => d.kind === 'bill' && d.status === 'sent');
+    if (!open.length) return 'Nothing — no unpaid bills on file. 🎉';
+    const total = open.reduce((s, d) => s + d.amount, 0);
+    return `${open.length} unpaid bill(s), totalling ${fmt(total)}. Details are on the Invoices page.`;
+  }
+  if (/how much tax|tax (do i|owed|owing)/.test(q)) {
+    const accounts = buildAccounts();
+    const TAX_ACCOUNTS = ['VAT Control Account', 'PAYE Payable', 'NI Payable', 'CIS Deductions Payable'];
+    const owed = TAX_ACCOUNTS.filter(n => accounts[n]).reduce((s, n) => s + accountNetBalance(accounts[n], getAccountType(n)), 0);
+    const parts = TAX_ACCOUNTS.filter(n => accounts[n]).map(n => `  • ${n}: ${fmt(accountNetBalance(accounts[n], getAccountType(n)))}`).join('\n');
+    return parts ? `Roughly ${fmt(owed)} across your tax accounts right now:\n${parts}` : 'No tax balances on the books yet — nothing owed so far.';
+  }
+  if (/cash (position|balance)|how much (cash|money) (do i|have)/.test(q)) {
+    const accounts = buildAccounts();
+    const cash = Object.keys(accounts).filter(n => getAccountType(n) === 'cash').reduce((s, n) => s + accountNetBalance(accounts[n], 'cash'), 0);
+    return `Cash position right now: ${fmt(cash)}. The 30/60/90-day forecast is under Reports → Statements & Forecast.`;
+  }
+  return null;
+}
+
+const ASK_ACTION_INTENTS = [
+  { re: /(chase|remind).*(invoice|customer|overdue)|invoice.*chase/, label: 'Chase overdue invoices now',
+    run: async () => { const r = await api(`/api/companies/${currentCompany.id}/run-notifications-check`, { method: 'POST', body: JSON.stringify({ force: true }) }); return r.chased && r.chased.length ? `Done — chased ${r.chased.length} overdue invoice(s).` : `Nothing was chased: ${r.reason || 'auto-chase may be off in Settings → Notifications, or nothing is at a reminder stage today.'}`; } },
+  { re: /close.*month|month[- ]end/, label: 'Open the month-end checklist',
+    run: async () => { showPage('reports'); showReportsSubpage('health'); return 'Opened the Month-End Checklist — "Run everything automatic now" is there too.'; } },
+  { re: /run payroll|pay (the )?(team|staff|employees)/, label: 'Run payroll now',
+    run: async () => { const r = await api(`/api/companies/${currentCompany.id}/run-payroll`, { method: 'POST' }); await refreshAll(); return r.posted.length ? `Payroll run — paid ${r.posted.map(p => p.name).join(', ')}.` : 'Nothing due — no employee\'s next pay date has arrived yet.'; } },
+  { re: /vat return|submit.*vat/, label: 'Open the VAT return',
+    run: async () => { showPage('reports'); showReportsSubpage('tax'); return 'Opened Tax & VAT — calculate the return there, then Submit to HMRC.'; } },
+];
+
 async function askLedger() {
   const input = document.getElementById('ask-question');
   const question = input.value.trim();
-  const statusEl = document.getElementById('ask-status');
   if (!question) return;
+  const q = question.toLowerCase();
+
+  const instant = tryInstantAnswer(q);
+  if (instant) {
+    input.value = '';
+    askHistory.push({ question, answer: instant, meta: 'Answered instantly from your data — no AI needed.' });
+    saveAskHistory();
+    renderAskHistory();
+    return;
+  }
+
+  const intent = ASK_ACTION_INTENTS.find(a => a.re.test(q));
+  if (intent) {
+    input.value = '';
+    const historyEl = document.getElementById('ask-history');
+    const chip = document.createElement('div');
+    chip.style.cssText = 'margin-bottom:10px; padding:8px; background:var(--panel-soft); border-radius:8px;';
+    chip.innerHTML = `<div style="font-weight:600;">${escapeHtml(question)}</div><div class="sub" style="margin:4px 0 8px;">Want me to do that?</div>`;
+    const doBtn = document.createElement('button');
+    doBtn.className = 'btn-primary'; doBtn.style.cssText = 'margin:0 8px 0 0; width:auto;'; doBtn.textContent = intent.label;
+    const answerBtn = document.createElement('button');
+    answerBtn.className = 'btn-secondary'; answerBtn.textContent = 'Just answer the question';
+    doBtn.onclick = async () => {
+      chip.remove();
+      let outcome;
+      try { outcome = await intent.run(); } catch (e) { outcome = e.message; }
+      askHistory.push({ question, answer: outcome, meta: 'Action shortcut — no AI needed.' });
+      saveAskHistory();
+      renderAskHistory();
+    };
+    answerBtn.onclick = () => { chip.remove(); askLedgerAI(question); };
+    chip.appendChild(doBtn); chip.appendChild(answerBtn);
+    historyEl.appendChild(chip);
+    historyEl.scrollTop = historyEl.scrollHeight;
+    return;
+  }
+
+  input.value = '';
+  await askLedgerAI(question);
+}
+
+async function askLedgerAI(question) {
+  const statusEl = document.getElementById('ask-status');
   if (!currentCompany.ai_api_key_set) { statusEl.textContent = 'Turn on an AI provider under Settings → AI Features first (Claude, paid, or Ollama, free).'; return; }
   statusEl.textContent = 'Reading the ledger…';
-  input.value = '';
 
   let result;
   try {
@@ -5865,6 +6068,55 @@ function renderTaxComputation() {
 }
 
 // ---------- P&L by month (#15) ----------
+function renderMarginsPanel() {
+  const table = document.getElementById('margins-table');
+  if (!table) return;
+  // Last 6 months of revenue vs direct costs (COGS), straight from the ledger — same account
+  // typing every other report uses, so these figures always agree with the P&L.
+  const months = [];
+  const cursor = new Date();
+  cursor.setDate(1);
+  for (let i = 5; i >= 0; i--) {
+    months.push(localMonthKey(new Date(cursor.getFullYear(), cursor.getMonth() - i, 1)));
+  }
+  const byMonth = {};
+  for (const t of transactions) {
+    const month = t.date.slice(0, 7);
+    if (!months.includes(month)) continue;
+    const entry = byMonth[month] = byMonth[month] || { revenue: 0, cogs: 0 };
+    for (const [account, sign] of [[t.debit, 1], [t.credit, -1]]) {
+      const type = getAccountType(account);
+      if (type === 'revenue') entry.revenue -= sign * t.amount; // credit-normal
+      else if (type === 'cogs') entry.cogs += sign * t.amount;  // debit-normal
+    }
+  }
+  const rows = months.map(m => {
+    const e = byMonth[m] || { revenue: 0, cogs: 0 };
+    const margin = e.revenue - e.cogs;
+    const pct = e.revenue > 0 ? (margin / e.revenue * 100) : null;
+    return { m, ...e, margin, pct };
+  });
+  if (!rows.some(r => r.revenue || r.cogs)) {
+    table.innerHTML = '<tr><td class="empty">No revenue or direct costs in the last 6 months yet.</td></tr>';
+    document.getElementById('pricing-scenario').textContent = '';
+    return;
+  }
+  table.innerHTML = '<tr><th>Month</th><th class="num">Revenue</th><th class="num">Direct costs</th><th class="num">Gross margin</th><th class="num">Margin %</th></tr>' +
+    rows.map(r => `<tr><td>${r.m}</td><td class="num">${fmt(r.revenue)}</td><td class="num">${fmt(r.cogs)}</td><td class="num">${fmt(r.margin)}</td><td class="num">${r.pct === null ? '—' : r.pct.toFixed(1) + '%'}</td></tr>`).join('');
+
+  // Data-only pricing scenario over the last 3 months: what the same volume would have earned
+  // at ±5% prices. Pure arithmetic on real figures — no recommendation, no elasticity guess.
+  const last3 = rows.slice(-3);
+  const rev3 = last3.reduce((s, r) => s + r.revenue, 0);
+  const margin3 = last3.reduce((s, r) => s + r.margin, 0);
+  if (rev3 > 0) {
+    document.getElementById('pricing-scenario').textContent =
+      `Pricing maths (last 3 months, same volume): at +5% prices, gross profit would have been ${fmt(margin3 + rev3 * 0.05)} instead of ${fmt(margin3)}; at -5%, ${fmt(margin3 - rev3 * 0.05)}. Whether customers would pay it is the judgement call this can't make for you.`;
+  } else {
+    document.getElementById('pricing-scenario').textContent = '';
+  }
+}
+
 function renderMonthlyPnL() {
   const table = document.getElementById('monthly-pnl-table');
   if (!table) return;

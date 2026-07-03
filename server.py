@@ -963,6 +963,15 @@ def init_db():
         # normal parameterized statement — so the constant is inlined via an f-string. Safe here
         # since DEFAULT_PAYROLL_RATES is a fixed dict this app controls, never user input.
         db.execute(f"ALTER TABLE companies ADD COLUMN payroll_rates_json TEXT DEFAULT '{json.dumps(DEFAULT_PAYROLL_RATES)}'")
+    if "pulse_frequency" not in company_cols:
+        # Business Pulse cadence + context + automation-consent settings, added together:
+        # pulse_frequency gates the digest EMAIL cadence (the in-app pulse card is always live);
+        # business_context is the owner's own words about the business, fed to the AI features;
+        # auto_post_rules_enabled=1 preserves existing behavior (rule-matched bank lines post
+        # automatically) while letting cautious owners route them through review instead.
+        db.execute("ALTER TABLE companies ADD COLUMN pulse_frequency TEXT DEFAULT 'daily'")
+        db.execute("ALTER TABLE companies ADD COLUMN business_context TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN auto_post_rules_enabled INTEGER DEFAULT 1")
     if "employment_allowance_used_pence" not in company_cols:
         # Employment Allowance is claimed cumulatively against the company's WHOLE employer NI
         # bill for a UK tax year (6 April to 5 April), not per employee or per pay run — so the
@@ -1756,6 +1765,7 @@ def list_companies():
         "brand_logo_path, brand_color, brand_display_name, brand_address, brand_payment_terms, brand_bank_details, brand_template, ai_provider, ollama_url, ollama_model, payroll_rates_json, "
         "stripe_secret_key, stripe_publishable_key, stripe_webhook_secret, stripe_payment_account, auto_chase_overdue_invoices, "
         "business_type, entity_type, show_cis_tools, show_fx_tools, tour_completed, employment_allowance_enabled, "
+        "pulse_frequency, business_context, auto_post_rules_enabled, "
         "'owner' as permission "
         "FROM companies WHERE user_id = ? "
         "UNION ALL "
@@ -1766,6 +1776,7 @@ def list_companies():
         "c.brand_logo_path, c.brand_color, c.brand_display_name, c.brand_address, c.brand_payment_terms, c.brand_bank_details, c.brand_template, c.ai_provider, c.ollama_url, c.ollama_model, c.payroll_rates_json, "
         "c.stripe_secret_key, c.stripe_publishable_key, c.stripe_webhook_secret, c.stripe_payment_account, c.auto_chase_overdue_invoices, "
         "c.business_type, c.entity_type, c.show_cis_tools, c.show_fx_tools, c.tour_completed, c.employment_allowance_enabled, "
+        "c.pulse_frequency, c.business_context, c.auto_post_rules_enabled, "
         "cm.permission "
         "FROM companies c JOIN company_members cm ON cm.company_id = c.id "
         "WHERE cm.user_id = ? "
@@ -1939,6 +1950,14 @@ def update_settings(company_id):
     if "employmentAllowanceEnabled" in data:
         db.execute("UPDATE companies SET employment_allowance_enabled = ? WHERE id = ?",
                    (1 if data.get("employmentAllowanceEnabled") else 0, company_id))
+    if "pulseFrequency" in data:
+        frequency = data.get("pulseFrequency") if data.get("pulseFrequency") in ("daily", "weekly_monday", "weekly_friday") else "daily"
+        db.execute("UPDATE companies SET pulse_frequency = ? WHERE id = ?", (frequency, company_id))
+    if "businessContext" in data:
+        db.execute("UPDATE companies SET business_context = ? WHERE id = ?", ((data.get("businessContext") or "").strip(), company_id))
+    if "autoPostRulesEnabled" in data:
+        db.execute("UPDATE companies SET auto_post_rules_enabled = ? WHERE id = ?",
+                   (1 if data.get("autoPostRulesEnabled") else 0, company_id))
     if data.get("hmrcClientSecret"):
         db.execute("UPDATE companies SET hmrc_client_secret = ? WHERE id = ?", (encrypt_secret(data["hmrcClientSecret"]), company_id))
     elif data.get("clearHmrcClientSecret"):
@@ -3684,7 +3703,9 @@ def ask_ledger(company_id):
     today = datetime.date.today().isoformat()
     business_type = g.company["business_type"] or "general"
     company_name = g.company["brand_display_name"] or g.company["name"]
-    system_context = f"""You are a financial assistant answering questions about {company_name}'s bookkeeping ledger — a {business_type} business. Today's date is {today}. Below is the full transaction ledger as CSV (each row is one debit/credit posting).
+    owner_context = (g.company["business_context"] or "").strip()
+    owner_context_block = f"\nThe owner describes the business like this (use it to make answers relevant): {owner_context}\n" if owner_context else ""
+    system_context = f"""You are a financial assistant answering questions about {company_name}'s bookkeeping ledger — a {business_type} business. Today's date is {today}.{owner_context_block} Below is the full transaction ledger as CSV (each row is one debit/credit posting).
 {"Note: this is only the most recent " + str(MAX_ROWS) + " transactions, the ledger has more history than shown." if truncated else ""}
 
 Answer concisely and specifically, citing actual figures computed from this data — don't guess or estimate. If
@@ -3757,8 +3778,10 @@ def month_end_narrative(company_id):
         rows.append(f"{acc} ({acc_type}): this month {cur_bal:.2f}, last month {prev_bal:.2f}"
                     + (f", change {pct_change:+.0f}%" if pct_change is not None else ", new this month" if cur_bal else ""))
 
+    owner_context = (g.company["business_context"] or "").strip()
+    owner_context_line = f"The owner describes the business like this: {owner_context}\n" if owner_context else ""
     prompt = f"""You are a financial assistant writing a short month-end summary for a small UK business owner.
-Period: {period}. Below is each revenue/cost-of-sales/expense account's total for this month vs the prior month.
+{owner_context_line}Period: {period}. Below is each revenue/cost-of-sales/expense account's total for this month vs the prior month.
 
 {chr(10).join(rows)}
 
@@ -5578,6 +5601,106 @@ def compute_statutory_deadlines(company, today):
     return deadlines
 
 
+def build_pulse_lines(db, company, today_date):
+    """One source for the Business Pulse content, shared by the digest email and the always-on
+    in-app pulse card (which needs no SMTP — previously the digest was email-only, so anyone who
+    never configured a mail server got no proactive summary at all). Returns [{text, kind}] with
+    kind win|info|warn: wins first (a brief that only ever nags gets ignored), then the numbers
+    that need attention, then a simple 30-day outlook, then statutory deadlines."""
+    company_id = company["id"]
+    today = today_date.isoformat()
+    lines = []
+
+    # Wins — money in and invoices out over the last 7 days.
+    week_ago = (today_date - datetime.timedelta(days=7)).isoformat()
+    paid_last_week = db.execute(
+        "SELECT COUNT(*) as n, COALESCE(SUM(amount_pence), 0) as total FROM invoices_bills "
+        "WHERE company_id = ? AND kind = 'invoice' AND status = 'paid' AND paid_at >= ?",
+        (company_id, week_ago),
+    ).fetchone()
+    if paid_last_week["n"]:
+        lines.append({"kind": "win", "text": f"{paid_last_week['n']} invoice(s) paid in the last 7 days — {from_pence(paid_last_week['total']):,.2f} in."})
+    sent_last_week = db.execute(
+        "SELECT COUNT(*) as n FROM invoices_bills WHERE company_id = ? AND kind = 'invoice' AND sent_at >= ?",
+        (company_id, week_ago),
+    ).fetchone()["n"]
+    if sent_last_week:
+        lines.append({"kind": "win", "text": f"{sent_last_week} invoice(s) sent in the last 7 days."})
+
+    overdue = db.execute(
+        "SELECT id, desc, due_date, amount_pence FROM invoices_bills "
+        "WHERE company_id = ? AND kind = 'invoice' AND status = 'sent' AND due_date < ?",
+        (company_id, today),
+    ).fetchall()
+    if overdue:
+        total = sum(from_pence(r["amount_pence"]) for r in overdue)
+        lines.append({"kind": "warn", "text": f"{len(overdue)} invoice(s) overdue, totalling {total:,.2f}:"})
+        for r in overdue[:10]:
+            lines.append({"kind": "warn", "text": f"  - #{r['id']:04d} {r['desc']} — due {r['due_date']}, {from_pence(r['amount_pence']):,.2f}"})
+
+    if (company["hmrc_vrn"] or "").strip() and decrypt_secret(company["hmrc_access_token"]):
+        try:
+            obligations = call_hmrc(company, "GET", f"/organisations/vat/{company['hmrc_vrn'].strip()}/obligations?status=O")
+            for ob in obligations.get("obligations", []):
+                due = ob.get("due")
+                if due and due <= (today_date + datetime.timedelta(days=7)).isoformat():
+                    lines.append({"kind": "warn", "text": f"VAT return due {due} (period {ob.get('start')} to {ob.get('end')})."})
+        except HmrcError:
+            pass  # don't let an HMRC API hiccup block the rest of the pulse
+
+    last_reconciled = db.execute(
+        "SELECT MAX(statement_date) as d FROM bank_reconciliations WHERE company_id = ? AND status = 'closed'", (company_id,)
+    ).fetchone()["d"]
+    stale_cutoff = (today_date - datetime.timedelta(days=35)).isoformat()
+    if not last_reconciled or last_reconciled < stale_cutoff:
+        lines.append({"kind": "info", "text": f"Bank reconciliation hasn't been closed since {last_reconciled or 'ever'} — over a month ago."})
+
+    # Simple 30-day cash outlook: current cash, plus invoices due in, minus bills due out, minus
+    # recurring commitments falling due — deliberately rough (assumes everyone pays on time),
+    # the same simplification the on-screen Cash Flow Forecast states openly.
+    horizon = (today_date + datetime.timedelta(days=30)).isoformat()
+    cash_now = compute_company_financials(db, company_id)["totals"]["cash"]
+    invoices_due_in = from_pence(db.execute(
+        "SELECT COALESCE(SUM(amount_pence), 0) as t FROM invoices_bills "
+        "WHERE company_id = ? AND kind = 'invoice' AND status = 'sent' AND due_date <= ?",
+        (company_id, horizon),
+    ).fetchone()["t"])
+    bills_due_out = from_pence(db.execute(
+        "SELECT COALESCE(SUM(amount_pence), 0) as t FROM invoices_bills "
+        "WHERE company_id = ? AND kind = 'bill' AND status = 'sent' AND due_date <= ?",
+        (company_id, horizon),
+    ).fetchone()["t"])
+    recurring_out = from_pence(db.execute(
+        "SELECT COALESCE(SUM(amount_pence), 0) as t FROM recurring_journals "
+        "WHERE company_id = ? AND next_due <= ? AND (end_date = '' OR end_date >= next_due)",
+        (company_id, horizon),
+    ).fetchone()["t"])
+    projected = cash_now + invoices_due_in - bills_due_out - recurring_out
+    if cash_now or invoices_due_in or bills_due_out or recurring_out:
+        outlook_kind = "warn" if projected < 0 else "info"
+        outlook = (f"30-day outlook: cash {cash_now:,.2f} now, roughly {projected:,.2f} in a month "
+                   f"(+{invoices_due_in:,.2f} invoices due in, -{bills_due_out + recurring_out:,.2f} bills and commitments due out — assumes everyone pays on time).")
+        # From the 25th, the outlook doubles as the month-end heads-up so a tight month is
+        # flagged before it becomes a missed payroll or rent payment.
+        if today_date.day >= 25 and projected < 0:
+            outlook = "Month-end heads-up: " + outlook
+        lines.append({"kind": outlook_kind, "text": outlook})
+
+    for deadline in compute_statutory_deadlines(company, today_date):
+        lines.append({"kind": "warn", "text": f"{deadline['label']} on {deadline['due']}."})
+
+    return lines
+
+
+@app.route("/api/companies/<int:company_id>/business-pulse", methods=["GET"])
+@login_required
+@company_required
+def business_pulse(company_id):
+    db = get_db()
+    lines = build_pulse_lines(db, g.company, datetime.date.today())
+    return jsonify({"lines": lines, "generatedAt": datetime.date.today().isoformat()})
+
+
 def run_notifications_for_company(db, company, force=False, fallback_email=None):
     """#9: the actual notification/chasing logic, independent of Flask's request context so it
     can run both from the on-demand route AND the background scheduler (run_scheduler_loop)
@@ -5635,39 +5758,21 @@ def run_notifications_for_company(db, company, force=False, fallback_email=None)
     if not force and already_ran_today:
         return {"sent": False, "chased": chased, "reason": "Already checked today."}
 
+    frequency = company["pulse_frequency"] or "daily"
+    email_day_matches = (
+        frequency == "daily"
+        or (frequency == "weekly_monday" and today_date.weekday() == 0)
+        or (frequency == "weekly_friday" and today_date.weekday() == 4)
+    )
+    if not force and not email_day_matches:
+        db.execute("UPDATE companies SET last_notification_run = ? WHERE id = ?", (today, company_id))
+        db.commit()
+        return {"sent": False, "chased": chased, "reason": "Not a pulse email day for this company's cadence."}
+
     to_email = company["notify_email"] or fallback_email
-    lines = []
-
-    overdue = db.execute(
-        "SELECT id, desc, due_date, amount_pence FROM invoices_bills "
-        "WHERE company_id = ? AND kind = 'invoice' AND status = 'sent' AND due_date < ?",
-        (company_id, today),
-    ).fetchall()
-    if overdue:
-        total = sum(from_pence(r["amount_pence"]) for r in overdue)
-        lines.append(f"{len(overdue)} invoice(s) overdue, totalling {total:,.2f}:")
-        for r in overdue[:10]:
-            lines.append(f"  - #{r['id']:04d} {r['desc']} — due {r['due_date']}, {from_pence(r['amount_pence']):,.2f}")
-
-    if (company["hmrc_vrn"] or "").strip() and decrypt_secret(company["hmrc_access_token"]):
-        try:
-            obligations = call_hmrc(company, "GET", f"/organisations/vat/{company['hmrc_vrn'].strip()}/obligations?status=O")
-            for ob in obligations.get("obligations", []):
-                due = ob.get("due")
-                if due and due <= (datetime.date.today() + datetime.timedelta(days=7)).isoformat():
-                    lines.append(f"VAT return due {due} (period {ob.get('start')} to {ob.get('end')}).")
-        except HmrcError:
-            pass  # don't let an HMRC API hiccup block the rest of the digest
-
-    last_reconciled = db.execute(
-        "SELECT MAX(statement_date) as d FROM bank_reconciliations WHERE company_id = ? AND status = 'closed'", (company_id,)
-    ).fetchone()["d"]
-    stale_cutoff = (datetime.date.today() - datetime.timedelta(days=35)).isoformat()
-    if not last_reconciled or last_reconciled < stale_cutoff:
-        lines.append(f"Bank reconciliation hasn't been closed since {last_reconciled or 'ever'} — over a month ago.")
-
-    for deadline in compute_statutory_deadlines(company, today_date):
-        lines.append(f"{deadline['label']} on {deadline['due']}.")
+    lines = [l["text"] for l in build_pulse_lines(db, company, today_date) if l["kind"] != "win"]
+    # The email keeps its original job — things that need attention. Wins live on the in-app
+    # pulse card; an email that fires just to say "money came in" would train people to ignore it.
 
     db.execute("UPDATE companies SET last_notification_run = ? WHERE id = ?", (today, company_id))
     db.commit()
@@ -6383,6 +6488,20 @@ def queue_plaid_line_if_unsure(db, company_id, cash_account, date, desc, amount,
             final_debit, final_credit = debit, credit
         else:
             final_debit, final_credit = (cash_account, credit) if amount > 0 else (debit, cash_account)
+        company_row = db.execute("SELECT auto_post_rules_enabled FROM companies WHERE id = ?", (company_id,)).fetchone()
+        if not company_row["auto_post_rules_enabled"]:
+            # The owner turned rule auto-posting off (Automation & approvals): still use the
+            # rule's accounts, but as a pre-filled review suggestion instead of a silent post.
+            db.execute(
+                "INSERT INTO clarification_queue (company_id, source, raw_line_json, suggested_debit, "
+                "suggested_credit, suggested_amount_pence, confidence, reason) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    company_id, "plaid", json.dumps({"date": date, "desc": desc, "amount": abs(amount)}),
+                    final_debit, final_credit, to_pence(abs(amount)), 0.9,
+                    "Matched one of your categorization rules — rule auto-posting is turned off in Automation & approvals, so it's here for a one-click confirm instead.",
+                ),
+            )
+            return
         try:
             g.company = g.company if getattr(g, "company", None) else db.execute(
                 "SELECT * FROM companies WHERE id = ?", (company_id,)
