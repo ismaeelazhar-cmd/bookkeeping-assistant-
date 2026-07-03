@@ -5616,15 +5616,44 @@ function renderTaxComputation() {
   const capitalAllowances = parseFloat(document.getElementById('tax-capital-allowances').value) || 0;
   const rate = parseFloat(document.getElementById('tax-rate').value);
   const taxableProfit = netProfit + depreciationCharged - capitalAllowances;
-  const estimatedTax = Math.max(0, taxableProfit) * rate / 100;
+  const taxBase = Math.max(0, taxableProfit); // a loss owes no tax, but is still shown as a real (negative) taxable profit below
 
-  table.innerHTML = [
+  const rows = [
     lineRow('Net profit per accounts (this period)', netProfit),
     lineRow('Add back: depreciation charged', depreciationCharged),
     lineRow('Less: capital allowances claimed', -capitalAllowances),
     lineRow('Taxable profit', taxableProfit, { total: true }),
-    lineRow(`Estimated tax due (${rate}%)`, estimatedTax, { total: true }),
-  ].join('');
+  ];
+
+  if (currentCompany.entity_type === 'limited_company') {
+    // Real UK Corporation Tax isn't a rate you pick — profits up to £50,000 pay the 19% small
+    // profits rate, profits over £250,000 pay the 25% main rate, and everything between is
+    // tapered by marginal relief rather than a cliff-edge jump straight to 25%. Applies
+    // regardless of which option the dropdown above has selected, since for a real company
+    // there's no actual choice here — simplified by assuming no "augmented profits" from other
+    // income (dividends received etc.) and no associated companies, both genuine edge cases a
+    // real return would need to check.
+    const SMALL_PROFITS_LIMIT = 50000, MAIN_RATE_LIMIT = 250000, MAIN_RATE = 25, SMALL_RATE = 19, MARGINAL_RELIEF_FRACTION = 3 / 200;
+    let estimatedTax, rateLabel;
+    if (taxBase <= SMALL_PROFITS_LIMIT) {
+      estimatedTax = taxBase * SMALL_RATE / 100;
+      rateLabel = `${SMALL_RATE}% small profits rate`;
+    } else if (taxBase >= MAIN_RATE_LIMIT) {
+      estimatedTax = taxBase * MAIN_RATE / 100;
+      rateLabel = `${MAIN_RATE}% main rate`;
+    } else {
+      const marginalRelief = (MAIN_RATE_LIMIT - taxBase) * MARGINAL_RELIEF_FRACTION;
+      estimatedTax = taxBase * MAIN_RATE / 100 - marginalRelief;
+      const effectiveRate = taxBase > 0 ? (estimatedTax / taxBase) * 100 : MAIN_RATE;
+      rateLabel = `${effectiveRate.toFixed(1)}% effective rate, after marginal relief`;
+    }
+    rows.push(lineRow(`Estimated Corporation Tax due (${rateLabel})`, estimatedTax, { total: true }));
+  } else {
+    const estimatedTax = taxBase * rate / 100;
+    rows.push(lineRow(`Estimated tax due (${rate}%)`, estimatedTax, { total: true }));
+  }
+
+  table.innerHTML = rows.join('');
 }
 
 // ---------- P&L by month (#15) ----------
