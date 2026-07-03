@@ -770,6 +770,62 @@
       <div id="cj-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
 
+    <div class="panel" style="margin-top:20px;" data-advanced="1" id="payroll-register-panel">
+      <h2>Payroll Register</h2>
+      <div class="sub" style="margin-bottom:12px;">Add each employee once — payroll runs itself automatically from here on (the same hourly background job that runs recurring journals/invoices), posting PAYE, NI, pension, and net pay, and moving each employee's next pay date forward. Use "Run payroll now" to run it immediately instead of waiting for the next automatic pass.</div>
+
+      <table class="inbox"><thead><tr><th>Name</th><th>Frequency</th><th class="num">Gross pay</th><th>Student loan</th><th>Next pay date</th><th>Active</th><th></th></tr></thead><tbody id="employees-body"></tbody></table>
+
+      <div class="panel" style="background:var(--panel-soft); margin-top:14px; box-shadow:none;">
+        <h2 style="margin-top:0; font-size:13px;">Add an employee</h2>
+        <div class="row2">
+          <div><label>Name</label><input type="text" id="emp-name" placeholder="e.g. Jane Doe"></div>
+          <div><label>Pay frequency</label>
+            <select id="emp-frequency">
+              <option value="monthly" selected>Monthly</option>
+              <option value="weekly">Weekly</option>
+              <option value="fortnightly">Fortnightly</option>
+              <option value="annually">Annually</option>
+            </select>
+          </div>
+        </div>
+        <div class="row2">
+          <div><label>Gross pay (per period)</label><input type="number" id="emp-gross" step="0.01" min="0" placeholder="0.00"></div>
+          <div><label>Next pay date</label><input type="date" id="emp-next-pay-date"></div>
+        </div>
+        <div class="row2">
+          <div><label>Student loan plan</label>
+            <select id="emp-student-loan">
+              <option value="">None</option>
+              <option value="plan1">Plan 1</option>
+              <option value="plan2">Plan 2</option>
+              <option value="plan4">Plan 4</option>
+              <option value="plan5">Plan 5</option>
+              <option value="postgrad">Postgraduate</option>
+              <option value="plan1+postgrad">Plan 1 + Postgraduate</option>
+              <option value="plan2+postgrad">Plan 2 + Postgraduate</option>
+              <option value="plan4+postgrad">Plan 4 + Postgraduate</option>
+              <option value="plan5+postgrad">Plan 5 + Postgraduate</option>
+            </select>
+          </div>
+          <div></div>
+        </div>
+        <div class="row2">
+          <div><label>Employee pension (%)</label><input type="number" id="emp-employee-pension-pct" step="0.1" min="0" placeholder="0"></div>
+          <div><label>Employer pension (%)</label><input type="number" id="emp-employer-pension-pct" step="0.1" min="0" placeholder="0"></div>
+        </div>
+        <button class="btn-primary" onclick="addEmployee()">Add employee</button>
+        <div id="emp-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+      </div>
+
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); margin-top:14px;">
+        <input type="checkbox" id="emp-allowance-enabled" style="width:auto;" onchange="toggleEmploymentAllowance()"> This company claims Employment Allowance (up to £5,000/year off employer NI — check eligibility with your accountant)
+      </label>
+
+      <button class="btn-secondary" style="width:100%; margin-top:14px;" onclick="runPayrollNow()">Run payroll now</button>
+      <div id="payroll-run-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
+
     <div class="panel" style="margin-top:20px;" data-advanced="1">
       <h2>Payroll Journal</h2>
       <div class="sub" style="margin-bottom:12px;">Enter the figures from your payroll run (or payslip) — this posts DR Salary Expense against CR NI Payable / PAYE Payable / Pension Payable / Net Pay Payable in one linked journal. Net pay is calculated, not entered.</div>
@@ -3193,6 +3249,7 @@ async function refreshAll() {
   await loadRecurringInvoices();
   await loadAccrualPrepayments();
   await loadPayrollRates();
+  await loadEmployees();
   await loadCategorizationRules();
   renderCashFlowForecast();
   renderMonthlyPnL();
@@ -7330,6 +7387,110 @@ const PAYROLL_RATE_KEYS = [
   'basicRate', 'higherRate', 'additionalRate', 'niEmployeePrimaryThreshold', 'niEmployeeUpperThreshold',
   'niEmployeeRate', 'niEmployeeUpperRate', 'niEmployerSecondaryThreshold', 'niEmployerRate',
 ];
+
+const STUDENT_LOAN_PLAN_LABELS = {
+  '': '—', plan1: 'Plan 1', plan2: 'Plan 2', plan4: 'Plan 4', plan5: 'Plan 5', postgrad: 'Postgrad',
+  'plan1+postgrad': 'Plan 1 + PG', 'plan2+postgrad': 'Plan 2 + PG', 'plan4+postgrad': 'Plan 4 + PG', 'plan5+postgrad': 'Plan 5 + PG',
+};
+
+let employees = [];
+
+async function loadEmployees() {
+  try {
+    employees = await api(`/api/companies/${currentCompany.id}/employees`);
+  } catch (e) { employees = []; }
+  renderEmployees();
+  const toggle = document.getElementById('emp-allowance-enabled');
+  if (toggle) toggle.checked = !!currentCompany.employment_allowance_enabled;
+}
+
+function renderEmployees() {
+  const body = document.getElementById('employees-body');
+  if (!body) return;
+  if (!employees.length) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">No employees yet — add one below.</td></tr>';
+    return;
+  }
+  body.innerHTML = employees.map(e => `
+    <tr>
+      <td>${escapeHtml(e.name)}</td>
+      <td>${escapeHtml(e.payFrequency)}</td>
+      <td class="num">${fmt(e.grossPay)}</td>
+      <td>${escapeHtml(STUDENT_LOAN_PLAN_LABELS[e.studentLoanPlan] || e.studentLoanPlan)}</td>
+      <td>${escapeHtml(e.nextPayDate)}</td>
+      <td><input type="checkbox" ${e.active ? 'checked' : ''} onchange="toggleEmployeeActive(${e.id}, this.checked)"></td>
+      <td><button class="btn-danger" onclick="deleteEmployee(${e.id})">✕</button></td>
+    </tr>`).join('');
+}
+
+async function addEmployee() {
+  const statusEl = document.getElementById('emp-status');
+  const name = document.getElementById('emp-name').value.trim();
+  const grossPay = parseFloat(document.getElementById('emp-gross').value);
+  const nextPayDate = document.getElementById('emp-next-pay-date').value;
+  if (!name || !grossPay || grossPay <= 0 || !nextPayDate) {
+    statusEl.textContent = 'Name, a positive gross pay, and a next pay date are all required.'; return;
+  }
+  try {
+    await api(`/api/companies/${currentCompany.id}/employees`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name, grossPay, nextPayDate,
+        payFrequency: document.getElementById('emp-frequency').value,
+        studentLoanPlan: document.getElementById('emp-student-loan').value,
+        employeePensionPct: parseFloat(document.getElementById('emp-employee-pension-pct').value) || 0,
+        employerPensionPct: parseFloat(document.getElementById('emp-employer-pension-pct').value) || 0,
+      }),
+    });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  statusEl.textContent = '';
+  showToast(`${name} added to the payroll register.`, 'success');
+  ['emp-name', 'emp-gross', 'emp-next-pay-date'].forEach(id => { document.getElementById(id).value = ''; });
+  document.getElementById('emp-employee-pension-pct').value = '';
+  document.getElementById('emp-employer-pension-pct').value = '';
+  await loadEmployees();
+}
+
+async function toggleEmployeeActive(id, active) {
+  await api(`/api/companies/${currentCompany.id}/employees/${id}`, { method: 'PUT', body: JSON.stringify({ active }) });
+  await loadEmployees();
+}
+
+async function deleteEmployee(id) {
+  if (!(await confirmAction('Remove this employee from the payroll register? Past payroll postings are unaffected.'))) return;
+  await api(`/api/companies/${currentCompany.id}/employees/${id}`, { method: 'DELETE' });
+  await loadEmployees();
+  showToast('Employee removed.', 'success');
+}
+
+async function toggleEmploymentAllowance() {
+  const enabled = document.getElementById('emp-allowance-enabled').checked;
+  await api(`/api/companies/${currentCompany.id}/settings`, {
+    method: 'PUT', body: JSON.stringify(buildSettingsPayload({ employmentAllowanceEnabled: enabled })),
+  });
+  currentCompany.employment_allowance_enabled = enabled ? 1 : 0;
+  showToast(enabled ? 'Employment Allowance will now be applied to future payroll runs.' : 'Employment Allowance turned off.', 'success');
+}
+
+async function runPayrollNow() {
+  const statusEl = document.getElementById('payroll-run-status');
+  statusEl.textContent = 'Running payroll…';
+  let result;
+  try {
+    result = await api(`/api/companies/${currentCompany.id}/run-payroll`, { method: 'POST' });
+  } catch (e) { statusEl.textContent = e.message; return; }
+  if (!result.posted.length && !result.skipped.length) {
+    statusEl.textContent = 'Nothing due — no employee\'s next pay date has arrived yet.';
+  } else {
+    const parts = [];
+    if (result.posted.length) parts.push(`Posted payroll for ${result.posted.length}: ${result.posted.map(p => p.name).join(', ')}.`);
+    if (result.skipped.length) parts.push(`Skipped ${result.skipped.length}: ${result.skipped.map(s => `${s.name} (${s.reason})`).join('; ')}.`);
+    statusEl.textContent = parts.join(' ');
+    if (result.posted.length) showToast(`Payroll run: ${result.posted.length} employee(s) paid.`, 'success');
+  }
+  await loadEmployees();
+  await refreshAll();
+}
 
 async function loadPayrollRates() {
   let rates;

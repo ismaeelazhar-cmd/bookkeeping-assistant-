@@ -654,6 +654,24 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- A persistent payroll register — turns payroll from a one-off calculator (re-typing
+        -- gross pay every period, no memory between runs) into the same kind of recurring,
+        -- automatic feature recurring_journals/recurring_invoices already are. next_pay_date
+        -- advances after each run, the same way recurring_journals.next_due does.
+        CREATE TABLE IF NOT EXISTS employees (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            pay_frequency TEXT NOT NULL DEFAULT 'monthly',
+            gross_pay_pence INTEGER NOT NULL,
+            student_loan_plan TEXT NOT NULL DEFAULT '',
+            employee_pension_pct REAL NOT NULL DEFAULT 0,
+            employer_pension_pct REAL NOT NULL DEFAULT 0,
+            next_pay_date TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- A template, not a posted document: each due date creates a brand-new invoices_bills
         -- draft (or sends it straight away if auto_send is on) rather than this row itself
         -- carrying any ledger effect. due_day_offset is days-after-issue for the new invoice's
@@ -945,6 +963,15 @@ def init_db():
         # normal parameterized statement — so the constant is inlined via an f-string. Safe here
         # since DEFAULT_PAYROLL_RATES is a fixed dict this app controls, never user input.
         db.execute(f"ALTER TABLE companies ADD COLUMN payroll_rates_json TEXT DEFAULT '{json.dumps(DEFAULT_PAYROLL_RATES)}'")
+    if "employment_allowance_used_pence" not in company_cols:
+        # Employment Allowance is claimed cumulatively against the company's WHOLE employer NI
+        # bill for a UK tax year (6 April to 5 April), not per employee or per pay run — so the
+        # running total has to live on the company, not on any one payroll posting.
+        # employment_allowance_tax_year (e.g. "2026-27") resets the counter to zero the first
+        # time payroll runs in a new tax year.
+        db.execute("ALTER TABLE companies ADD COLUMN employment_allowance_used_pence INTEGER DEFAULT 0")
+        db.execute("ALTER TABLE companies ADD COLUMN employment_allowance_tax_year TEXT DEFAULT ''")
+        db.execute("ALTER TABLE companies ADD COLUMN employment_allowance_enabled INTEGER DEFAULT 0")
     if "stripe_secret_key" not in company_cols:
         # #7: Stripe Checkout, called directly via its REST API (urllib, no SDK dependency) —
         # encrypted at rest like every other API credential here. Needs the user's own Stripe
@@ -1029,17 +1056,34 @@ DEFAULT_PAYROLL_RATES = {
     "niEmployeeUpperRate": 2,
     "niEmployerSecondaryThreshold": 9100,  # £/year — employer NI starts above this
     "niEmployerRate": 13.8,
+    "employmentAllowanceCap": 5000,   # £/year — most small employers can claim up to this off their employer NI bill
+    # Student loan plans: annual repayment threshold + rate, above which 9% (6% for postgrad) of
+    # income above the threshold is deducted. Plans 1/2/4/5 share the same 9% rate but have
+    # different thresholds; postgraduate loans are a separate, stackable deduction at 6%.
+    "studentLoanRate": 9,
+    "studentLoanPostgradRate": 6,
+    "studentLoanPlan1Threshold": 24990,
+    "studentLoanPlan2Threshold": 27295,
+    "studentLoanPlan4Threshold": 31395,
+    "studentLoanPlan5Threshold": 25000,
+    "studentLoanPostgradThreshold": 21000,
 }
 
 
-def calculate_paye_ni(gross_pay, frequency, rates):
+def calculate_paye_ni(gross_pay, frequency, rates, employment_allowance_remaining=None, student_loan_plan=""):
     """Annualises the period's gross pay, applies the UK PAYE bands and Class 1 NI thresholds to
     get an ESTIMATED tax/NI split, then divides back down to the period — the same simplification
     every "rough payroll estimate" tool makes (an annualised-equivalent calculation, not a true
     cumulative pay-period history). Pure function, no DB/network access, so the exact same
     arithmetic is used whether called from the live preview or the actual posting — unlike the
     fixed-asset depreciation calculator, which duplicates its logic between JS and Python, this
-    one has a single source of truth."""
+    one has a single source of truth.
+
+    employment_allowance_remaining (£, or None to skip entirely) reduces this period's employer
+    NI by up to that amount — Employment Allowance is claimed cumulatively against the WHOLE
+    company's employer NI for the tax year, not per employee, so the caller (run_payroll_for_company)
+    is responsible for tracking how much of the annual cap is left and passing it in; this
+    function only ever spends up to what it's given and reports how much it used."""
     periods_per_year = {"monthly": 12, "weekly": 52, "fortnightly": 26, "annually": 1}.get(frequency, 12)
     annual_gross = gross_pay * periods_per_year
 
@@ -1065,11 +1109,30 @@ def calculate_paye_ni(gross_pay, frequency, rates):
 
     employer_ni_base = max(0, annual_gross - rates["niEmployerSecondaryThreshold"])
     annual_employer_ni = employer_ni_base * rates["niEmployerRate"] / 100
+    period_employer_ni = annual_employer_ni / periods_per_year
+
+    employment_allowance_used = 0.0
+    if employment_allowance_remaining is not None and employment_allowance_remaining > 0:
+        employment_allowance_used = min(period_employer_ni, employment_allowance_remaining)
+        period_employer_ni -= employment_allowance_used
+
+    # A plan can be combined with postgraduate (e.g. "plan2+postgrad") — both deductions apply,
+    # since they're genuinely separate, stackable loans under HMRC's own rules.
+    plan_parts = (student_loan_plan or "").split("+")
+    plan_key = {"plan1": "studentLoanPlan1Threshold", "plan2": "studentLoanPlan2Threshold",
+                "plan4": "studentLoanPlan4Threshold", "plan5": "studentLoanPlan5Threshold"}.get(plan_parts[0])
+    annual_student_loan = 0.0
+    if plan_key:
+        annual_student_loan += max(0, annual_gross - rates[plan_key]) * rates["studentLoanRate"] / 100
+    if "postgrad" in plan_parts:
+        annual_student_loan += max(0, annual_gross - rates["studentLoanPostgradThreshold"]) * rates["studentLoanPostgradRate"] / 100
 
     return {
         "paye": round(annual_paye / periods_per_year, 2),
         "employeeNi": round(annual_employee_ni / periods_per_year, 2),
-        "employerNi": round(annual_employer_ni / periods_per_year, 2),
+        "employerNi": round(period_employer_ni, 2),
+        "employmentAllowanceUsed": round(employment_allowance_used, 2),
+        "studentLoan": round(annual_student_loan / periods_per_year, 2),
     }
 
 # Onboarding chart-of-accounts templates, keyed by business type. Each extends DEFAULT_CHART
@@ -1692,7 +1755,7 @@ def list_companies():
         "smtp_host, smtp_port, smtp_username, smtp_password, smtp_from_email, notifications_enabled, notify_email, "
         "brand_logo_path, brand_color, brand_display_name, brand_address, brand_payment_terms, brand_bank_details, brand_template, ai_provider, ollama_url, ollama_model, payroll_rates_json, "
         "stripe_secret_key, stripe_publishable_key, stripe_webhook_secret, stripe_payment_account, auto_chase_overdue_invoices, "
-        "business_type, entity_type, show_cis_tools, show_fx_tools, tour_completed, "
+        "business_type, entity_type, show_cis_tools, show_fx_tools, tour_completed, employment_allowance_enabled, "
         "'owner' as permission "
         "FROM companies WHERE user_id = ? "
         "UNION ALL "
@@ -1702,7 +1765,7 @@ def list_companies():
         "c.smtp_host, c.smtp_port, c.smtp_username, c.smtp_password, c.smtp_from_email, c.notifications_enabled, c.notify_email, "
         "c.brand_logo_path, c.brand_color, c.brand_display_name, c.brand_address, c.brand_payment_terms, c.brand_bank_details, c.brand_template, c.ai_provider, c.ollama_url, c.ollama_model, c.payroll_rates_json, "
         "c.stripe_secret_key, c.stripe_publishable_key, c.stripe_webhook_secret, c.stripe_payment_account, c.auto_chase_overdue_invoices, "
-        "c.business_type, c.entity_type, c.show_cis_tools, c.show_fx_tools, c.tour_completed, "
+        "c.business_type, c.entity_type, c.show_cis_tools, c.show_fx_tools, c.tour_completed, c.employment_allowance_enabled, "
         "cm.permission "
         "FROM companies c JOIN company_members cm ON cm.company_id = c.id "
         "WHERE cm.user_id = ? "
@@ -1873,6 +1936,9 @@ def update_settings(company_id):
         db.execute("UPDATE companies SET plaid_secret = ? WHERE id = ?", (encrypt_secret(data["plaidSecret"]), company_id))
     elif data.get("clearPlaidSecret"):
         db.execute("UPDATE companies SET plaid_secret = '' WHERE id = ?", (company_id,))
+    if "employmentAllowanceEnabled" in data:
+        db.execute("UPDATE companies SET employment_allowance_enabled = ? WHERE id = ?",
+                   (1 if data.get("employmentAllowanceEnabled") else 0, company_id))
     if data.get("hmrcClientSecret"):
         db.execute("UPDATE companies SET hmrc_client_secret = ? WHERE id = ?", (encrypt_secret(data["hmrcClientSecret"]), company_id))
     elif data.get("clearHmrcClientSecret"):
@@ -5827,26 +5893,15 @@ def calculate_monthly_depreciation_charge(asset, accumulated_so_far):
     return round(min(charge, remaining), 2)
 
 
-@app.route("/api/companies/<int:company_id>/fixed-assets/<int:asset_id>/run-depreciation", methods=["POST"])
-@login_required
-@company_required
-@write_required
-def run_depreciation(company_id, asset_id):
-    """Posts one month's depreciation charge for a single asset: Dr depreciation account / Cr
-    accumulated depreciation account, tagged with the given (or today's) date. Capped at the
-    asset's remaining depreciable amount so repeated runs can't depreciate it below residual
-    value, and skips silently (rather than double-posting) if this exact month's charge for this
-    asset has already been posted."""
-    db = get_db()
-    asset = db.execute(
-        "SELECT * FROM fixed_assets WHERE id = ? AND company_id = ?", (asset_id, company_id)
-    ).fetchone()
-    if asset is None:
-        return jsonify({"error": "Not found."}), 404
-    data = request.get_json(force=True) or {}
-    run_date = data.get("date") or datetime.date.today().isoformat()
+def _run_depreciation_for_asset(db, company_id, asset, run_date):
+    """Core logic shared by the on-demand per-asset endpoint and the automatic scheduler pass:
+    posts one month's depreciation charge (Dr depreciation account / Cr accumulated depreciation
+    account) tagged with run_date. Capped at the asset's remaining depreciable amount so repeated
+    runs can't depreciate it below residual value. Raises LedgerError with a message describing
+    why nothing was posted (not owned yet, already posted this month, fully depreciated) —
+    callers decide whether that's a hard error (on-demand route) or a silent skip (scheduler)."""
     if asset["purchase_date"] > run_date:
-        return jsonify({"error": f"{asset['name']} wasn't owned yet as of {run_date}."}), 400
+        raise LedgerError(f"{asset['name']} wasn't owned yet as of {run_date}.", 400)
 
     month_label = run_date[:7]
     desc = f"Depreciation — {month_label} — {asset['name']}"
@@ -5855,7 +5910,7 @@ def run_depreciation(company_id, asset_id):
         (company_id, desc),
     ).fetchone()
     if already_this_month:
-        return jsonify({"error": f"{asset['name']} already has a depreciation entry posted for {month_label}.", "alreadyPosted": True}), 400
+        raise LedgerError(f"{asset['name']} already has a depreciation entry posted for {month_label}.", 400)
 
     already_posted_pence = db.execute(
         "SELECT COALESCE(SUM(amount_pence), 0) as total FROM transactions "
@@ -5864,17 +5919,52 @@ def run_depreciation(company_id, asset_id):
     ).fetchone()["total"]
     charge = calculate_monthly_depreciation_charge(asset, from_pence(already_posted_pence))
     if charge <= 0:
-        return jsonify({"error": f"{asset['name']} is already fully depreciated."}), 400
+        raise LedgerError(f"{asset['name']} is already fully depreciated.", 400)
 
+    tx_id = post_ledger_transaction(db, company_id, run_date, desc, charge, asset["depreciation_account"], asset["accum_account"])
+    return {"transactionId": tx_id, "amount": charge}
+
+
+@app.route("/api/companies/<int:company_id>/fixed-assets/<int:asset_id>/run-depreciation", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def run_depreciation(company_id, asset_id):
+    db = get_db()
+    asset = db.execute(
+        "SELECT * FROM fixed_assets WHERE id = ? AND company_id = ?", (asset_id, company_id)
+    ).fetchone()
+    if asset is None:
+        return jsonify({"error": "Not found."}), 404
+    data = request.get_json(force=True) or {}
+    run_date = data.get("date") or datetime.date.today().isoformat()
     try:
-        tx_id = post_ledger_transaction(
-            db, company_id, run_date, desc, charge,
-            asset["depreciation_account"], asset["accum_account"],
-        )
+        result = _run_depreciation_for_asset(db, company_id, asset, run_date)
     except LedgerError as e:
         return jsonify({"error": e.message}), e.status
     db.commit()
-    return jsonify({"transactionId": tx_id, "amount": charge})
+    return jsonify(result)
+
+
+def run_depreciation_for_company(db, company):
+    """Runs this month's depreciation for every fixed asset automatically, the same way
+    recurring journals/invoices already run themselves — depreciation was previously the one
+    ledger-affecting monthly job that still required a manual click per asset. Skips (rather
+    than errors on) assets not yet owned, already posted this month, or fully depreciated —
+    all genuinely expected, frequent states for an automatic monthly pass, not failures."""
+    company_id = company["id"]
+    run_date = datetime.date.today().isoformat()
+    assets = db.execute("SELECT * FROM fixed_assets WHERE company_id = ?", (company_id,)).fetchall()
+    posted, skipped = [], []
+    for asset in assets:
+        try:
+            result = _run_depreciation_for_asset(db, company_id, asset, run_date)
+        except LedgerError as e:
+            skipped.append({"assetId": asset["id"], "name": asset["name"], "reason": e.message})
+            continue
+        posted.append({"assetId": asset["id"], "name": asset["name"], **result})
+    db.commit()
+    return {"posted": posted, "skipped": skipped}
 
 
 # ---------- full data export ----------
@@ -6596,6 +6686,8 @@ def _advance_next_due(date_str, frequency):
     d = datetime.date.fromisoformat(date_str)
     if frequency == "weekly":
         return (d + datetime.timedelta(days=7)).isoformat()
+    if frequency == "fortnightly":  # payroll-specific; recurring_journals never uses this one
+        return (d + datetime.timedelta(days=14)).isoformat()
     if frequency == "quarterly":
         months_ahead = d.month - 1 + 3
     elif frequency == "annually":
@@ -6980,18 +7072,46 @@ def calculate_payroll(company_id):
     return jsonify(result)
 
 
+def post_payroll_journal_entries(db, company_id, date, label, gross_pay, employer_ni, employee_ni, paye,
+                                  employee_pension, employer_pension, student_loan=0):
+    """The actual posting logic shared by the on-demand payroll-journal endpoint and the
+    automatic payroll register (run_payroll_for_company): one gross pay figure splits into what's
+    owed to HMRC (PAYE + both employee and employer NI + student loan), what's owed to the
+    pension provider (both employee and employer contributions), and what actually hits the
+    employee's bank account. Posted as DR Salary Expense (the full cost: gross + employer NI +
+    employer pension) against several credit legs sharing one journal_id. Raises LedgerError on
+    failure (e.g. a locked period) — the caller decides how to surface that."""
+    net_pay = round(gross_pay - employee_ni - paye - employee_pension - student_loan, 2)
+    if net_pay <= 0:
+        raise LedgerError("Net pay works out to zero or negative — check the deduction amounts against gross pay.", 400)
+
+    salary_account = resolve_account(db, company_id, "Salary Expense", "expense")
+    credit_legs = [
+        (resolve_account(db, company_id, "NI Payable", "current_liability"), round(employee_ni + employer_ni, 2)),
+        (resolve_account(db, company_id, "PAYE Payable", "current_liability"), round(paye + student_loan, 2)),
+        (resolve_account(db, company_id, "Pension Payable", "current_liability"), round(employee_pension + employer_pension, 2)),
+        (resolve_account(db, company_id, "Net Pay Payable", "current_liability"), net_pay),
+    ]
+    credit_legs = [(acc, amt) for acc, amt in credit_legs if amt > 0]
+    if not credit_legs:
+        raise LedgerError("Nothing to post — all amounts are zero.", 400)
+
+    journal_id = uuid.uuid4().hex
+    posted = []
+    for acc, amt in credit_legs:
+        tx_id = post_ledger_transaction(db, company_id, date, f"{label} ({acc})", amt, salary_account, acc, journal_id=journal_id)
+        posted.append(tx_id)
+    total_cost = sum(amt for _, amt in credit_legs)
+    return {"journalId": journal_id, "transactionIds": posted, "netPay": net_pay, "totalCost": total_cost}
+
+
 @app.route("/api/companies/<int:company_id>/payroll-journal", methods=["POST"])
 @login_required
 @company_required
 @write_required
 def post_payroll_journal(company_id):
-    """The most common compound journal a small business runs: one gross pay figure splits into
-    what's owed to HMRC (PAYE + both employee and employer NI), what's owed to the pension
-    provider (both employee and employer contributions), and what actually hits the employee's
-    bank account. Posted as DR Salary Expense (the full cost: gross + employer NI + employer
-    pension) against four credit legs sharing one journal_id — mathematically the same shape as
-    the existing compound-journal endpoint (one pivot, several lines), just with payroll-specific
-    inputs and a server-computed net pay instead of requiring the caller to do the arithmetic."""
+    """On-demand version of post_payroll_journal_entries for a one-off payroll run not tied to
+    an entry in the employee register below."""
     data = request.get_json(force=True) or {}
     date = data.get("date")
     label = (data.get("label") or "Payroll").strip()
@@ -7001,43 +7121,195 @@ def post_payroll_journal(company_id):
     paye = float(data.get("paye") or 0)
     employee_pension = float(data.get("employeePension") or 0)
     employer_pension = float(data.get("employerPension") or 0)
+    student_loan = float(data.get("studentLoan") or 0)
 
     if not date or gross_pay <= 0:
         return jsonify({"error": "Date and a positive gross pay are required."}), 400
-    if any(v < 0 for v in (employer_ni, employee_ni, paye, employee_pension, employer_pension)):
+    if any(v < 0 for v in (employer_ni, employee_ni, paye, employee_pension, employer_pension, student_loan)):
         return jsonify({"error": "Deduction amounts can't be negative."}), 400
 
-    net_pay = round(gross_pay - employee_ni - paye - employee_pension, 2)
-    if net_pay <= 0:
-        return jsonify({"error": "Net pay works out to zero or negative — check the deduction amounts against gross pay."}), 400
-
     db = get_db()
-    salary_account = resolve_account(db, company_id, "Salary Expense", "expense")
-    credit_legs = [
-        (resolve_account(db, company_id, "NI Payable", "current_liability"), round(employee_ni + employer_ni, 2)),
-        (resolve_account(db, company_id, "PAYE Payable", "current_liability"), round(paye, 2)),
-        (resolve_account(db, company_id, "Pension Payable", "current_liability"), round(employee_pension + employer_pension, 2)),
-        (resolve_account(db, company_id, "Net Pay Payable", "current_liability"), net_pay),
-    ]
-    credit_legs = [(acc, amt) for acc, amt in credit_legs if amt > 0]
-    if not credit_legs:
-        return jsonify({"error": "Nothing to post — all amounts are zero."}), 400
-
-    journal_id = uuid.uuid4().hex
-    posted = []
     try:
-        for acc, amt in credit_legs:
-            tx_id = post_ledger_transaction(
-                db, company_id, date, f"{label} ({acc})", amt, salary_account, acc, journal_id=journal_id
-            )
-            posted.append(tx_id)
+        result = post_payroll_journal_entries(
+            db, company_id, date, label, gross_pay, employer_ni, employee_ni, paye,
+            employee_pension, employer_pension, student_loan,
+        )
     except LedgerError as e:
         db.rollback()
         return jsonify({"error": e.message}), e.status
-
     db.commit()
-    total_cost = sum(amt for _, amt in credit_legs)
-    return jsonify({"journalId": journal_id, "transactionIds": posted, "netPay": net_pay, "totalCost": total_cost})
+    return jsonify(result)
+
+
+# ---------- payroll register (employees) ----------
+
+def _serialize_employee(row):
+    d = dict(row)
+    d["grossPay"] = from_pence(d.pop("gross_pay_pence"))
+    d["payFrequency"] = d.pop("pay_frequency")
+    d["studentLoanPlan"] = d.pop("student_loan_plan")
+    d["employeePensionPct"] = d.pop("employee_pension_pct")
+    d["employerPensionPct"] = d.pop("employer_pension_pct")
+    d["nextPayDate"] = d.pop("next_pay_date")
+    d["companyId"] = d.pop("company_id")
+    d["createdAt"] = d.pop("created_at")
+    return d
+
+
+@app.route("/api/companies/<int:company_id>/employees", methods=["GET"])
+@login_required
+@company_required
+def list_employees(company_id):
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM employees WHERE company_id = ? ORDER BY active DESC, name", (company_id,)
+    ).fetchall()
+    return jsonify([_serialize_employee(r) for r in rows])
+
+
+@app.route("/api/companies/<int:company_id>/employees", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def create_employee(company_id):
+    data = request.get_json(force=True) or {}
+    name = (data.get("name") or "").strip()
+    frequency = data.get("payFrequency") or "monthly"
+    gross_pay = data.get("grossPay")
+    next_pay_date = data.get("nextPayDate")
+    if not name or not gross_pay or float(gross_pay) <= 0 or not next_pay_date:
+        return jsonify({"error": "Name, a positive gross pay, and a next pay date are all required."}), 400
+    if frequency not in ("weekly", "fortnightly", "monthly", "annually"):
+        return jsonify({"error": "Pay frequency must be weekly, fortnightly, monthly, or annually."}), 400
+    student_loan_plan = data.get("studentLoanPlan") or ""
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO employees (company_id, name, pay_frequency, gross_pay_pence, student_loan_plan, "
+        "employee_pension_pct, employer_pension_pct, next_pay_date) VALUES (?,?,?,?,?,?,?,?)",
+        (company_id, name, frequency, to_pence(gross_pay), student_loan_plan,
+         float(data.get("employeePensionPct") or 0), float(data.get("employerPensionPct") or 0), next_pay_date),
+    )
+    db.commit()
+    return jsonify({"id": cur.lastrowid})
+
+
+@app.route("/api/companies/<int:company_id>/employees/<int:employee_id>", methods=["PUT"])
+@login_required
+@company_required
+@write_required
+def update_employee(company_id, employee_id):
+    data = request.get_json(force=True) or {}
+    db = get_db()
+    row = db.execute("SELECT id FROM employees WHERE id = ? AND company_id = ?", (employee_id, company_id)).fetchone()
+    if row is None:
+        return jsonify({"error": "Employee not found."}), 404
+    fields, params = [], []
+    if "name" in data:
+        fields.append("name = ?"); params.append((data.get("name") or "").strip())
+    if "payFrequency" in data:
+        if data["payFrequency"] not in ("weekly", "fortnightly", "monthly", "annually"):
+            return jsonify({"error": "Pay frequency must be weekly, fortnightly, monthly, or annually."}), 400
+        fields.append("pay_frequency = ?"); params.append(data["payFrequency"])
+    if "grossPay" in data:
+        fields.append("gross_pay_pence = ?"); params.append(to_pence(data["grossPay"]))
+    if "studentLoanPlan" in data:
+        fields.append("student_loan_plan = ?"); params.append(data["studentLoanPlan"] or "")
+    if "employeePensionPct" in data:
+        fields.append("employee_pension_pct = ?"); params.append(float(data["employeePensionPct"] or 0))
+    if "employerPensionPct" in data:
+        fields.append("employer_pension_pct = ?"); params.append(float(data["employerPensionPct"] or 0))
+    if "nextPayDate" in data:
+        fields.append("next_pay_date = ?"); params.append(data["nextPayDate"])
+    if "active" in data:
+        fields.append("active = ?"); params.append(1 if data["active"] else 0)
+    if not fields:
+        return jsonify({"error": "Nothing to update."}), 400
+    params.append(employee_id)
+    db.execute(f"UPDATE employees SET {', '.join(fields)} WHERE id = ?", params)
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/employees/<int:employee_id>", methods=["DELETE"])
+@login_required
+@company_required
+@write_required
+def delete_employee(company_id, employee_id):
+    db = get_db()
+    db.execute("DELETE FROM employees WHERE id = ? AND company_id = ?", (employee_id, company_id))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+def run_payroll_for_company(db, company):
+    """Posts payroll for every active employee whose next_pay_date has arrived, then advances
+    next_pay_date by one cadence step — the same recurrence-advancing pattern
+    run_recurring_journals_for_company uses. Tracks Employment Allowance cumulatively across the
+    whole run (and across runs, via companies.employment_allowance_used_pence) since it's claimed
+    against total employer NI for the tax year, not per employee."""
+    company_id = company["id"]
+    g.company = company  # post_ledger_transaction reads g.company; not set when called from the scheduler (no request)
+    today = datetime.date.today().isoformat()
+    due = db.execute(
+        "SELECT * FROM employees WHERE company_id = ? AND active = 1 AND next_pay_date <= ?",
+        (company_id, today),
+    ).fetchall()
+    if not due:
+        return {"posted": [], "skipped": []}
+
+    try:
+        rates = json.loads(company["payroll_rates_json"] or "{}")
+    except json.JSONDecodeError:
+        rates = {}
+    merged_rates = {**DEFAULT_PAYROLL_RATES, **rates}
+
+    tax_year = compute_tax_year(today, company["period_start_date"])
+    allowance_used_pence = company["employment_allowance_used_pence"] or 0
+    if (company["employment_allowance_tax_year"] or "") != tax_year:
+        allowance_used_pence = 0  # rolled into a new tax year — the cap resets
+    allowance_cap = merged_rates["employmentAllowanceCap"] if company["employment_allowance_enabled"] else 0
+    allowance_remaining = max(0, allowance_cap - from_pence(allowance_used_pence))
+
+    posted, skipped = [], []
+    for emp in due:
+        gross_pay = from_pence(emp["gross_pay_pence"])
+        calc = calculate_paye_ni(
+            gross_pay, emp["pay_frequency"], merged_rates,
+            employment_allowance_remaining=allowance_remaining if company["employment_allowance_enabled"] else None,
+            student_loan_plan=emp["student_loan_plan"],
+        )
+        employee_pension = round(gross_pay * emp["employee_pension_pct"] / 100, 2)
+        employer_pension = round(gross_pay * emp["employer_pension_pct"] / 100, 2)
+        allowance_remaining = max(0, allowance_remaining - calc["employmentAllowanceUsed"])
+        allowance_used_pence += to_pence(calc["employmentAllowanceUsed"])
+
+        try:
+            result = post_payroll_journal_entries(
+                db, company_id, emp["next_pay_date"], f"Payroll — {emp['name']}", gross_pay,
+                calc["employerNi"], calc["employeeNi"], calc["paye"], employee_pension, employer_pension,
+                calc["studentLoan"],
+            )
+        except LedgerError as e:
+            skipped.append({"employeeId": emp["id"], "name": emp["name"], "reason": e.message})
+            continue
+        posted.append({"employeeId": emp["id"], "name": emp["name"], "date": emp["next_pay_date"], **result})
+        next_pay_date = _advance_next_due(emp["next_pay_date"], emp["pay_frequency"])
+        db.execute("UPDATE employees SET next_pay_date = ? WHERE id = ?", (next_pay_date, emp["id"]))
+
+    db.execute(
+        "UPDATE companies SET employment_allowance_used_pence = ?, employment_allowance_tax_year = ? WHERE id = ?",
+        (allowance_used_pence, tax_year, company_id),
+    )
+    db.commit()
+    return {"posted": posted, "skipped": skipped}
+
+
+@app.route("/api/companies/<int:company_id>/run-payroll", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def run_payroll_now(company_id):
+    return jsonify(run_payroll_for_company(get_db(), g.company))
 
 
 # ---------- dividend posting wizard ----------
@@ -7617,6 +7889,14 @@ def _scheduler_tick():
                     run_accrual_reversals_for_company(conn, company)
                 except Exception:
                     logging.exception("Scheduler: accrual reversals failed for company %s", company["id"])
+                try:
+                    run_payroll_for_company(conn, company)
+                except Exception:
+                    logging.exception("Scheduler: payroll failed for company %s", company["id"])
+                try:
+                    run_depreciation_for_company(conn, company)
+                except Exception:
+                    logging.exception("Scheduler: depreciation failed for company %s", company["id"])
                 try:
                     run_notifications_for_company(conn, company)
                 except Exception:
