@@ -4693,6 +4693,17 @@ def delete_recurring_invoice(company_id, rec_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/companies/<int:company_id>/recurring-invoices/run", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def run_recurring_invoices_now(company_id):
+    """On-demand trigger for run_recurring_invoices_for_company below — previously only the
+    hourly scheduler ever called it, with no way to run it immediately (e.g. as part of closing
+    a month right now rather than waiting for the next automatic pass)."""
+    return jsonify(run_recurring_invoices_for_company(get_db(), g.company))
+
+
 def run_recurring_invoices_for_company(db, company):
     """Generates a real invoices_bills draft from each due recurring-invoice template — sent
     immediately if auto_send is on, left as a draft to review otherwise — then advances
@@ -6024,6 +6035,17 @@ def run_depreciation_for_company(db, company):
         posted.append({"assetId": asset["id"], "name": asset["name"], **result})
     db.commit()
     return {"posted": posted, "skipped": skipped}
+
+
+@app.route("/api/companies/<int:company_id>/run-depreciation", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def run_depreciation_now(company_id):
+    """On-demand, company-wide trigger for run_depreciation_for_company — the per-asset route
+    above still exists for depreciating one asset at a time, this one is for closing a month
+    right now across every asset at once instead of waiting for the next automatic pass."""
+    return jsonify(run_depreciation_for_company(get_db(), g.company))
 
 
 # ---------- full data export ----------

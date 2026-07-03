@@ -1411,6 +1411,8 @@
       <label>Month</label>
       <input type="month" id="checklist-period" onchange="loadMonthEndChecklist()">
       <div id="checklist-body" style="margin-top:10px;"></div>
+      <button class="btn-primary" style="width:100%; margin-top:10px;" onclick="runMonthEndCloseNow()">Run everything automatic now</button>
+      <div id="checklist-run-all-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
 
     <div class="panel" style="margin-top:20px;">
@@ -5464,6 +5466,7 @@ async function loadMonthEndChecklist() {
   const period = document.getElementById('checklist-period').value; // 'YYYY-MM'
   const body = document.getElementById('checklist-body');
   if (!period) { body.innerHTML = ''; return; }
+  const periodEnd = new Date(parseInt(period.slice(0, 4), 10), parseInt(period.slice(5, 7), 10), 0).toISOString().slice(0, 10);
 
   const [reconciliations, recurringJournals] = await Promise.all([
     api(`/api/companies/${currentCompany.id}/reconciliations`),
@@ -5471,10 +5474,36 @@ async function loadMonthEndChecklist() {
   ]);
 
   const bankRecDone = reconciliations.some(r => r.status === 'closed' && r.statementDate.startsWith(period));
-  const depreciationAccounts = new Set(fixedAssets.map(a => a.depreciationAccount));
-  const depreciationDone = transactions.some(t => t.date.startsWith(period) && depreciationAccounts.has(t.debit));
-  const recurringLabels = new Set(recurringJournals.map(r => r.label));
-  const accrualsDone = transactions.some(t => t.date.startsWith(period) && [...recurringLabels].some(l => t.desc.includes(l)));
+
+  // Depreciation: every active asset owned as of period end needs its OWN posting this month —
+  // "at least one asset was depreciated" isn't the same as "all of them were", and the old check
+  // couldn't tell the difference.
+  const ownedAssets = fixedAssets.filter(a => a.purchaseDate <= periodEnd);
+  const depreciatedThisMonth = new Set(
+    transactions.filter(t => t.date.startsWith(period)).map(t => t.debit)
+  );
+  const assetsMissingDepreciation = ownedAssets.filter(a => !depreciatedThisMonth.has(a.depreciationAccount));
+  const depreciationDone = ownedAssets.length === 0 || assetsMissingDepreciation.length === 0;
+
+  // Recurring journals: overdue if anything's next_due has fallen to or before this period's end
+  // — a real gap (it should have posted and rolled forward by now), not a substring guess.
+  const overdueRecurring = recurringJournals.filter(r => r.nextDue <= periodEnd && (!r.endDate || r.endDate >= r.nextDue));
+  const recurringDone = overdueRecurring.length === 0;
+
+  // Accruals/prepayments: overdue if a reversal was due by period end and hasn't happened yet —
+  // this is queried directly against accrual_prepayments.reversed, not guessed from descriptions.
+  const overdueAccruals = accrualPrepayments.filter(ap => ap.kind === 'accrual' && !ap.reversed && ap.reversalDate && ap.reversalDate <= periodEnd);
+  const accrualsDone = overdueAccruals.length === 0;
+
+  // Payroll: every employee active as of period end should have a posting for this month —
+  // "Payroll — {name}" is the exact label run_payroll_for_company uses.
+  const activeEmployees = (employees || []).filter(e => e.active);
+  const paidThisMonth = new Set(
+    transactions.filter(t => t.date.startsWith(period) && t.desc.startsWith('Payroll — ')).map(t => t.desc.replace(/^Payroll — /, '').replace(/ \(.*\)$/, ''))
+  );
+  const employeesMissingPay = activeEmployees.filter(e => !paidThisMonth.has(e.name));
+  const payrollDone = activeEmployees.length === 0 || employeesMissingPay.length === 0;
+
   const vatKey = `vatReviewed:${currentCompany.id}:${period}`;
   const vatReviewed = sessionStorage.getItem(vatKey) === '1';
 
@@ -5490,10 +5519,21 @@ async function loadMonthEndChecklist() {
 
   body.innerHTML =
     item('Bank reconciliation done', bankRecDone, bankRecDone ? 'A closed reconciliation exists for this month.' : 'No closed reconciliation found for this month yet — see the Bank page.') +
-    item('Depreciation run', depreciationDone, depreciationDone || !fixedAssets.length ? (fixedAssets.length ? 'A depreciation posting was found for this month.' : 'No fixed assets registered — nothing to depreciate.') : 'No depreciation posting found for this month — see Accounts → Fixed Asset Register.') +
-    item('Accruals / recurring journals posted', accrualsDone, recurringJournals.length ? (accrualsDone ? 'A matching posting was found for this month.' : 'No matching posting found for this month — see Transactions → Period close.') : 'No recurring journals set up.') +
+    item('Depreciation run', depreciationDone,
+      ownedAssets.length ? (depreciationDone ? 'Every owned asset has a posting this month.' : `Missing for: ${assetsMissingDepreciation.map(a => a.name).join(', ')}.`) : 'No fixed assets owned yet — nothing to depreciate.') +
+    item('Payroll run', payrollDone,
+      activeEmployees.length ? (payrollDone ? 'Every active employee was paid this month.' : `Missing for: ${employeesMissingPay.map(e => e.name).join(', ')}.`) : 'No active employees in the payroll register.') +
+    item('Recurring journals up to date', recurringDone,
+      recurringJournals.length ? (recurringDone ? 'Nothing overdue as of this period.' : `Overdue: ${overdueRecurring.map(r => r.label).join(', ')}.`) : 'No recurring journals set up.') +
+    item('Accrual reversals up to date', accrualsDone,
+      accrualsDone ? 'Nothing overdue as of this period.' : `Overdue reversal: ${overdueAccruals.map(a => a.description).join(', ')}.`) +
     item('VAT period reviewed', vatReviewed, 'Manual confirmation — not derived from the ledger.',
       `<button class="btn-secondary" onclick="toggleVatReviewed('${period}')">${vatReviewed ? 'Unmark' : 'Mark reviewed'}</button>`);
+
+  const allAutomaticDone = bankRecDone && depreciationDone && payrollDone && recurringDone && accrualsDone;
+  document.getElementById('checklist-run-all-status').textContent = allAutomaticDone
+    ? 'Everything that can run automatically is up to date for this period.'
+    : 'Some automatic postings are overdue for this period — run them now instead of waiting for the next hourly pass.';
 }
 
 function toggleVatReviewed(period) {
@@ -5501,6 +5541,21 @@ function toggleVatReviewed(period) {
   if (sessionStorage.getItem(key) === '1') sessionStorage.removeItem(key);
   else sessionStorage.setItem(key, '1');
   loadMonthEndChecklist();
+}
+
+async function runMonthEndCloseNow() {
+  const statusEl = document.getElementById('checklist-run-all-status');
+  statusEl.textContent = 'Running recurring journals, recurring invoices, accrual reversals, depreciation, and payroll…';
+  await Promise.all([
+    api(`/api/companies/${currentCompany.id}/period-close`, { method: 'POST' }).catch(e => ({ error: e.message })),
+    api(`/api/companies/${currentCompany.id}/recurring-invoices/run`, { method: 'POST' }).catch(e => ({ error: e.message })),
+    api(`/api/companies/${currentCompany.id}/accrual-prepayments/run-reversals`, { method: 'POST' }).catch(e => ({ error: e.message })),
+    api(`/api/companies/${currentCompany.id}/run-payroll`, { method: 'POST' }).catch(e => ({ error: e.message })),
+    api(`/api/companies/${currentCompany.id}/run-depreciation`, { method: 'POST' }).catch(e => ({ error: e.message })),
+  ]);
+  showToast('Month-end automatic postings run — check the checklist below.', 'success');
+  await refreshAll();
+  await loadMonthEndChecklist();
 }
 
 function renderPettyCash() {
