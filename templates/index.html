@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bookkeeping — T-Account Ledger</title>
+<title>MyAccountingPal — Bookkeeping</title>
 <script>
   // Applied before any CSS/content paints, to avoid a flash of the wrong theme on load.
   (function () {
@@ -383,11 +383,11 @@
       </div>
       <button id="view-mode-toggle-btn" onclick="toggleViewMode()" style="background:rgba(255,255,255,0.06); border:none; color:var(--sidebar-text); cursor:pointer; font-size:11.5px; font-weight:600; padding:6px 10px; border-radius:7px; margin:0 10px 14px; text-align:left;"></button>
       <nav class="page-tabs">
-        <a href="#page-dashboard" data-page="dashboard">Dashboard</a>
-        <a href="#page-transactions" data-page="transactions">Transactions</a>
+        <a href="#page-dashboard" data-page="dashboard">Home</a>
+        <a href="#page-transactions" data-page="transactions">Post</a>
         <a href="#page-bank" data-page="bank">Bank <span id="bank-nav-badge" class="badge badge-overdue" style="display:none; margin-left:4px;"></span></a>
-        <a href="#page-accounts" data-page="accounts">Accounts</a>
-        <a href="#page-ledgers" data-page="ledgers">Ledgers</a>
+        <a href="#page-accounts" data-page="accounts">Accounts &amp; assets</a>
+        <a href="#page-ledgers" data-page="ledgers">Account history</a>
         <a href="#page-invoices" data-page="invoices">Invoices</a>
         <a href="#page-reports" data-page="reports">Reports</a>
         <a href="#page-settings" data-page="settings">Settings</a>
@@ -407,7 +407,7 @@
     <div>
       <button id="mobile-menu-btn" class="btn-secondary" onclick="toggleMobileSidebar()" style="margin:0 0 10px;" aria-label="Menu">☰</button>
       <h1 id="company-name-header">Bookkeeping — Double Entry Ledger</h1>
-      <div class="sub" style="margin-bottom:0;">Enter a transaction once. It posts as a Debit and a Credit, and shows up on both accounts' T-tables.</div>
+      <div class="sub" style="margin-bottom:0;">Enter it once — the double-entry bookkeeping happens automatically.</div>
       <div id="permission-banner" class="pill" style="display:none; margin-top:6px;"></div>
     </div>
     <div class="who">
@@ -446,18 +446,24 @@
       <div id="setup-checklist-body" style="margin-top:10px;"></div>
     </div>
 
-    <div class="panel" id="health-score-card" style="margin-bottom:16px;">
-      <div style="display:flex; align-items:center; gap:20px;">
-        <div style="text-align:center; flex:0 0 auto;">
-          <div style="font-size:36px; font-weight:800;" id="health-score-number">—</div>
-          <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em;">Business Health</div>
+    <div class="panel" id="clarification-alert-card" style="display:none; margin-bottom:16px; border-left:3px solid var(--color-danger);">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <strong id="clarification-alert-text"></strong>
+          <div class="sub" style="margin:2px 0 0;">They won't appear in your reports until you review them.</div>
         </div>
-        <div style="flex:1; min-width:0;">
-          <div id="health-score-bar" style="background:var(--panel-soft); border-radius:5px; height:10px; overflow:hidden; margin-bottom:8px;">
-            <div id="health-score-fill" style="height:100%; border-radius:5px; width:0%; transition:width .3s ease;"></div>
-          </div>
-          <div id="health-score-breakdown" style="font-size:12px; color:var(--muted); display:flex; gap:16px; flex-wrap:wrap;"></div>
-        </div>
+        <button class="btn-primary" onclick="showPage('bank')">Review now</button>
+      </div>
+    </div>
+
+    <div class="row2" style="margin-bottom:16px; align-items:start;">
+      <div class="panel" style="margin:0;">
+        <h2>Needs Your Attention</h2>
+        <div id="dash-attention-list"><div class="empty">Nothing urgent right now.</div></div>
+      </div>
+      <div class="panel" style="margin:0;">
+        <h2>Last 30 Days — Spending by Category</h2>
+        <div id="dash-spend-chart"><div class="empty">No spending in the last 30 days.</div></div>
       </div>
     </div>
 
@@ -489,6 +495,21 @@
       </div>
     </div>
 
+    <div class="panel" id="health-score-card" style="margin-bottom:16px;">
+      <div style="display:flex; align-items:center; gap:20px;">
+        <div style="text-align:center; flex:0 0 auto;">
+          <div style="font-size:36px; font-weight:800;" id="health-score-number">—</div>
+          <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em;">Business Health</div>
+        </div>
+        <div style="flex:1; min-width:0;">
+          <div id="health-score-bar" style="background:var(--panel-soft); border-radius:5px; height:10px; overflow:hidden; margin-bottom:8px;">
+            <div id="health-score-fill" style="height:100%; border-radius:5px; width:0%; transition:width .3s ease;"></div>
+          </div>
+          <div id="health-score-breakdown" style="font-size:12px; color:var(--muted); display:flex; gap:16px; flex-wrap:wrap;"></div>
+        </div>
+      </div>
+    </div>
+
     <div class="panel" id="petty-cash-card" style="display:none; margin-bottom:16px;">
       <h2 style="margin-top:0;">Petty Cash <span class="pill" id="petty-cash-balance"></span></h2>
       <div class="sub" style="margin-bottom:10px;">Tracks the balance of the account named "Petty Cash" — top up from another account to record cash drawn for the float.</div>
@@ -498,27 +519,6 @@
       </div>
       <button class="btn-secondary" onclick="topUpPettyCash()">Record top-up</button>
       <div id="petty-cash-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
-    </div>
-
-    <div class="panel" id="clarification-alert-card" style="display:none; margin-bottom:16px; border-left:3px solid var(--color-danger);">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <div>
-          <strong id="clarification-alert-text"></strong>
-          <div class="sub" style="margin:2px 0 0;">They won't appear in your reports until you review them.</div>
-        </div>
-        <button class="btn-primary" onclick="showPage('bank')">Review now</button>
-      </div>
-    </div>
-
-    <div class="row2" style="margin-bottom:16px; align-items:start;">
-      <div class="panel" style="margin:0;">
-        <h2>Needs Your Attention</h2>
-        <div id="dash-attention-list"><div class="empty">Nothing urgent right now.</div></div>
-      </div>
-      <div class="panel" style="margin:0;">
-        <h2>Last 30 Days — Spending by Category</h2>
-        <div id="dash-spend-chart"><div class="empty">No spending in the last 30 days.</div></div>
-      </div>
     </div>
 
     <div class="panel" id="section-ask" style="margin-bottom:16px;">
@@ -578,7 +578,9 @@
         <div class="sub" id="quick-entry-hint" style="display:none; margin:4px 0 0;"></div>
         <datalist id="account-list"></datalist>
 
-        <div id="f-advanced-fields">
+        <!-- data-advanced so Simple view hides VAT/FX/fund/department even with Quick entry off —
+             previously Simple mode hid advanced panels but still showed all of these form fields. -->
+        <div id="f-advanced-fields" data-advanced="1">
           <label>VAT</label>
           <div class="row2">
             <select id="f-vat-rate" onchange="updateVatPreview()">
@@ -639,7 +641,7 @@
         </div>
 
         <div class="panel">
-          <h2><span class="term-tip" data-tip="The full, chronological list of every transaction ever posted — the source everything else (T-accounts, reports) is built from.">Journal</span> (all transactions) <span class="pill" id="journal-count">0 transactions</span></h2>
+          <h2><span class="term-tip" data-tip="The full, chronological list of every transaction ever posted — everything else (accounts, reports) is built from this.">Journal</span> (all transactions) <span class="pill" id="journal-count">0 transactions</span></h2>
           <div class="row2">
             <input type="text" id="jf-text" placeholder="Search description or account…" oninput="renderJournal()">
             <input type="number" id="jf-min-amount" step="0.01" placeholder="Min amount" oninput="renderJournal()">
@@ -827,7 +829,7 @@
         <input type="checkbox" id="emp-allowance-enabled" style="width:auto;" onchange="toggleEmploymentAllowance()"> This company claims Employment Allowance (up to £5,000/year off employer NI — check eligibility with your accountant)
       </label>
 
-      <button class="btn-secondary" style="width:100%; margin-top:14px;" onclick="runPayrollNow()">Run payroll now</button>
+      <button class="btn-secondary" style="width:100%; margin-top:14px;" onclick="withButtonBusy(this, runPayrollNow)">Run payroll now</button>
       <div id="payroll-run-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
 
@@ -1022,7 +1024,7 @@
         <div><label>Currency code</label><input type="text" id="brec-currency" placeholder="e.g. USD" maxlength="3" style="text-transform:uppercase;"></div>
         <div><label>Exchange rate <span style="color:var(--muted); font-weight:400;">(1 unit = ? GBP)</span></label><input type="number" id="brec-exchange-rate" step="0.0001" min="0" placeholder="0.0000"></div>
       </div>
-      <button class="btn-primary" onclick="parseBrecLines()">Import lines</button>
+      <button class="btn-primary" onclick="withButtonBusy(this, parseBrecLines)">Import lines</button>
       <div id="brec-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
 
       <div id="brec-summary" class="row2" style="margin-top:14px;"></div>
@@ -1205,7 +1207,7 @@
   <div class="page" data-page="ledgers" style="display:none;">
     <div class="panel">
       <h2>All Ledgers <span class="pill" id="ledgers-count"></span></h2>
-      <div class="sub" style="margin-bottom:12px;">Every account's full T-account in one place — every debit, every credit, running balance. Each entry's 🔗 (when present) traces it back to the invoice, bank import, or mileage entry it came from. Search to narrow it down, or click an account's title for its full drill-down.</div>
+      <div class="sub" style="margin-bottom:12px;">Every account's full history in one place — everything in and out, with a running balance. Each entry's 🔗 (when present) traces it back to the invoice, bank import, or mileage entry it came from. Search to narrow it down, or click an account's title for its full drill-down.</div>
       <div class="row2" style="margin-bottom:14px;">
         <input type="text" id="ledgers-filter" placeholder="Search accounts…" oninput="renderLedgersPage()">
         <select id="ledgers-type-filter" onchange="renderLedgersPage()">
@@ -1411,7 +1413,7 @@
       <label>Month</label>
       <input type="month" id="checklist-period" onchange="loadMonthEndChecklist()">
       <div id="checklist-body" style="margin-top:10px;"></div>
-      <button class="btn-primary" style="width:100%; margin-top:10px;" onclick="runMonthEndCloseNow()">Run everything automatic now</button>
+      <button class="btn-primary" style="width:100%; margin-top:10px;" onclick="withButtonBusy(this, runMonthEndCloseNow)">Run everything automatic now</button>
       <div id="checklist-run-all-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
 
@@ -2168,7 +2170,10 @@ function viewModeStorageKey() { return `viewMode:${currentCompany.id}`; }
 function applyViewMode(mode) {
   document.documentElement.setAttribute('data-view-mode', mode);
   const btn = document.getElementById('view-mode-toggle-btn');
-  if (btn) btn.textContent = mode === 'simple' ? '👤 Simple view (click for full)' : '🧮 Full view (click for simple)';
+  if (btn) {
+    btn.textContent = mode === 'simple' ? '👤 Simple view' : '🧮 Full view';
+    btn.title = mode === 'simple' ? 'Showing the essentials — click to show every advanced panel and field' : 'Showing everything — click to hide the advanced panels and fields';
+  }
 }
 
 function toggleViewMode() {
@@ -2727,7 +2732,7 @@ async function deleteCompany(id, name) {
 
 function goToCompanyPicker() {
   currentCompany = null;
-  document.title = 'Bookkeeping — T-Account Ledger';
+  document.title = 'MyAccountingPal — Bookkeeping';
   show('company-screen');
 }
 
@@ -3071,6 +3076,7 @@ function showToast(message, kind) {
   container.appendChild(toast);
   setTimeout(() => toast.remove(), 4000);
 }
+
 
 // ---------- page router (this app is one HTML file with client-side "pages", not separate
 // server routes — each top-level section is shown/hidden by data-page, driven by the URL hash) ----------
@@ -4260,7 +4266,7 @@ function renderAttentionList() {
   }
 
   const listEl = document.getElementById('dash-attention-list');
-  if (!items.length) { listEl.innerHTML = '<div class="empty">Nothing urgent right now.</div>'; return; }
+  if (!items.length) { listEl.innerHTML = '<div class="empty">Nothing urgent — you\'re all caught up. ✅</div>'; return; }
   const toneColor = { bad: 'var(--bad)', warn: 'var(--accent)' };
   listEl.innerHTML = items.map((item, i) => `
     <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; ${i ? 'border-top:1px solid var(--border);' : ''}">
@@ -4281,7 +4287,12 @@ function renderSpendByCategory() {
   }
   const rows = Object.entries(totals).sort((a, b) => b[1] - a[1]).slice(0, 8);
   const chartEl = document.getElementById('dash-spend-chart');
-  if (!rows.length) { chartEl.innerHTML = '<div class="empty">No spending in the last 30 days.</div>'; return; }
+  if (!rows.length) {
+    chartEl.innerHTML = transactions.length
+      ? '<div class="empty">No spending in the last 30 days.</div>'
+      : '<div class="empty">Post your first transaction to see where money goes.<br><button class="btn-secondary" style="margin-top:8px;" onclick="showPage(\'transactions\')">Post a transaction</button></div>';
+    return;
+  }
   const max = rows[0][1];
   chartEl.innerHTML = rows.map(([name, amount]) => `
     <div style="margin-bottom:8px;">
