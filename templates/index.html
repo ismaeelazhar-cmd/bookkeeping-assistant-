@@ -1029,6 +1029,12 @@
 
       <div id="brec-summary" class="row2" style="margin-top:14px;"></div>
 
+      <div class="toolbar" style="margin-top:10px;">
+        <button class="btn-primary" style="margin-top:0; width:auto;" onclick="withButtonBusy(this, autoMatchBankLines)">⚡ Auto-match</button>
+        <span class="sub" style="margin:0;">Matches each unmatched statement line to the one ledger transaction with the same amount within 3 days — only when there's exactly one candidate, so it can't guess wrong between look-alikes.</span>
+      </div>
+      <div id="brec-automatch-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+
       <table class="inbox" style="margin-top:10px;">
         <thead><tr><th>Date</th><th>Statement description</th><th class="num">Amount</th><th>Status</th><th>Match to ledger transaction</th><th></th></tr></thead>
         <tbody id="brec-body"></tbody>
@@ -3077,6 +3083,29 @@ function showToast(message, kind) {
   setTimeout(() => toast.remove(), 4000);
 }
 
+function showActionToast(message, buttonLabel, onClick) {
+  // A toast with a button — for "want me to automate this next time?" offers. Sticks around
+  // longer than a plain toast (10s) since it's asking for a decision, not just confirming one.
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  toast.className = 'panel';
+  toast.style.margin = '0';
+  toast.style.borderLeft = '3px solid var(--accent)';
+  toast.style.fontSize = '13px';
+  toast.style.boxShadow = '0 4px 14px rgba(0,0,0,.12)';
+  const text = document.createElement('div');
+  text.textContent = message;
+  const btn = document.createElement('button');
+  btn.className = 'btn-primary';
+  btn.style.marginTop = '8px';
+  btn.textContent = buttonLabel;
+  btn.onclick = async () => { toast.remove(); await onClick(); };
+  toast.appendChild(text);
+  toast.appendChild(btn);
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), 10000);
+}
+
 
 // ---------- page router (this app is one HTML file with client-side "pages", not separate
 // server routes — each top-level section is shown/hidden by data-page, driven by the URL hash) ----------
@@ -3454,6 +3483,7 @@ async function addTransaction(button) {
   } catch (e) { errEl.textContent = e.message; showToast(e.message, 'error'); return; }
 
   showToast(`Posted: ${desc} — ${fmt(amount)}`, 'success');
+  maybeSuggestCategorizationRule(desc, debit, credit); // before refreshAll, while `transactions` still holds only the PRIOR posts
   pushUndoStack({ id: result.id, desc, amount });
 
   document.getElementById('f-desc').value = '';
@@ -3468,6 +3498,30 @@ async function addTransaction(button) {
   document.getElementById('vat-preview').textContent = '';
   await refreshAll();
   document.getElementById('f-desc').focus(); // rapid entry: stay in the form, ready for the next line
+}
+
+function maybeSuggestCategorizationRule(desc, debit, credit) {
+  // Learn from the owner's own behavior: if they've now manually posted the same description
+  // to the same accounts twice or more, and no rule already covers it, offer to make it a rule
+  // — instead of expecting them to discover the Categorization Rules panel in settings.
+  const key = normalizeDesc(desc);
+  const alreadyCovered = (categorizationRules || []).some(r => key.includes(r.keyword));
+  if (alreadyCovered) return;
+  const priorSame = transactions.filter(t =>
+    !t.voidedAt && normalizeDesc(t.desc) === key && t.debit === debit && t.credit === credit
+  ).length;
+  if (priorSame < 1) return; // this post makes it the 2nd+ occurrence
+  showActionToast(
+    `You've categorised "${desc}" as ${debit} / ${credit} ${priorSame + 1} times now. Want that to happen automatically for bank imports and receipts too?`,
+    'Always categorise it this way',
+    async () => {
+      await api(`/api/companies/${currentCompany.id}/categorization-rules`, {
+        method: 'POST', body: JSON.stringify({ keyword: key, debit, credit }),
+      });
+      await loadCategorizationRules();
+      showToast(`Done — "${desc}" will be categorised automatically from now on.`, 'success');
+    }
+  );
 }
 
 // ---------- Keyboard rapid entry ----------
@@ -5320,6 +5374,46 @@ async function matchBankLine(lineId, transactionId) {
   await api(`/api/companies/${currentCompany.id}/bank-lines/${lineId}/match`, {
     method: 'POST', body: JSON.stringify({ transactionId: transactionId ? parseInt(transactionId, 10) : null })
   });
+  await refreshAll();
+}
+
+async function autoMatchBankLines() {
+  // One click instead of a dropdown per line: match every unmatched statement line that has
+  // EXACTLY ONE plausible ledger counterpart (same amount to the penny, date within ±3 days,
+  // not already claimed by another line or suggestion). Anything ambiguous is left alone for
+  // the per-line dropdown — auto-matching must never guess between look-alikes. Uses the same
+  // candidate logic the table's dropdowns are built from, so what it matches is always
+  // something the user could have picked by hand.
+  const statusEl = document.getElementById('brec-automatch-status');
+  const account = document.getElementById('brec-account').value.trim() || 'Cash';
+  const lines = bankLines.filter(l => l.cashAccount === account && !l.matchedTransactionId);
+  const ledgerLines = ledgerLinesForCashAccount(account);
+  const claimedTxIds = new Set(bankLines.filter(l => l.matchedTransactionId).map(l => l.matchedTransactionId));
+
+  const dayMs = 86400000;
+  const suggestions = [];
+  for (const line of lines) {
+    const candidates = ledgerLines.filter(tl =>
+      !claimedTxIds.has(tl.transactionId) &&
+      Math.abs(tl.amount - line.amount) < 0.005 &&
+      Math.abs(new Date(tl.date) - new Date(line.date)) <= 3 * dayMs
+    );
+    if (candidates.length !== 1) continue;
+    suggestions.push({ lineId: line.id, transactionId: candidates[0].transactionId });
+    claimedTxIds.add(candidates[0].transactionId); // each ledger transaction can only satisfy one statement line
+  }
+
+  if (!suggestions.length) {
+    statusEl.textContent = 'No confident matches found — anything left is either ambiguous (several transactions at the same amount) or has no ledger transaction at that amount yet.';
+    return;
+  }
+  for (const s of suggestions) {
+    await api(`/api/companies/${currentCompany.id}/bank-lines/${s.lineId}/match`, {
+      method: 'POST', body: JSON.stringify({ transactionId: s.transactionId })
+    });
+  }
+  statusEl.textContent = `Matched ${suggestions.length} line(s) automatically. ${lines.length - suggestions.length} left for manual review.`;
+  showToast(`Auto-matched ${suggestions.length} statement line(s).`, 'success');
   await refreshAll();
 }
 
