@@ -158,7 +158,7 @@
     }
     .sidebar.mobile-open { transform: translateX(0); }
     .main-area { padding: 16px; }
-    #dashboard.row2[style*="repeat(4"] { grid-template-columns: 1fr 1fr !important; }
+    #dashboard.row2 { grid-template-columns: 1fr 1fr !important; }
     .row2 { grid-template-columns: 1fr !important; }
     /* white-space:nowrap on the table itself (rather than scoped to td/th) was cascading into
        any non-tabular content placed inside a row — an empty-state's placeholder text/button —
@@ -461,7 +461,7 @@
       </div>
     </div>
 
-    <div id="dashboard" class="row2" style="grid-template-columns: repeat(4, 1fr); margin-bottom:16px;">
+    <div id="dashboard" class="row2" style="grid-template-columns: repeat(5, 1fr); margin-bottom:16px;">
       <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--text);">
         <div class="sub" style="margin:0; display:flex; align-items:center; gap:6px;"><span style="font-size:15px;">💰</span>Cash position</div>
         <div style="font-size:24px; font-weight:700; margin-top:4px;" id="dash-cash">—</div>
@@ -481,6 +481,11 @@
         <div class="sub" style="margin:0; display:flex; align-items:center; gap:6px;"><span style="font-size:15px;" id="dash-profit-icon">📈</span>Net profit <span id="dash-profit-period" style="color:var(--muted);">(all time)</span></div>
         <div style="font-size:24px; font-weight:700; margin-top:4px;" id="dash-profit">—</div>
         <div id="dash-profit-hint" style="font-size:11px; margin-top:4px; min-height:14px; color:var(--muted);"></div>
+      </div>
+      <div class="panel kpi-card" style="margin:0; border-left:3px solid var(--color-danger, #b91c1c);">
+        <div class="sub" style="margin:0; display:flex; align-items:center; gap:6px;"><span style="font-size:15px;">🧾</span><span class="term-tip" data-tip="VAT, PAYE/NI, and CIS balances currently sitting in their control accounts — what you owe HMRC right now, in one place, not spread across three reports.">Tax you owe</span></div>
+        <div style="font-size:24px; font-weight:700; margin-top:4px;" id="dash-tax-owed">—</div>
+        <div id="dash-tax-owed-hint" style="font-size:11px; margin-top:4px; min-height:14px; color:var(--muted);"></div>
       </div>
     </div>
 
@@ -4057,6 +4062,19 @@ function renderDashboard() {
   profitEl.style.color = profit >= 0 ? 'var(--good)' : 'var(--bad)';
   document.getElementById('dash-profit-icon').textContent = profit >= 0 ? '📈' : '📉';
   document.getElementById('dash-profit-hint').textContent = transactions.length ? '' : 'Calculates once revenue/expenses are posted.';
+
+  // Tax you owe: VAT/PAYE/NI/CIS are all just liability accounts already sitting in the ledger —
+  // no separate tax computation needed here, just sum whichever of these control accounts this
+  // company actually uses (most won't have all of them, e.g. no CIS Deductions Payable unless
+  // they've actually paid a subcontractor under CIS).
+  const TAX_LIABILITY_ACCOUNTS = ['VAT Control Account', 'PAYE Payable', 'NI Payable', 'CIS Deductions Payable'];
+  const taxOwed = TAX_LIABILITY_ACCOUNTS
+    .filter(n => accounts[n])
+    .reduce((s, n) => s + accountNetBalance(accounts[n], getAccountType(n)), 0);
+  document.getElementById('dash-tax-owed').textContent = fmt(taxOwed);
+  document.getElementById('dash-tax-owed-hint').textContent = TAX_LIABILITY_ACCOUNTS.some(n => accounts[n])
+    ? 'VAT + PAYE/NI + CIS balances currently owed.'
+    : 'Updates once VAT, payroll, or CIS activity is posted.';
 
   renderAttentionList();
   renderSetupChecklist();
