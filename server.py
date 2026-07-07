@@ -150,8 +150,12 @@ app.secret_key = load_or_create_secret_key()
 app.config["MAX_CONTENT_LENGTH"] = MAX_ATTACHMENT_BYTES
 # "Just log in easy and use" — without this, Flask's session cookie is browser-session-only
 # (gone the moment the browser/tab fully closes), so signing in again was needed far more often
-# than it should be. 30 days is long enough to not be a nuisance; logout still works the same.
-app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=30)
+# than it should be. 365 days + refresh-on-every-request (Flask's default) means the cookie
+# effectively never expires as long as this browser visits at least once a year — logout still
+# works the same, this only affects how long an idle session survives. Long-lived is acceptable
+# here specifically because signups are locked to one admin account (see SIGNUP_LOCK_FILE) —
+# this isn't a multi-tenant SaaS where a stolen long-lived cookie exposes other people's data.
+app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=365)
 
 
 @app.before_request
