@@ -4719,7 +4719,6 @@ function parseMovementLine(line) {
   const signedAmount = parseAmount(best[0]);
   const amount = Math.abs(signedAmount);
   if (!amount) return null;
-  const isOutgoing = signedAmount < 0; // most UK statements prefix money-out with a minus sign; an unsigned positive number is treated as money in
 
   let desc = line.replace(best[0], ' ');
   if (balanceMatch) desc = desc.replace(balanceMatch[0], ' ');
@@ -4727,6 +4726,31 @@ function parseMovementLine(line) {
   // Fewer than 3 real letters left means this was probably a stray reference number, not a
   // description — e.g. "Ref: 4471-2026" with the amount stripped out leaves almost nothing.
   if ((desc.match(/[a-z]/gi) || []).length < 3) return null;
+
+  // Direction: prefer an explicit signal on the number itself — a leading minus (already parsed
+  // above), a trailing minus ("125.00-"), or a trailing DR/CR marker, all conventions different
+  // banks use. Many statements (this includes real Santander exports) show two columns — money
+  // in / money out — with NO sign at all once the PDF is flattened to plain text; a bare
+  // positive number in that case is not evidence of "money in", it's just missing information.
+  // Falling back to always-incoming there silently books every outflow backwards, which is worse
+  // than falling back to a wording-based heuristic that matches how UK statements actually phrase
+  // outgoing vs incoming lines.
+  const afterAmount = line.slice(line.indexOf(best[0]) + best[0].length, line.indexOf(best[0]) + best[0].length + 4);
+  let isOutgoing;
+  if (signedAmount < 0 || /^\s*-/.test(afterAmount)) {
+    isOutgoing = true;
+  } else if (/^\s*DR\b/i.test(afterAmount)) {
+    isOutgoing = true;
+  } else if (/^\s*CR\b/i.test(afterAmount)) {
+    isOutgoing = false;
+  } else {
+    const descLower = desc.toLowerCase();
+    const OUTGOING_CUES = ['payment to', 'direct debit', 'card payment', 'standing order to', 'charges from', 'bill payment', 'transfer to'];
+    const INCOMING_CUES = ['payment from', 'payment received', 'faster payment receipt', 'deposit', 'salary', 'refund', 'transfer from', 'received from'];
+    if (OUTGOING_CUES.some(cue => descLower.includes(cue))) isOutgoing = true;
+    else if (INCOMING_CUES.some(cue => descLower.includes(cue))) isOutgoing = false;
+    else isOutgoing = false; // no signal either way — keep the historical default rather than guess further
+  }
   const cat = categorize(desc, isOutgoing);
   return { id: Date.now() + Math.random().toString(36).slice(2, 7), date, desc, amount, debit: cat.debit, credit: cat.credit, confidence: cat.confidence, reason: cat.reason, selected: true };
 }
