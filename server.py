@@ -6737,7 +6737,14 @@ def bulk_create_bank_lines(company_id):
                 "INSERT INTO bank_lines (company_id, cash_account, date, desc, amount_pence) VALUES (?,?,?,?,?)",
                 (company_id, cash_account, date, desc, to_pence(amount)),
             )
-        maybe_queue_invoice_payment_suggestion(db, company_id, cash_account, date, desc, float(amount))
+        line_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # Bulk import (CSV export, or PDF-statement lines extracted client-side) previously only
+        # checked for an invoice-payment match and left everything else as a bare, uncategorized
+        # row with nothing to auto-match against — categorization rules/presets were never
+        # consulted, unlike the Plaid live-sync path. Route every line through the same pipeline
+        # Plaid uses so rules auto-post/queue and unmatched lines land in the review queue instead
+        # of dead-ending as "Uncategorized".
+        queue_plaid_line_if_unsure(db, company_id, cash_account, date, desc, float(amount), line_id)
         inserted += 1
     db.commit()
     return jsonify({"inserted": inserted})

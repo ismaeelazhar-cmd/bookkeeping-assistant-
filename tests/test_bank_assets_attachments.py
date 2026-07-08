@@ -58,6 +58,37 @@ def test_bank_line_match_rejects_unknown_transaction(client):
     assert res.status_code == 404
 
 
+def test_bulk_import_applies_categorization_rules_not_just_invoice_match(client):
+    # Regression test: bulk import (CSV/PDF-statement lines) used to only check for an
+    # invoice-payment match and left every other line as a bare "Uncategorized" row with no
+    # ledger transaction and nothing for Auto-match to pair against. It must now run the same
+    # categorization pipeline Plaid sync uses.
+    cid = make_company(client)
+    client.post(f"/api/companies/{cid}/categorization-rules", json={
+        "keyword": "bill payment", "debit": "Utilities", "credit": "Cash",
+    })
+    client.post(f"/api/companies/{cid}/bank-lines/bulk", json=[
+        {"cashAccount": "Cash", "date": "2026-06-01", "desc": "BILL PAYMENT VIA FASTER PAYMENT TO EON LTD", "amount": -100},
+    ])
+    txs = client.get(f"/api/companies/{cid}/transactions").get_json()
+    assert len(txs) == 1
+    assert txs[0]["debit"] == "Utilities"
+    assert txs[0]["credit"] == "Cash"
+    # the bank line itself should now be linked to that transaction, not sitting unmatched
+    line = client.get(f"/api/companies/{cid}/bank-lines").get_json()[0]
+    assert line["matchedTransactionId"] == txs[0]["id"]
+
+
+def test_bulk_import_with_no_rule_match_queues_for_review(client):
+    cid = make_company(client)
+    client.post(f"/api/companies/{cid}/bank-lines/bulk", json=[
+        {"cashAccount": "Cash", "date": "2026-06-01", "desc": "BILL PAYMENT TO MUNAZA £66.16", "amount": -66.16},
+    ])
+    queue = client.get(f"/api/companies/{cid}/clarification-queue").get_json()
+    assert len(queue) == 1
+    assert queue[0]["source"] == "plaid"
+
+
 def test_bank_line_delete(client):
     cid = make_company(client)
     client.post(f"/api/companies/{cid}/bank-lines/bulk", json=[
