@@ -4953,6 +4953,79 @@ def pay_invoice_bill(company_id, doc_id):
     return jsonify({"ok": True, "transactionId": tx_id})
 
 
+@app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>/write-off", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def write_off_invoice(company_id, doc_id):
+    """An invoice the customer is never going to pay (gone out of business, disputed and
+    abandoned, etc.) shouldn't just sit "sent" forever inflating receivables — irrecoverable
+    debt is a standard year-end adjustment: Dr Bad Debt Expense, Cr Trade Receivables, removing
+    it from what's owed and recognising the loss. Only ever applied to an invoice (a bill you
+    owe someone else can't become "irrecoverable" the same way) and only from 'sent', mirroring
+    the same state the /pay route requires."""
+    data = request.get_json(force=True) or {}
+    write_off_date = data.get("date") or datetime.date.today().isoformat()
+
+    db = get_db()
+    doc = db.execute(
+        "SELECT * FROM invoices_bills WHERE id = ? AND company_id = ?", (doc_id, company_id)
+    ).fetchone()
+    if doc is None:
+        return jsonify({"error": "Not found."}), 404
+    if doc["kind"] != "invoice":
+        return jsonify({"error": "Only an invoice (money owed to you) can be written off as a bad debt."}), 400
+    if doc["status"] != "sent":
+        return jsonify({"error": "Only a sent, still-outstanding invoice can be written off."}), 400
+
+    amount = from_pence(doc["amount_pence"])
+    try:
+        debtors_account = resolve_account(db, company_id, "Trade Receivables", "current_asset")
+        bad_debt_account = resolve_account(db, company_id, "Bad Debt Expense", "expense")
+        tx_id = post_ledger_transaction(
+            db, company_id, write_off_date, f'Bad debt written off: {doc["desc"]}', amount,
+            bad_debt_account, debtors_account,
+        )
+    except LedgerError as e:
+        return jsonify({"error": e.message}), e.status
+
+    db.execute(
+        "UPDATE invoices_bills SET status = 'written_off', payment_transaction_id = ?, paid_at = ? WHERE id = ?",
+        (tx_id, datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z", doc_id),
+    )
+    db.commit()
+    return jsonify({"ok": True, "transactionId": tx_id})
+
+
+@app.route("/api/companies/<int:company_id>/doubtful-debt-allowance", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def create_doubtful_debt_allowance(company_id):
+    """The alternative to writing off a SPECIFIC invoice: a general provision against receivables
+    that probably won't all be collected, without pointing at any one customer. Posts against a
+    contra-asset (Allowance for Doubtful Debts nets against Trade Receivables on the balance
+    sheet, same convention as Accumulated Depreciation nets against a fixed asset) rather than
+    debiting Trade Receivables directly, since no specific invoice is being removed."""
+    data = request.get_json(force=True) or {}
+    amount = float(data.get("amount") or 0)
+    date = data.get("date") or datetime.date.today().isoformat()
+    if amount <= 0:
+        return jsonify({"error": "Allowance amount must be greater than zero."}), 400
+
+    db = get_db()
+    try:
+        bad_debt_account = resolve_account(db, company_id, "Bad Debt Expense", "expense")
+        allowance_account = resolve_account(db, company_id, "Allowance for Doubtful Debts", "current_asset")
+        tx_id = post_ledger_transaction(
+            db, company_id, date, "Doubtful debt allowance", amount, bad_debt_account, allowance_account,
+        )
+    except LedgerError as e:
+        return jsonify({"error": e.message}), e.status
+    db.commit()
+    return jsonify({"ok": True, "transactionId": tx_id})
+
+
 @app.route("/api/companies/<int:company_id>/invoices-bills/<int:doc_id>/convert-to-invoice", methods=["POST"])
 @login_required
 @company_required

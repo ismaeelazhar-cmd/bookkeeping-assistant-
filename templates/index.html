@@ -1389,6 +1389,15 @@
       <table class="trial"><thead><tr><td><b>Customer</b></td><td class="num"><b>Current</b></td><td class="num"><b>1-30</b></td><td class="num"><b>31-60</b></td><td class="num"><b>61-90</b></td><td class="num"><b>90+</b></td></tr></thead><tbody id="aging-invoice-body"></tbody></table>
       <h2 style="margin-top:18px; color:var(--credit);">Payables (money you owe)</h2>
       <table class="trial"><thead><tr><td><b>Supplier</b></td><td class="num"><b>Current</b></td><td class="num"><b>1-30</b></td><td class="num"><b>31-60</b></td><td class="num"><b>61-90</b></td><td class="num"><b>90+</b></td></tr></thead><tbody id="aging-bill-body"></tbody></table>
+      <div style="margin-top:16px; padding-top:14px; border-top:1px solid var(--border);">
+        <b>Doubtful debt allowance</b>
+        <div class="sub" style="margin-bottom:8px;">Not sure a specific invoice is bad, but doubt some of the older ones above will ever be collected? Post a general provision instead of writing off any one invoice by name.</div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <input type="number" id="dda-amount" placeholder="Amount" style="width:120px;">
+          <input type="date" id="dda-date" style="width:150px;">
+          <button class="btn-secondary" onclick="createDoubtfulDebtAllowance()">Post allowance</button>
+        </div>
+      </div>
     </div>
 
     <div class="panel" id="cis-panel" style="margin-top:20px; display:none;">
@@ -7544,6 +7553,7 @@ function renderInvoicesBills() {
       actions.push(`<button class="btn-secondary" onclick="emailInvoiceBill(${d.id})">Email</button>`);
       if (d.kind === 'invoice') actions.push(`<button class="btn-secondary" onclick="copyPortalLink(${d.id})">Copy link</button>`);
       if (d.kind === 'invoice' && d.displayStatus === 'overdue') actions.push(`<button class="btn-secondary" style="color:var(--bad);" onclick="remindInvoiceBill(${d.id})">Remind</button>`);
+      if (d.kind === 'invoice' && d.status === 'sent') actions.push(`<button class="btn-secondary" style="color:var(--muted);" onclick="writeOffInvoiceBill(${d.id})" title="Never getting paid? Post it as a bad debt instead of leaving it outstanding forever.">Write off</button>`);
     }
     actions.push(`<button class="btn-danger" onclick="deleteInvoiceBill(${d.id})">✕</button>`);
     const kindLabel = { invoice: 'Invoice', bill: 'Bill', credit_note: 'Credit note', quote: 'Quote' }[d.kind] || d.kind;
@@ -7718,6 +7728,31 @@ async function payInvoiceBill(id) {
   try {
     await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/pay`, { method: 'POST', body: JSON.stringify({ account, date, cisDeduction }) });
   } catch (e) { alert(e.message); return; }
+  await refreshAll();
+}
+
+async function createDoubtfulDebtAllowance() {
+  const amount = parseFloat(document.getElementById('dda-amount').value);
+  const date = document.getElementById('dda-date').value || new Date().toISOString().slice(0, 10);
+  if (!amount || amount <= 0) { showToast('Enter an allowance amount greater than zero.', 'error'); return; }
+  try {
+    await api(`/api/companies/${currentCompany.id}/doubtful-debt-allowance`, { method: 'POST', body: JSON.stringify({ amount, date }) });
+  } catch (e) { showToast(e.message, 'error'); return; }
+  document.getElementById('dda-amount').value = '';
+  showToast('Doubtful debt allowance posted.', 'success');
+  await refreshAll();
+}
+
+async function writeOffInvoiceBill(id) {
+  const doc = invoicesBills.find(d => d.id === id);
+  const label = doc ? `${doc.contactName} — ${fmt(doc.amount)}` : 'this invoice';
+  if (!confirm(`Write off ${label} as a bad debt? This posts it as an expense and removes it from what's owed — only do this if you're confident it will never be paid.`)) return;
+  const date = prompt('Write-off date (YYYY-MM-DD)?', new Date().toISOString().slice(0, 10));
+  if (!date) return;
+  try {
+    await api(`/api/companies/${currentCompany.id}/invoices-bills/${id}/write-off`, { method: 'POST', body: JSON.stringify({ date }) });
+  } catch (e) { alert(e.message); return; }
+  showToast('Invoice written off as a bad debt.', 'success');
   await refreshAll();
 }
 

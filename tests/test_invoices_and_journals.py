@@ -59,6 +59,61 @@ def test_pay_invoice_settles_receivable(client):
     assert client.get(f"/api/companies/{cid}/aging-report").get_json()["invoice"] == {}
 
 
+def test_write_off_invoice_posts_bad_debt_and_clears_receivable(client):
+    cid = make_company(client)
+    contact_id = client.post(f"/api/companies/{cid}/contacts", json={"name": "Acme Ltd"}).get_json()["id"]
+    doc_id = client.post(f"/api/companies/{cid}/invoices-bills", json={
+        "kind": "invoice", "contactId": contact_id, "date": "2026-01-01", "dueDate": "2026-01-15",
+        "desc": "Consulting", "amount": 500, "account": "Sales",
+    }).get_json()["id"]
+    client.post(f"/api/companies/{cid}/invoices-bills/{doc_id}/send")
+
+    res = client.post(f"/api/companies/{cid}/invoices-bills/{doc_id}/write-off", json={"date": "2026-06-01"})
+    assert res.status_code == 200
+
+    doc = client.get(f"/api/companies/{cid}/invoices-bills").get_json()[0]
+    assert doc["status"] == "written_off"
+    # no longer counted as outstanding in the aging report
+    assert client.get(f"/api/companies/{cid}/aging-report").get_json()["invoice"] == {}
+
+    txs = client.get(f"/api/companies/{cid}/transactions").get_json()
+    write_off_tx = next(t for t in txs if t["debit"] == "Bad Debt Expense")
+    assert write_off_tx["credit"] == "Trade Receivables"
+    assert write_off_tx["amount"] == 500.0
+
+
+def test_write_off_rejects_bill_and_already_paid_invoice(client):
+    cid = make_company(client)
+    contact_id = client.post(f"/api/companies/{cid}/contacts", json={"name": "Acme Ltd"}).get_json()["id"]
+    bill_id = client.post(f"/api/companies/{cid}/invoices-bills", json={
+        "kind": "bill", "contactId": contact_id, "date": "2026-01-01", "dueDate": "2026-01-15",
+        "desc": "Supplies", "amount": 200, "account": "Office Expenses",
+    }).get_json()["id"]
+    client.post(f"/api/companies/{cid}/invoices-bills/{bill_id}/send")
+    res = client.post(f"/api/companies/{cid}/invoices-bills/{bill_id}/write-off")
+    assert res.status_code == 400
+
+    invoice_id = client.post(f"/api/companies/{cid}/invoices-bills", json={
+        "kind": "invoice", "contactId": contact_id, "date": "2026-01-01", "dueDate": "2026-01-15",
+        "desc": "Consulting", "amount": 500, "account": "Sales",
+    }).get_json()["id"]
+    client.post(f"/api/companies/{cid}/invoices-bills/{invoice_id}/send")
+    client.post(f"/api/companies/{cid}/invoices-bills/{invoice_id}/pay", json={"date": "2026-02-01", "account": "Cash"})
+    res = client.post(f"/api/companies/{cid}/invoices-bills/{invoice_id}/write-off")
+    assert res.status_code == 400
+
+
+def test_doubtful_debt_allowance_posts_contra_asset(client):
+    cid = make_company(client)
+    res = client.post(f"/api/companies/{cid}/doubtful-debt-allowance", json={"amount": 150, "date": "2026-06-01"})
+    assert res.status_code == 200
+
+    txs = client.get(f"/api/companies/{cid}/transactions").get_json()
+    tx = next(t for t in txs if t["debit"] == "Bad Debt Expense")
+    assert tx["credit"] == "Allowance for Doubtful Debts"
+    assert tx["amount"] == 150.0
+
+
 def test_delete_invoice_voids_linked_transactions(client):
     cid = make_company(client)
     contact_id = client.post(f"/api/companies/{cid}/contacts", json={"name": "Acme Ltd"}).get_json()["id"]
