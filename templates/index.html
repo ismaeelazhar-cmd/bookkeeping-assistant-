@@ -7108,9 +7108,34 @@ function renderFixedAssets() {
       <td class="num">${fmt(a.cost)}</td>
       <td class="num">${fmt(accum)}</td>
       <td class="num">${fmt(nbv)}</td>
-      <td><button class="btn-danger" onclick="deleteFixedAsset(${a.id})">✕</button></td>
+      <td>
+        <button class="btn-secondary" onclick="disposeFixedAsset(${a.id})" title="Sold or scrapped this asset? Post the disposal — clears it, its accumulated depreciation, and recognises any gain/loss.">Dispose</button>
+        <button class="btn-danger" onclick="deleteFixedAsset(${a.id})">✕</button>
+      </td>
     </tr>`;
   }).join('');
+}
+
+async function disposeFixedAsset(id) {
+  const asset = fixedAssets.find(a => a.id === id);
+  const accum = asset ? accumulatedDepreciation(asset.accumAccount) : 0;
+  const nbv = asset ? asset.cost - accum : 0;
+  const proceedsInput = prompt(`Disposing "${asset ? asset.name : 'this asset'}" — net book value is currently ${fmt(nbv)}.\n\nProceeds received (0 if scrapped for nothing)?`, '0');
+  if (proceedsInput === null) return;
+  const proceeds = parseFloat(proceedsInput) || 0;
+  const date = prompt('Disposal date (YYYY-MM-DD)?', new Date().toISOString().slice(0, 10));
+  if (!date) return;
+  let result;
+  try {
+    result = await api(`/api/companies/${currentCompany.id}/fixed-assets/${id}/dispose`, {
+      method: 'POST', body: JSON.stringify({ date, proceeds }),
+    });
+  } catch (e) { showToast(e.message, 'error'); return; }
+  const gl = result.gainOrLoss;
+  const glText = Math.abs(gl) < 0.005 ? 'no gain or loss' : (gl > 0 ? `a gain of ${fmt(gl)}` : `a loss of ${fmt(Math.abs(gl))}`);
+  showToast(`Asset disposed — ${glText} recognised.`, 'success');
+  await loadFixedAssets();
+  await refreshAll();
 }
 
 async function addFixedAsset() {
@@ -7143,8 +7168,10 @@ async function addFixedAsset() {
 }
 
 async function deleteFixedAsset(id) {
-  if (!(await confirmAction('Remove this asset from the register? Depreciation already posted to the ledger stays — delete those transactions separately if needed.'))) return;
-  await api(`/api/companies/${currentCompany.id}/fixed-assets/${id}`, { method: 'DELETE' });
+  if (!(await confirmAction('Remove this asset from the register? This only works for an asset with no depreciation posted yet — use Dispose instead for one that\'s actually been sold or scrapped.'))) return;
+  try {
+    await api(`/api/companies/${currentCompany.id}/fixed-assets/${id}`, { method: 'DELETE' });
+  } catch (e) { showToast(e.message, 'error'); return; }
   await loadFixedAssets();
 }
 

@@ -6118,10 +6118,87 @@ def create_fixed_asset(company_id):
 @company_required
 @write_required
 def delete_fixed_asset(company_id, asset_id):
+    """Hard delete is only for an asset added by mistake — once any depreciation has actually
+    been posted against it, deleting the row would silently leave those depreciation entries
+    behind with no asset to explain them. Selling or scrapping a REAL asset goes through
+    /dispose instead, which properly closes it out with a disposal journal."""
     db = get_db()
+    asset = db.execute("SELECT * FROM fixed_assets WHERE id = ? AND company_id = ?", (asset_id, company_id)).fetchone()
+    if asset is None:
+        return jsonify({"ok": True})
+    accumulated = db.execute(
+        "SELECT COALESCE(SUM(amount_pence), 0) as total FROM transactions WHERE company_id = ? AND credit = ? AND voided_at IS NULL",
+        (company_id, asset["accum_account"]),
+    ).fetchone()["total"]
+    if accumulated:
+        return jsonify({"error": "This asset already has depreciation posted against it — dispose of it instead so the disposal is properly recorded, rather than deleting its history."}), 400
     db.execute("DELETE FROM fixed_assets WHERE id = ? AND company_id = ?", (asset_id, company_id))
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/fixed-assets/<int:asset_id>/dispose", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def dispose_fixed_asset(company_id, asset_id):
+    """Selling or scrapping an asset needs to clear it fully off the books: remove the asset at
+    cost, remove whatever accumulated depreciation had built up against it, record whatever cash
+    (if any) came in, and recognise the difference as a gain or loss on disposal — the standard
+    treatment for derecognising a fixed asset. All legs share one journal_id, same pattern as the
+    CIS split in pay_invoice_bill, so they read together as one disposal event."""
+    data = request.get_json(force=True) or {}
+    disposal_date = data.get("date") or datetime.date.today().isoformat()
+    proceeds = float(data.get("proceeds") or 0)
+    if proceeds < 0:
+        return jsonify({"error": "Proceeds can't be negative."}), 400
+
+    db = get_db()
+    asset = db.execute("SELECT * FROM fixed_assets WHERE id = ? AND company_id = ?", (asset_id, company_id)).fetchone()
+    if asset is None:
+        return jsonify({"error": "Not found."}), 404
+
+    cost = from_pence(asset["cost_pence"])
+    accumulated = from_pence(db.execute(
+        "SELECT COALESCE(SUM(amount_pence), 0) as total FROM transactions WHERE company_id = ? AND credit = ? AND voided_at IS NULL",
+        (company_id, asset["accum_account"]),
+    ).fetchone()["total"])
+    net_book_value = cost - accumulated
+    remaining = round(cost - accumulated - proceeds, 2)  # > 0 loss, < 0 gain, ~0 exactly balanced
+
+    journal_id = uuid.uuid4().hex
+    tx_ids = []
+    try:
+        if accumulated > 0:
+            tx_ids.append(post_ledger_transaction(
+                db, company_id, disposal_date, f"Disposal — clear accumulated depreciation: {asset['name']}",
+                accumulated, asset["accum_account"], asset["asset_account"], journal_id=journal_id,
+            ))
+        if proceeds > 0:
+            cash_account = resolve_account(db, company_id, data.get("account") or "Cash", "cash")
+            tx_ids.append(post_ledger_transaction(
+                db, company_id, disposal_date, f"Disposal proceeds: {asset['name']}",
+                proceeds, cash_account, asset["asset_account"], journal_id=journal_id,
+            ))
+        if remaining > 0.005:
+            loss_account = resolve_account(db, company_id, "Loss on Disposal", "expense")
+            tx_ids.append(post_ledger_transaction(
+                db, company_id, disposal_date, f"Loss on disposal: {asset['name']}",
+                remaining, loss_account, asset["asset_account"], journal_id=journal_id,
+            ))
+        elif remaining < -0.005:
+            gain_account = resolve_account(db, company_id, "Gain on Disposal", "revenue")
+            tx_ids.append(post_ledger_transaction(
+                db, company_id, disposal_date, f"Gain on disposal: {asset['name']}",
+                -remaining, asset["asset_account"], gain_account, journal_id=journal_id,
+            ))
+    except LedgerError as e:
+        return jsonify({"error": e.message}), e.status
+
+    db.execute("DELETE FROM fixed_assets WHERE id = ? AND company_id = ?", (asset_id, company_id))
+    db.commit()
+    gain_or_loss = round(proceeds - net_book_value, 2)
+    return jsonify({"ok": True, "transactionIds": tx_ids, "netBookValue": net_book_value, "gainOrLoss": gain_or_loss})
 
 
 def calculate_monthly_depreciation_charge(asset, accumulated_so_far):
