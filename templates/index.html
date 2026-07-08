@@ -5041,7 +5041,25 @@ function renderClarificationQueue() {
   }
   wrap.style.display = '';
   document.getElementById('clarification-queue-count').textContent = `${clarificationQueue.length} pending`;
-  body.innerHTML = clarificationQueue.map(item => {
+
+  // Group same-shaped low-confidence items (same suggested debit/credit) so a batch of similar
+  // lines — e.g. a dozen near-identical payroll payments — can be cleared in one click instead
+  // of one at a time.
+  const groups = {};
+  for (const item of clarificationQueue) {
+    if (item.source === 'invoice_payment') continue;
+    const key = `${item.suggestedDebit} ${item.suggestedCredit}`;
+    (groups[key] = groups[key] || []).push(item);
+  }
+  const bulkGroups = Object.entries(groups).filter(([, items]) => items.length >= 2);
+  const bulkBar = bulkGroups.length ? `<div class="toolbar" style="margin-bottom:10px; flex-wrap:wrap;">${
+    bulkGroups.map(([key, items]) => {
+      const [debit, credit] = key.split(' ');
+      return `<button class="btn-secondary" onclick="bulkApproveClarification('${escapeHtml(debit).replace(/'/g, "\\'")}', '${escapeHtml(credit).replace(/'/g, "\\'")}')">Approve all ${items.length} as ${escapeHtml(debit)} / ${escapeHtml(credit)}</button>`;
+    }).join('')
+  }</div>` : '';
+
+  body.innerHTML = bulkBar + clarificationQueue.map(item => {
     if (item.source === 'invoice_payment') {
       // A probable customer payment — one confirm marks the invoice paid via the existing /pay
       // endpoint (posting Cash / Trade Receivables), instead of asking for debit/credit inputs.
@@ -5092,12 +5110,34 @@ async function confirmInvoicePayment(itemId, invoiceId, date) {
 async function resolveClarification(itemId) {
   const debit = document.getElementById(`cq-debit-${itemId}`).value.trim();
   const credit = document.getElementById(`cq-credit-${itemId}`).value.trim();
+  const item = clarificationQueue.find(q => q.id === itemId);
   try {
     await api(`/api/companies/${currentCompany.id}/clarification-queue/${itemId}/resolve`, {
       method: 'POST', body: JSON.stringify({ debit, credit })
     });
   } catch (e) { showToast(e.message, 'error'); return; }
   showToast('Posted to the ledger.', 'success');
+  await refreshAll();
+  await loadClarificationQueue();
+  // Same learning loop as the manual New Transaction form — a human resolving a queued line by
+  // hand is just as good a signal that "this description always means this account" as manually
+  // posting it, so it shouldn't matter which screen the correction happened on.
+  if (item && item.rawLine && item.rawLine.desc) maybeSuggestCategorizationRule(item.rawLine.desc, debit, credit);
+}
+
+async function bulkApproveClarification(debit, credit) {
+  const matching = clarificationQueue.filter(item =>
+    item.source !== 'invoice_payment' && item.suggestedDebit === debit && item.suggestedCredit === credit
+  );
+  if (!matching.length) return;
+  if (!(await confirmAction(`Post all ${matching.length} of these as ${debit} / ${credit}?`))) return;
+  const results = await Promise.allSettled(matching.map(item =>
+    api(`/api/companies/${currentCompany.id}/clarification-queue/${item.id}/resolve`, {
+      method: 'POST', body: JSON.stringify({ debit, credit }),
+    })
+  ));
+  const failed = results.filter(r => r.status === 'rejected').length;
+  showToast(failed ? `Posted ${matching.length - failed}, ${failed} failed.` : `Posted ${matching.length} transactions.`, failed ? 'error' : 'success');
   await refreshAll();
   await loadClarificationQueue();
 }
