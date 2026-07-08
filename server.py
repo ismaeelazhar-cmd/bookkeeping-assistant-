@@ -278,25 +278,93 @@ class _TursoCursor:
         return rows
 
 
+class TursoQueryError(Exception):
+    """Raised for any failed Turso query — e.g. a SELECT against a table that doesn't exist yet,
+    the same condition init_db()'s migration-detection logic already needs to catch. The installed
+    libsql_client (0.3.1) doesn't reliably raise its own LibsqlError for this — a query against a
+    genuinely missing table was observed raising a bare `KeyError: 'result'` during live testing
+    against a real Turso database (an internal library quirk handling the server's error
+    response), which would otherwise leak as a confusing, undocumented exception type. Normalizing
+    it here means callers (init_db, existing except blocks) can catch ONE thing regardless of
+    which underlying library detail actually misbehaves."""
+
+
 class _TursoConnection:
     """Wraps libsql_client's synchronous Client so get_db()'s single call site can hand back
     something the other ~8000 lines of raw `db.execute(sql, params)` / `.fetchone()` /
     `.fetchall()` / `cur.lastrowid` / `db.commit()` calls already know how to use, without
-    rewriting every query in this file for a different driver's API. NOT independently verified
-    against a live Turso database as of this change — this needs a real smoke test (login, post a
-    transaction, run every report page) against an actual Turso project before it's trusted with
-    production data, per the migration plan's own verification section."""
+    rewriting every query in this file for a different driver's API. Verified against a real Turso
+    database (create/insert/select/lastrowid/row-by-name/PRAGMA table_info/executescript all
+    confirmed working) using the https:// scheme — see the scheme note below for why."""
     def __init__(self, url, auth_token):
         import libsql_client
+        # Turso's dashboard/CLI always hand out the libsql:// form, but that scheme makes
+        # libsql_client default to a WebSocket (Hrana) connection, which failed the handshake
+        # (WSServerHandshakeError 400) against this exact database during live testing — likely a
+        # proxy/network compatibility issue with WSS. https:// forces the plain HTTP transport,
+        # which connected and round-tripped cleanly. Normalizing here means the TURSO_DATABASE_URL
+        # env var can just be pasted verbatim from Turso's own output, scheme and all.
+        if url.startswith("libsql://"):
+            url = "https://" + url[len("libsql://"):]
         self._client = libsql_client.create_client_sync(url=url, auth_token=auth_token)
 
     def execute(self, sql, params=()):
-        result = self._client.execute(sql, list(params) if params else [])
+        try:
+            result = self._client.execute(sql, list(params) if params else [])
+        except Exception as e:
+            raise TursoQueryError(str(e)) from e
         return _TursoCursor(result)
 
     def executemany(self, sql, seq_of_params):
         for params in seq_of_params:
             self.execute(sql, params)
+
+    def executescript(self, script):
+        """sqlite3.Connection.executescript runs a whole multi-statement SQL string in one call;
+        libsql_client's Client only executes one statement per call, so this splits the script
+        into individual statements first. A naive split on every ";" breaks on this schema's own
+        SQL comments (several contain a literal semicolon in the explanatory text, e.g. "...is set
+        once it's sent (posted to the ledger); payment_transaction_id once it's paid.") — this
+        tracks whether we're inside a '-quoted string or a -- comment and only splits on a
+        semicolon that's plain top-level SQL."""
+        statements = []
+        current = []
+        in_string = False
+        in_comment = False
+        i = 0
+        while i < len(script):
+            ch = script[i]
+            if in_comment:
+                current.append(ch)
+                if ch == "\n":
+                    in_comment = False
+                i += 1
+                continue
+            if in_string:
+                current.append(ch)
+                if ch == "'":
+                    in_string = False
+                i += 1
+                continue
+            if ch == "'":
+                in_string = True
+                current.append(ch)
+            elif ch == "-" and script[i:i + 2] == "--":
+                in_comment = True
+                current.append(ch)
+            elif ch == ";":
+                stmt = "".join(current).strip()
+                if stmt:
+                    statements.append(stmt)
+                current = []
+            else:
+                current.append(ch)
+            i += 1
+        tail = "".join(current).strip()
+        if tail:
+            statements.append(tail)
+        for stmt in statements:
+            self.execute(stmt)
 
     def commit(self):
         pass  # libsql_client autocommits each statement over HTTP — no separate commit step
@@ -346,14 +414,17 @@ SCHEMA_VERSION = 9  # bumped for: contacts.payment_terms_days/notes + exposing a
 
 
 def init_db():
-    db = sqlite3.connect(DB_PATH)
-    db.execute("PRAGMA foreign_keys = ON")
+    if _using_turso():
+        db = _TursoConnection(os.environ["TURSO_DATABASE_URL"], os.environ["TURSO_AUTH_TOKEN"])
+    else:
+        db = sqlite3.connect(DB_PATH)
+        db.execute("PRAGMA foreign_keys = ON")
 
     existing_version = 0
     try:
         row = db.execute("SELECT version FROM schema_meta").fetchone()
         existing_version = row[0] if row else 0
-    except sqlite3.OperationalError:
+    except (sqlite3.OperationalError, TursoQueryError):
         existing_version = 0
 
     if existing_version < SCHEMA_VERSION:
