@@ -1,4 +1,5 @@
 import os
+import io
 import sqlite3
 import secrets
 import json
@@ -23,7 +24,7 @@ import mimetypes
 import smtplib
 from email.message import EmailMessage
 
-from flask import Flask, request, jsonify, session, send_from_directory, g, has_request_context
+from flask import Flask, request, jsonify, session, send_from_directory, g, has_request_context, Response
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from cryptography.fernet import Fernet, InvalidToken
@@ -63,6 +64,71 @@ BACKUPS_DIR.mkdir(exist_ok=True)
 BACKUP_RETENTION_DAYS = 30
 SIGNUP_LOCK_FILE = DATA_DIR / ".signup_locked"
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # 10MB
+
+
+# ---------- file storage abstraction (local disk on Fly.io/dev, Vercel Blob when deployed there) ----------
+#
+# Every attachment/logo read+write in this file used to touch UPLOADS_DIR directly. On Vercel,
+# the filesystem outside /tmp is read-only and /tmp itself doesn't persist between invocations or
+# survive a redeploy — a receipt uploaded five minutes ago can simply be gone. These three
+# functions are the ONLY place that decision lives: local disk when BLOB_READ_WRITE_TOKEN isn't
+# set (Fly.io, local dev — byte-for-byte the same behavior as before this existed), Vercel Blob
+# when it is. vercel_blob is imported lazily so a machine that never runs under Vercel doesn't
+# need the package installed at all.
+def _using_blob_storage():
+    return bool(os.environ.get("BLOB_READ_WRITE_TOKEN"))
+
+
+def storage_write(relative_path, data: bytes):
+    if _using_blob_storage():
+        import vercel_blob
+        vercel_blob.put(relative_path, data, {"addRandomSuffix": "false"})
+        return
+    full_path = UPLOADS_DIR / relative_path
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    full_path.write_bytes(data)
+
+
+def storage_read(relative_path):
+    """Returns bytes, or None if the file doesn't exist — callers decide whether that's a 404."""
+    if _using_blob_storage():
+        import vercel_blob
+        try:
+            return vercel_blob.download_file(relative_path)
+        except Exception:
+            return None
+    full_path = UPLOADS_DIR / relative_path
+    if not full_path.exists():
+        return None
+    return full_path.read_bytes()
+
+
+def storage_delete(relative_path):
+    if _using_blob_storage():
+        import vercel_blob
+        try:
+            vercel_blob.delete(relative_path)
+        except Exception:
+            pass
+        return
+    full_path = UPLOADS_DIR / relative_path
+    if full_path.exists():
+        full_path.unlink()
+
+
+def storage_send(relative_path, download_name=None, mimetype=None, as_attachment=False):
+    """The read-and-respond-with-a-file counterpart to storage_write, for GET download routes —
+    replaces send_from_directory(UPLOADS_DIR / ...) call sites so they work under Blob storage
+    too instead of assuming a local path always exists."""
+    data = storage_read(relative_path)
+    if data is None:
+        from werkzeug.exceptions import NotFound
+        raise NotFound()
+    resp = Response(data, mimetype=mimetype or mimetypes.guess_type(relative_path)[0] or "application/octet-stream")
+    if download_name:
+        disposition = "attachment" if as_attachment else "inline"
+        resp.headers["Content-Disposition"] = f'{disposition}; filename="{download_name}"'
+    return resp
 
 def load_or_create_secret_key():
     """Stage 7: persist the session secret to disk so a server restart doesn't log
@@ -2022,12 +2088,10 @@ def upload_brand_logo(company_id):
     mime_type = file.mimetype or mimetypes.guess_type(file.filename)[0] or ""
     if mime_type not in ("image/png", "image/jpeg"):
         return jsonify({"error": "Logo must be a PNG or JPEG."}), 400
-    company_dir = UPLOADS_DIR / str(company_id)
-    company_dir.mkdir(exist_ok=True)
     ext = "png" if mime_type == "image/png" else "jpg"
     stored_name = f"logo.{ext}"
-    file.save(str(company_dir / stored_name))
     rel_path = f"{company_id}/{stored_name}"
+    storage_write(rel_path, file.read())
     db = get_db()
     db.execute("UPDATE companies SET brand_logo_path = ? WHERE id = ?", (rel_path, company_id))
     db.commit()
@@ -2040,8 +2104,7 @@ def upload_brand_logo(company_id):
 def get_brand_logo(company_id):
     if not g.company["brand_logo_path"]:
         return jsonify({"error": "No logo set."}), 404
-    directory, filename = g.company["brand_logo_path"].rsplit("/", 1)
-    return send_from_directory(str(UPLOADS_DIR / directory), filename)
+    return storage_send(g.company["brand_logo_path"])
 
 
 @app.route("/api/companies/<int:company_id>/health-summary", methods=["GET"])
@@ -3941,11 +4004,9 @@ def upload_attachment(company_id, tx_id):
     if mime_type not in ALLOWED_ATTACHMENT_TYPES:
         return jsonify({"error": f"Unsupported file type: {mime_type}. Allowed: PDF, PNG, JPEG, HEIC, WEBP."}), 400
 
-    company_dir = UPLOADS_DIR / str(company_id)
-    company_dir.mkdir(exist_ok=True)
     safe_name = secure_filename(file.filename) or "upload"
     stored_name = f"{uuid.uuid4().hex}_{safe_name}"
-    file.save(str(company_dir / stored_name))
+    storage_write(f"{company_id}/{stored_name}", file.read())
 
     cur = db.execute(
         "INSERT INTO attachments (company_id, transaction_id, filename, mime_type, stored_path, uploaded_by) "
@@ -3967,11 +4028,7 @@ def download_attachment(company_id, attachment_id):
     ).fetchone()
     if row is None:
         return jsonify({"error": "Not found."}), 404
-    directory, filename = row["stored_path"].rsplit("/", 1)
-    return send_from_directory(
-        str(UPLOADS_DIR / directory), filename, mimetype=row["mime_type"],
-        as_attachment=True, download_name=row["filename"],
-    )
+    return storage_send(row["stored_path"], download_name=row["filename"], mimetype=row["mime_type"], as_attachment=True)
 
 
 def extract_receipt_fields(company, mime_type, file_bytes):
@@ -4034,11 +4091,9 @@ def extract_attachment(company_id, attachment_id):
     if row is None:
         return jsonify({"error": "Attachment not found."}), 404
 
-    file_path = UPLOADS_DIR / row["stored_path"]
-    if not file_path.exists():
+    file_bytes = storage_read(row["stored_path"])
+    if file_bytes is None:
         return jsonify({"error": "Stored file is missing."}), 404
-    with open(file_path, "rb") as f:
-        file_bytes = f.read()
 
     try:
         extracted = extract_receipt_fields(g.company, row["mime_type"], file_bytes)
@@ -4075,11 +4130,9 @@ def finalize_scanned_receipt(db, company_id, file, mime_type, file_bytes, extrac
         except LedgerError as e:
             extracted["error"] = e.message  # surfaced as a warning, not a hard failure — fields are still usable for manual entry
         else:
-            company_dir = UPLOADS_DIR / str(company_id)
-            company_dir.mkdir(exist_ok=True)
             safe_name = secure_filename(file.filename) or "upload"
             stored_name = f"{uuid.uuid4().hex}_{safe_name}"
-            (company_dir / stored_name).write_bytes(file_bytes)
+            storage_write(f"{company_id}/{stored_name}", file_bytes)
             db.execute(
                 "INSERT INTO attachments (company_id, transaction_id, filename, mime_type, stored_path, uploaded_by) "
                 "VALUES (?,?,?,?,?,?)",
@@ -4168,9 +4221,7 @@ def delete_attachment(company_id, attachment_id):
     ).fetchone()
     if row is None:
         return jsonify({"ok": True})
-    file_path = UPLOADS_DIR / row["stored_path"]
-    if file_path.exists():
-        file_path.unlink()
+    storage_delete(row["stored_path"])
     db.execute("DELETE FROM attachments WHERE id = ?", (attachment_id,))
     db.commit()
     return jsonify({"ok": True})
@@ -4454,8 +4505,9 @@ def _invoice_pdf_terms_and_bank(pdf, company_row):
 def _generate_invoice_pdf_classic(pdf, company_row, doc_row, contact_row, line_items, accent_rgb, display_name, label):
     """Original layout: logo top-left, document label top-right, accent-coloured table header."""
     logo_path = company_row["brand_logo_path"]
-    if logo_path and (UPLOADS_DIR / logo_path).exists():
-        pdf.image(str(UPLOADS_DIR / logo_path), x=10, y=10, w=35)
+    logo_bytes = storage_read(logo_path) if logo_path else None
+    if logo_bytes:
+        pdf.image(io.BytesIO(logo_bytes), x=10, y=10, w=35)
         pdf.set_xy(10, 45)
 
     pdf.set_font("Helvetica", "B", 18)
@@ -4493,8 +4545,9 @@ def _generate_invoice_pdf_modern(pdf, company_row, doc_row, contact_row, line_it
     pdf.set_fill_color(*accent_rgb)
     pdf.rect(0, 0, 210, 38, "F")
     logo_path = company_row["brand_logo_path"]
-    if logo_path and (UPLOADS_DIR / logo_path).exists():
-        pdf.image(str(UPLOADS_DIR / logo_path), x=10, y=8, w=22)
+    logo_bytes = storage_read(logo_path) if logo_path else None
+    if logo_bytes:
+        pdf.image(io.BytesIO(logo_bytes), x=10, y=8, w=22)
         text_x = 38
     else:
         text_x = 10
@@ -4537,8 +4590,9 @@ def _generate_invoice_pdf_minimal(pdf, company_row, doc_row, contact_row, line_i
     on the page, logo small and top-left, everything else black text on white. For a business
     that wants the document to read as plain and understated rather than branded."""
     logo_path = company_row["brand_logo_path"]
-    if logo_path and (UPLOADS_DIR / logo_path).exists():
-        pdf.image(str(UPLOADS_DIR / logo_path), x=10, y=10, w=20)
+    logo_bytes = storage_read(logo_path) if logo_path else None
+    if logo_bytes:
+        pdf.image(io.BytesIO(logo_bytes), x=10, y=10, w=20)
         pdf.set_xy(35, 12)
     else:
         pdf.set_xy(10, 12)
@@ -8319,8 +8373,7 @@ def customer_portal_logo(token):
     doc, contact, company = _portal_doc(db, token)
     if doc is None or not company["brand_logo_path"]:
         return "", 404
-    directory, filename = company["brand_logo_path"].rsplit("/", 1)
-    return send_from_directory(str(UPLOADS_DIR / directory), filename)
+    return storage_send(company["brand_logo_path"])
 
 
 @app.route("/portal/<token>/checkout", methods=["POST"])
@@ -8445,7 +8498,35 @@ def _scheduler_loop():
 def start_background_scheduler():
     if os.environ.get("DISABLE_BACKGROUND_SCHEDULER") == "1":
         return  # escape hatch for tests / anywhere multiple short-lived processes would each spawn a thread
+    if os.environ.get("VERCEL"):
+        return  # Vercel sets this automatically on every deployment; a serverless function can't
+        # keep a background thread alive between requests anyway — /api/cron/tick (below), fired
+        # by Vercel Cron, does this hourly work there instead. Fly.io (and local dev) keep using
+        # this in-process thread exactly as before — nothing changes for that host.
     threading.Thread(target=_scheduler_loop, daemon=True, name="notifications-scheduler").start()
+
+
+@app.route("/api/cron/tick", methods=["POST", "GET"])
+def cron_tick():
+    """The Vercel-hosted equivalent of the in-process scheduler thread above — same
+    _scheduler_tick logic, fired by a Vercel Cron Job (vercel.json) instead of an hourly
+    time.sleep loop, since a serverless function can't keep a thread alive between invocations.
+    Vercel Cron sends `Authorization: Bearer <CRON_SECRET>` automatically when a CRON_SECRET
+    project env var is set — this route requires that header match so the endpoint can't be
+    triggered by anyone who finds the URL. Accepts GET too since Vercel Cron's own dashboard
+    "run now" button uses GET; production cron config should still use POST."""
+    expected = os.environ.get("CRON_SECRET")
+    if not expected:
+        return jsonify({"error": "CRON_SECRET is not configured on this deployment."}), 500
+    got = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+    if not secrets.compare_digest(got, expected):
+        return jsonify({"error": "Unauthorized."}), 401
+    try:
+        _scheduler_tick()
+    except Exception:
+        logging.exception("Cron tick failed")
+        return jsonify({"ok": False, "error": "Tick failed — see server logs."}), 500
+    return jsonify({"ok": True})
 
 
 init_db()  # runs on import too, not just `python3 server.py` directly — gunicorn imports this module without executing __main__
