@@ -3419,23 +3419,21 @@ def score_candidate_confidence(db, company_id, candidate, seen_amount_dates):
     return max(0.0, min(1.0, score)), reasons
 
 
-@app.route("/api/companies/<int:company_id>/ai-categorize", methods=["POST"])
-@login_required
-@company_required
-@write_required
-@rate_limit(max_attempts=20, window_seconds=3600)
-def ai_categorize(company_id):
-    data = request.get_json(force=True) or {}
-    text = (data.get("text") or "").strip()
-    if not text:
-        return jsonify({"error": "Nothing to analyze."}), 400
+def company_has_ai_provider(company):
+    """Same "is any AI feature usable" check already used to compute ai_api_key_set for the
+    frontend (list_companies, ~line 1797) — pulled out here so server-side automation (Plaid
+    fallback categorization) can gate on it too without needing a serialized company dict."""
+    if company["ai_provider"] == "ollama":
+        return bool(company["ollama_url"] and company["ollama_model"])
+    return bool(company["ai_api_key"])
 
-    db = get_db()
-    known_accounts = [r["name"] for r in db.execute(
-        "SELECT name FROM accounts WHERE company_id = ? ORDER BY name", (company_id,)
-    ).fetchall()]
+
+def _call_ai_categorization(company, known_accounts, text):
+    """The actual Anthropic/Ollama call + prompt + parse, shared by the manual "Analyze with AI"
+    route and the automatic Plaid/bulk-import fallback — one prompt, one place it could drift.
+    Raises the same exceptions ai_categorize used to catch; returns a list of raw candidate dicts
+    (not yet scored/queued)."""
     today = datetime.date.today().isoformat()
-
     prompt = f"""You are a bookkeeping assistant doing double-entry classification for a small UK business.
 Known chart of accounts already in use (reuse these names exactly when they fit, only invent a new account name when nothing fits): {', '.join(known_accounts) or '(none yet — use sensible standard account names)'}
 
@@ -3455,28 +3453,75 @@ Return ONLY a JSON array, no prose, no markdown fences:
 
 Lines:
 {text}"""
+    raw_text = call_ai(company, [{"role": "user", "content": prompt}], max_tokens=4096)
+    match = re.search(r"\[[\s\S]*\]", raw_text)
+    if not match:
+        raise ValueError("The AI did not return a parseable list.")
+    try:
+        items = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        raise ValueError("Claude's response wasn't valid JSON.")
+    return [
+        it for it in items
+        if it.get("date") and it.get("desc") and it.get("amount") and it.get("debit") and it.get("credit")
+    ]
+
+
+def try_ai_categorize_line(db, company, cash_account, date, desc, amount):
+    """Automatic fallback for a single bank line that matched no preset/rule/keyword — used by
+    both live Plaid sync and bulk statement import (queue_plaid_line_if_unsure) so a company with
+    an AI provider configured doesn't have to fall all the way to a bare "Uncategorized" guess.
+    Deliberately NEVER posts to the ledger on its own, even at high confidence — a rule match is
+    something the user explicitly configured and is safe to trust unattended; an AI guess can
+    still hallucinate an account or misjudge a description, so it always lands in the
+    clarification queue, just with a real, well-reasoned suggestion pre-filled instead of a plain
+    guess — a one-click confirm instead of starting from nothing. Returns
+    (debit, credit, confidence, reason) or None if no provider is configured or the call fails for
+    any reason (network, parsing, rate limit) — callers fall through to the existing guess-based
+    queueing untouched."""
+    if not company_has_ai_provider(company):
+        return None
+    try:
+        known_accounts = [r["name"] for r in db.execute(
+            "SELECT name FROM accounts WHERE company_id = ? ORDER BY name", (company["id"],)
+        ).fetchall()]
+        text = f"{date} {desc} {abs(amount):.2f}"
+        candidates = _call_ai_categorization(company, known_accounts, text)
+        if not candidates:
+            return None
+        candidate = candidates[0]
+        confidence, reasons = score_candidate_confidence(db, company["id"], candidate, set())
+        return candidate["debit"], candidate["credit"], confidence, "; ".join(reasons) or "AI-suggested categorisation"
+    except Exception:
+        # Any failure here (rate limit, network, bad JSON) is a soft miss, not a hard error — the
+        # line still needs to end up SOMEWHERE (the plain guess), not lost or a 500 to the caller.
+        return None
+
+
+@app.route("/api/companies/<int:company_id>/ai-categorize", methods=["POST"])
+@login_required
+@company_required
+@write_required
+@rate_limit(max_attempts=20, window_seconds=3600)
+def ai_categorize(company_id):
+    data = request.get_json(force=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "Nothing to analyze."}), 400
+
+    db = get_db()
+    known_accounts = [r["name"] for r in db.execute(
+        "SELECT name FROM accounts WHERE company_id = ? ORDER BY name", (company_id,)
+    ).fetchall()]
 
     try:
-        raw_text = call_ai(g.company, [{"role": "user", "content": prompt}], max_tokens=4096)
+        candidates = _call_ai_categorization(g.company, known_accounts, text)
     except (ValueError, OllamaError) as e:
         return jsonify({"error": str(e)}), 400
     except urllib.error.HTTPError as e:
         return jsonify({"error": f"Anthropic API error {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"}), 502
     except urllib.error.URLError as e:
         return jsonify({"error": f"Could not reach Anthropic API: {e.reason}"}), 502
-
-    match = re.search(r"\[[\s\S]*\]", raw_text)
-    if not match:
-        return jsonify({"error": "The AI did not return a parseable list."}), 502
-    try:
-        items = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return jsonify({"error": "Claude's response wasn't valid JSON."}), 502
-
-    candidates = [
-        it for it in items
-        if it.get("date") and it.get("desc") and it.get("amount") and it.get("debit") and it.get("credit")
-    ]
 
     threshold = g.company["confidence_threshold"]
     ready, queued, seen_amount_dates = [], [], set()
@@ -6722,6 +6767,25 @@ def queue_plaid_line_if_unsure(db, company_id, cash_account, date, desc, amount,
             if line_id is not None:
                 db.execute("UPDATE bank_lines SET matched_transaction_id = ? WHERE id = ?", (tx_id, line_id))
             return
+
+    # No preset, no rule — before falling all the way to a bare "Uncategorized" guess, try AI if
+    # the company has a provider configured. Even a confident AI guess still lands in the queue
+    # rather than posting (see try_ai_categorize_line's docstring for why), just with a real
+    # suggestion pre-filled instead of nothing — a one-click confirm either way.
+    company_row = db.execute("SELECT * FROM companies WHERE id = ?", (company_id,)).fetchone()
+    ai_result = try_ai_categorize_line(db, company_row, cash_account, date, desc, amount)
+    if ai_result is not None:
+        ai_debit, ai_credit, ai_confidence, ai_reason = ai_result
+        db.execute(
+            "INSERT INTO clarification_queue (company_id, source, raw_line_json, suggested_debit, "
+            "suggested_credit, suggested_amount_pence, confidence, reason) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                company_id, "ai", json.dumps({"date": date, "desc": desc, "amount": abs(amount)}),
+                ai_debit, ai_credit, to_pence(abs(amount)), ai_confidence,
+                f"AI-suggested categorisation — {ai_reason}",
+            ),
+        )
+        return
 
     guessed_debit, guessed_credit = (cash_account, "Uncategorized") if amount > 0 else ("Uncategorized", cash_account)
     db.execute(
