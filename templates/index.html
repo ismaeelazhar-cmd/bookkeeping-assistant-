@@ -3714,6 +3714,26 @@ async function deleteTransaction(id) {
   await refreshAll();
 }
 
+async function correctTransaction(id) {
+  const t = transactions.find(x => x.id === id);
+  if (!t) return;
+  const newDebit = prompt(`Correcting entry #${id} (${t.desc}).\n\nCurrent debit: ${t.debit}\nEnter the CORRECT debit account:`, t.debit);
+  if (newDebit === null) return;
+  const newCredit = prompt(`Current credit: ${t.credit}\nEnter the CORRECT credit account:`, t.credit);
+  if (newCredit === null) return;
+  const newAmountInput = prompt(`Current amount: ${t.amount}\nEnter the CORRECT amount:`, t.amount);
+  if (newAmountInput === null) return;
+  const newAmount = parseFloat(newAmountInput);
+  if (!newAmount || newAmount <= 0) { alert('Amount must be a positive number.'); return; }
+  try {
+    await api(`/api/companies/${currentCompany.id}/transactions/${id}/correct`, {
+      method: 'POST', body: JSON.stringify({ debit: newDebit, credit: newCredit, amount: newAmount }),
+    });
+  } catch (e) { alert(e.message); return; }
+  showToast('Original entry voided, correcting entry posted — both remain visible in history.', 'success');
+  await refreshAll();
+}
+
 async function reviewTransaction(id) {
   await api(`/api/companies/${currentCompany.id}/transactions/${id}/review`, { method: 'POST' });
   await refreshAll();
@@ -3951,6 +3971,7 @@ function renderJournal() {
         <button class="btn-secondary" onclick="openAttachmentsModal(${t.id}, '${t.desc.replace(/'/g, "\\'")}')">📎${t.attachmentCount ? ' ' + t.attachmentCount : ''}</button>
         <button class="btn-secondary" onclick="openCommentsModal(${t.id}, '${t.desc.replace(/'/g, "\\'")}')">💬${t.commentCount ? ' ' + t.commentCount : ''}</button>
         ${findTransactionSources(t.id).length ? `<button class="btn-secondary" onclick="showSourceModal(${t.id})" title="Where this came from">🔗 Source</button>` : ''}
+        ${!t.journalId ? `<button class="btn-secondary" onclick="correctTransaction(${t.id})" title="Posts a correcting entry and voids this one, keeping both in the history — for a genuinely wrong debit/credit, not just tidying up.">Correct</button>` : ''}
         <button class="btn-danger" onclick="deleteTransaction(${t.id})">Delete</button>
       </td>
     </tr>`).join('') : '<tr><td colspan="8" class="empty">No transactions match these filters.</td></tr>';

@@ -3107,6 +3107,61 @@ def void_transaction(company_id, tx_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/companies/<int:company_id>/transactions/<int:tx_id>/correct", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def correct_transaction(company_id, tx_id):
+    """The standard way to fix a wrongly-posted entry is NOT to edit it in place — that destroys
+    the audit trail a set of accounts needs to stand up to scrutiny. This voids the original
+    (same soft-delete voiding already used by DELETE /transactions/<id>, so it's excluded from
+    every report the same way) and posts a fresh, correct entry referencing what it replaced, so
+    the ledger history shows both what was wrong and what fixed it. If the caller doesn't yet
+    know the right debit/credit (e.g. mid-review, needs a second opinion first), they can pass
+    the Suspense Account as the corrected debit/credit to park it there temporarily rather than
+    leaving the wrong entry live."""
+    data = request.get_json(force=True) or {}
+    new_debit, new_credit = data.get("debit"), data.get("credit")
+    new_amount = data.get("amount")
+    new_date = data.get("date")
+    new_desc = data.get("desc")
+
+    db = get_db()
+    original = db.execute(
+        "SELECT id, date, desc, amount_pence as amountPence, debit, credit, journal_id as journalId "
+        "FROM transactions WHERE id = ? AND company_id = ? AND voided_at IS NULL",
+        (tx_id, company_id),
+    ).fetchone()
+    if original is None:
+        return jsonify({"error": "Not found, or already voided/corrected."}), 404
+    if original["journalId"]:
+        return jsonify({"error": "This entry is one leg of a multi-part journal (VAT, CIS, disposal, etc.) — void the whole journal and re-post it manually instead of correcting a single leg."}), 400
+    if is_locked(g.company, original["date"]):
+        return jsonify({"error": f"This period is locked until {g.company['locked_until']} — unlock it in settings first."}), 423
+
+    final_debit = new_debit or original["debit"]
+    final_credit = new_credit or original["credit"]
+    final_amount = float(new_amount) if new_amount else from_pence(original["amountPence"])
+    final_date = new_date or original["date"]
+    final_desc = new_desc or original["desc"]
+
+    try:
+        new_tx_id = post_ledger_transaction(
+            db, company_id, final_date, f"Correction of #{tx_id}: {final_desc}", final_amount, final_debit, final_credit,
+        )
+    except LedgerError as e:
+        return jsonify({"error": e.message}), e.status
+
+    now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    db.execute(
+        "UPDATE transactions SET voided_at = ?, voided_by = ? WHERE id = ? AND company_id = ?",
+        (now, session.get("email", "unknown"), tx_id, company_id),
+    )
+    log_audit(db, company_id, "correct", "transaction", tx_id, before=_serialize_transaction(original))
+    db.commit()
+    return jsonify({"ok": True, "voidedTransactionId": tx_id, "newTransactionId": new_tx_id})
+
+
 @app.route("/api/companies/<int:company_id>/transactions/<int:tx_id>/review", methods=["POST"])
 @login_required
 @company_required
