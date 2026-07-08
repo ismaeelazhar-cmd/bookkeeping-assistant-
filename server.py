@@ -229,12 +229,91 @@ def _make_session_permanent():
     session.permanent = True
 
 
+def _using_turso():
+    return os.environ.get("DATABASE_MODE") == "turso"
+
+
+class _TursoRow:
+    """Stands in for sqlite3.Row: supports row["col"], row[0], and dict(row) — the three access
+    patterns used throughout this file. libsql_client's own Row type is close to this already,
+    but wrapping it here means every dict(r)/r["x"] call site keeps working unmodified regardless
+    of exactly what shape libsql_client hands back across versions."""
+    def __init__(self, columns, values):
+        self._columns = columns
+        self._values = values
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            return self._values[self._columns.index(key)]
+        return self._values[key]
+
+    def keys(self):
+        return self._columns
+
+    def __iter__(self):
+        return iter(self._values)
+
+
+class _TursoCursor:
+    """Mimics sqlite3's execute-then-fetch pattern (db.execute(sql, params).fetchone()/.fetchall(),
+    cur.lastrowid) on top of libsql_client's Client.execute, which returns a fully-materialized
+    ResultSet in one call rather than a lazy cursor — fine here since nothing in this codebase
+    streams a huge result set row by row anyway."""
+    def __init__(self, result_set):
+        self._result_set = result_set
+        self._rows = [_TursoRow(result_set.columns, list(r)) for r in result_set.rows]
+        self._pos = 0
+        self.lastrowid = getattr(result_set, "last_insert_rowid", None)
+        self.rowcount = getattr(result_set, "rows_affected", -1)
+
+    def fetchone(self):
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    def fetchall(self):
+        rows, self._rows[self._pos:] = self._rows[self._pos:], []
+        return rows
+
+
+class _TursoConnection:
+    """Wraps libsql_client's synchronous Client so get_db()'s single call site can hand back
+    something the other ~8000 lines of raw `db.execute(sql, params)` / `.fetchone()` /
+    `.fetchall()` / `cur.lastrowid` / `db.commit()` calls already know how to use, without
+    rewriting every query in this file for a different driver's API. NOT independently verified
+    against a live Turso database as of this change — this needs a real smoke test (login, post a
+    transaction, run every report page) against an actual Turso project before it's trusted with
+    production data, per the migration plan's own verification section."""
+    def __init__(self, url, auth_token):
+        import libsql_client
+        self._client = libsql_client.create_client_sync(url=url, auth_token=auth_token)
+
+    def execute(self, sql, params=()):
+        result = self._client.execute(sql, list(params) if params else [])
+        return _TursoCursor(result)
+
+    def executemany(self, sql, seq_of_params):
+        for params in seq_of_params:
+            self.execute(sql, params)
+
+    def commit(self):
+        pass  # libsql_client autocommits each statement over HTTP — no separate commit step
+
+    def close(self):
+        self._client.close()
+
+
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
-        g.db.execute("PRAGMA journal_mode = WAL")
+        if _using_turso():
+            g.db = _TursoConnection(os.environ["TURSO_DATABASE_URL"], os.environ["TURSO_AUTH_TOKEN"])
+        else:
+            g.db = sqlite3.connect(DB_PATH)
+            g.db.row_factory = sqlite3.Row
+            g.db.execute("PRAGMA foreign_keys = ON")
+            g.db.execute("PRAGMA journal_mode = WAL")
     return g.db
 
 

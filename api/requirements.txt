@@ -1,0 +1,16 @@
+# Vercel's Python builder (@vercel/python) looks for a requirements.txt alongside the entrypoint
+# file (api/index.py) first — this keeps the root requirements.txt (used by Fly.io and local dev)
+# free of dependencies that only matter under Vercel. Duplicates the base deps since Vercel's
+# builder doesn't process a `-r ../requirements.txt` reference reliably across all runtime
+# versions.
+flask
+werkzeug
+cryptography
+fpdf2
+
+# Vercel-only pieces from the migration plan (Phases 1 and 3) — install-only until the
+# corresponding env vars are actually set; server.py imports these lazily inside
+# storage_write/read/delete and the Turso-mode DB connection, never at module load time, so their
+# absence on Fly.io/local dev is never a problem.
+libsql-client
+vercel_blob
