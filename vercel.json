@@ -7,6 +7,6 @@
     { "src": "/(.*)", "dest": "api/index.py" }
   ],
   "crons": [
-    { "path": "/api/cron/tick", "schedule": "0 * * * *" }
+    { "path": "/api/cron/tick", "schedule": "0 6 * * *" }
   ]
 }
