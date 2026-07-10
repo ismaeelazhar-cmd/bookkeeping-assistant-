@@ -4936,8 +4936,8 @@ function renderCandidates() {
       <td><input type="date" value="${c.date}" onchange="updateCandidate('${c.id}','date',this.value)" style="width:120px;"></td>
       <td><input type="text" value="${escapeHtml(c.desc)}" onchange="updateCandidate('${c.id}','desc',this.value)"></td>
       <td class="num"><input type="number" step="0.01" value="${c.amount}" onchange="updateCandidate('${c.id}','amount',this.value)" style="width:80px; text-align:right;"></td>
-      <td><input list="account-list" value="${escapeHtml(c.debit)}" onchange="updateCandidate('${c.id}','debit',this.value)"></td>
-      <td><input list="account-list" value="${escapeHtml(c.credit)}" onchange="updateCandidate('${c.id}','credit',this.value)"></td>
+      <td><input list="account-list" value="${escapeHtml(c.debit)}" onchange="updateCandidate('${c.id}','debit',this.value)" ${c.debit === 'Uncategorized' ? `onclick="this.blur(); categorizeSimilarCandidates('${c.id}');" style="cursor:pointer; color:var(--bad);" title="Click to categorise — applies to similar lines too" readonly` : ''}></td>
+      <td><input list="account-list" value="${escapeHtml(c.credit)}" onchange="updateCandidate('${c.id}','credit',this.value)" ${c.credit === 'Uncategorized' ? `onclick="this.blur(); categorizeSimilarCandidates('${c.id}');" style="cursor:pointer; color:var(--bad);" title="Click to categorise — applies to similar lines too" readonly` : ''}></td>
       <td>
         ${c.confidenceScore != null
           ? `<span class="badge badge-${confidenceBadgeClass(c.confidenceScore)}" title="How confident the AI was in this categorisation">${(c.confidenceScore * 100).toFixed(0)}% confidence</span>`
