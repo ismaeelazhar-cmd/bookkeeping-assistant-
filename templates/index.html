@@ -4981,7 +4981,26 @@ function categorizeSimilarCandidates(id) {
 
 function setCandidateSelected(id, val) { const c = candidates.find(c => c.id == id); if (c) c.selected = val; }
 function toggleAllCandidates(val) { candidates.forEach(c => c.selected = val); renderCandidates(); }
-function updateCandidate(id, field, value) { const c = candidates.find(c => c.id == id); if (!c) return; c[field] = field === 'amount' ? parseFloat(value) : value; }
+function updateCandidate(id, field, value) {
+  const c = candidates.find(c => c.id == id);
+  if (!c) return;
+  c[field] = field === 'amount' ? parseFloat(value) : value;
+  // Editing debit/credit directly (not just the dedicated "Categorize similar" button) now
+  // auto-propagates to every other line worded the same way too — the point of a manual edit
+  // IS the category information, so there's no reason to make the user repeat it via a second
+  // click for every "BILL PAYMENT VIA FASTER £..." line in a batch of dozens.
+  if ((field === 'debit' || field === 'credit') && c.debit && c.credit && c.debit !== 'Uncategorized' && c.credit !== 'Uncategorized') {
+    const key = descSimilarityKey(c.desc);
+    if (key) {
+      const matches = candidates.filter(x => x.id != c.id && descSimilarityKey(x.desc) === key);
+      if (matches.length) {
+        matches.forEach(x => { x.debit = c.debit; x.credit = c.credit; });
+        renderCandidates();
+        showToast(`Applied ${c.debit} / ${c.credit} to ${matches.length} similarly-worded line(s) too.`, 'success');
+      }
+    }
+  }
+}
 function removeCandidate(id) { candidates = candidates.filter(c => c.id != id); renderCandidates(); }
 
 async function postSelectedCandidates() {
