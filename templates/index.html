@@ -4949,17 +4949,20 @@ function renderCandidates() {
     </tr>`).join('');
 }
 
-// Groups statement lines by their "shape" once amounts/currency symbols/punctuation are
-// stripped out — "BILL PAYMENT VIA FASTER £522.86" and "BILL PAYMENT VIA FASTER £125.00" reduce
-// to the same key ("bill payment via faster"), which is exactly the repeated boilerplate wording
-// UK bank statements use for a whole batch of otherwise-distinct payments. Deliberately coarse:
-// this is a time-saving suggestion the user reviews before applying, not a silent auto-categorizer.
+// Groups statement lines by description with only the trailing amount/currency stripped —
+// "BILL PAYMENT VIA FASTER £522.86" and "BILL PAYMENT VIA FASTER £125.00" reduce to the same key
+// ("bill payment via faster"), since that's the exact repeated boilerplate wording UK statements
+// use for a whole batch of otherwise-distinct payments. Deliberately does NOT strip digits
+// elsewhere in the description — a company name or reference number in the middle of the text
+// (e.g. "DIRECT DEBIT PAYMENT TO EON" vs "...TO SKY", or two different direct debits that only
+// differ by an account/reference number) must stay distinct rather than collapsing into one
+// group just because they share the same generic prefix. Only the amount at the very end — which
+// is what varies between otherwise-identical repeated lines — gets removed.
 function descSimilarityKey(desc) {
   return (desc || '')
+    .trim()
     .toLowerCase()
-    .replace(/[£$]/g, '')
-    .replace(/\d+([.,]\d+)?/g, '')
-    .replace(/[^a-z\s]/g, ' ')
+    .replace(/[£$]?\s*\d[\d,]*\.?\d*\s*$/, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
