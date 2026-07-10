@@ -4613,13 +4613,32 @@ const KEYWORD_RULES = [
   { kws: ['rent'], debit: 'Rent Expenses', credit: 'Cash' },
   { kws: ['agency wage', 'agency'], debit: 'Agency Wages', credit: 'Cash' },
   { kws: ['wage', 'salary', 'payroll'], debit: 'Wages', credit: 'Cash' },
-  { kws: ['eon', 'e.on', 'utilit', 'electric', 'gas bill', 'water bill'], debit: 'Utilities', credit: 'Cash' },
-  { kws: ['insurance'], debit: 'Insurance', credit: 'Cash' },
-  { kws: ['subscript', 'microsoft', 'google', 'openai', 'contabo', 'software', 'saas'], debit: 'Subscriptions', credit: 'Cash' },
+  // Energy/water/utility suppliers — named companies recognised even when the description never
+  // uses the generic word "utility" at all, which is the usual case for a direct debit ("DIRECT
+  // DEBIT PAYMENT TO OCTOPUS ENERGY" never says "utility" anywhere in it).
+  { kws: [
+      'eon', 'e.on', 'utilit', 'electric', 'gas bill', 'water bill', 'british gas', 'octopus energy',
+      'edf energy', 'scottish power', 'ovo energy', 'ovo energy', 'bulb energy', 'npower',
+      'shell energy', 'utilita', 'good energy', 'thames water', 'severn trent', 'anglian water',
+      'united utilities', 'yorkshire water', 'southern water', 'welsh water', 'scottish water',
+    ], debit: 'Utilities', credit: 'Cash' },
+  // Telecom/mobile/broadband providers
+  { kws: [
+      'vodafone', 'ee limited', ' ee ', 'o2 ', 'three mobile', 'giffgaff', 'bt group', 'bt.com',
+      'virgin media', 'talktalk', 'plusnet', 'sky broadband', 'sky uk', 'sky subscription',
+      'mobile bill', 'broadband',
+    ], debit: 'Phone & Internet', credit: 'Cash' },
+  { kws: ['insurance', 'aviva', 'axa insurance', 'direct line', 'admiral insurance', 'hastings direct', 'lv=', 'zurich insurance', 'churchill insurance', 'aa insurance'], debit: 'Insurance', credit: 'Cash' },
+  { kws: [
+      'subscript', 'microsoft', 'google', 'openai', 'contabo', 'software', 'saas', 'adobe',
+      'zoom.us', 'dropbox', 'slack', 'xero', 'quickbooks', 'canva',
+    ], debit: 'Subscriptions', credit: 'Cash' },
   { kws: ['laptop', 'printer', 'docking station', 'computer', 'charger', 'ink cat'], debit: 'Computer Equipment', credit: 'Cash' },
-  { kws: ['travel', 'rightpay'], debit: 'Travel Expense', credit: 'Cash' },
+  { kws: ['travel', 'rightpay', 'trainline', 'national rail'], debit: 'Travel Expense', credit: 'Cash' },
+  { kws: ['shell fuel', 'esso', 'bp fuel', 'texaco', 'petrol', 'diesel', 'fuel station', 'van fuel'], debit: 'Vehicle & Fuel', credit: 'Cash' },
   { kws: ['accountan', 'shipley tax'], debit: 'Accountancy Fees', credit: 'Cash' },
   { kws: ['consultan', 'cqc'], debit: 'Consultancy Fees', credit: 'Cash' },
+  { kws: ['council tax', 'business rates'], debit: 'Rates', credit: 'Cash' },
   { kws: ['hmrc', 'tax'], debit: 'Tax', credit: 'Cash' },
   { kws: ['information commissioner', 'admin'], debit: 'Admin Exp', credit: 'Cash' },
   { kws: ['bathroom', 'toilet', 'sanitary'], debit: 'Bathroom', credit: 'Cash' },
