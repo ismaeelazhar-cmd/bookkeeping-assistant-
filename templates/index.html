@@ -4943,9 +4943,40 @@ function renderCandidates() {
           ? `<span class="badge badge-${confidenceBadgeClass(c.confidenceScore)}" title="How confident the AI was in this categorisation">${(c.confidenceScore * 100).toFixed(0)}% confidence</span>`
           : `<span class="badge badge-${c.confidence}">${c.confidence === 'high' ? 'matched' : 'review'}</span>`}
         ${c.reason ? `<details style="display:inline-block; font-size:11px;"><summary style="cursor:pointer; display:inline; color:var(--muted);">Why?</summary><div style="max-width:220px; color:var(--muted); margin-top:2px;">${escapeHtml(c.reason)}</div></details>` : ''}
+        <button class="btn-secondary" onclick="categorizeSimilarCandidates('${c.id}')" title="Set the category for this line and apply it to every other line worded the same way">Categorize similar</button>
         <button class="btn-danger" onclick="removeCandidate('${c.id}')">✕</button>
       </td>
     </tr>`).join('');
+}
+
+// Groups statement lines by their "shape" once amounts/currency symbols/punctuation are
+// stripped out — "BILL PAYMENT VIA FASTER £522.86" and "BILL PAYMENT VIA FASTER £125.00" reduce
+// to the same key ("bill payment via faster"), which is exactly the repeated boilerplate wording
+// UK bank statements use for a whole batch of otherwise-distinct payments. Deliberately coarse:
+// this is a time-saving suggestion the user reviews before applying, not a silent auto-categorizer.
+function descSimilarityKey(desc) {
+  return (desc || '')
+    .toLowerCase()
+    .replace(/[£$]/g, '')
+    .replace(/\d+([.,]\d+)?/g, '')
+    .replace(/[^a-z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function categorizeSimilarCandidates(id) {
+  const c = candidates.find(x => x.id == id);
+  if (!c) return;
+  const debit = prompt('Debit account for this line — applied to every other line worded the same way too:', c.debit && c.debit !== 'Uncategorized' ? c.debit : '');
+  if (!debit) return;
+  const credit = prompt('Credit account:', c.credit && c.credit !== 'Uncategorized' ? c.credit : '');
+  if (!credit) return;
+  const key = descSimilarityKey(c.desc);
+  if (!key) { c.debit = debit; c.credit = credit; renderCandidates(); return; }
+  const matches = candidates.filter(x => descSimilarityKey(x.desc) === key);
+  matches.forEach(x => { x.debit = debit; x.credit = credit; });
+  renderCandidates();
+  showToast(`Applied ${debit} / ${credit} to ${matches.length} similarly-worded line(s).`, 'success');
 }
 
 function setCandidateSelected(id, val) { const c = candidates.find(c => c.id == id); if (c) c.selected = val; }
