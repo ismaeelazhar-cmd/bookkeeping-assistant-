@@ -4701,6 +4701,37 @@ const KEYWORD_RULES = [
   { kws: ['payment received', 'received payment', 'receipt'], debit: 'Cash', credit: 'Trade Recievables' },
 ];
 
+// Words that mean the payee is a company/organisation, not an individual — must NOT match
+// through to the "looks like a person's name" wages guess below. Deliberately broad (better to
+// miss a genuine wage payment and leave it Uncategorized for manual review, than to wrongly book
+// a real supplier's bill as Wages).
+const COMPANY_INDICATOR_WORDS = new Set([
+  'ltd', 'limited', 'llp', 'plc', 'inc', 'incorporated', 'corp', 'corporation', 'co', 'company',
+  'group', 'services', 'solutions', 'energy', 'insurance', 'broadband', 'uk', 'enterprises',
+  'holdings', 'partners', 'associates', 'trust', 'supplies', 'stores', 'shop', 'trading',
+  'consulting', 'consultants', 'systems', 'technologies', 'tech', 'media', 'agency', 'bank',
+  'building', 'society', 'council', 'authority', 'hmrc', 'water', 'gas', 'electric', 'mobile',
+  'telecom', 'communications', 'assurance', 'finance', 'financial', 'capital',
+  'international', 'global', 'national', 'associates', 'and', 'sons', 'brothers', 'the',
+]);
+const PAYMENT_PREFIX_RE = /\b(bill payment(?: via faster)? to|direct debit(?: payment)? to|standing order to|card payment to|payment to|dd to|faster payment to|transfer to)\b/i;
+
+function guessPersonNamePayee(desc) {
+  const prefixMatch = desc.match(PAYMENT_PREFIX_RE);
+  if (!prefixMatch) return null;
+  let payee = desc.slice(prefixMatch.index + prefixMatch[0].length).trim();
+  // Strip anything that looks like a reference/account number fragment trailing the name
+  payee = payee.replace(/\b(ref|reference|acc|account)\b.*$/i, '').trim();
+  if (!payee) return null;
+  const words = payee.split(/\s+/);
+  if (words.length < 2 || words.length > 3) return null; // a bare single word is too thin a signal either way
+  for (const w of words) {
+    if (!/^[a-z'-]+$/i.test(w)) return null; // any digit/punctuation-heavy word means this isn't a clean name
+    if (COMPANY_INDICATOR_WORDS.has(w.toLowerCase())) return null;
+  }
+  return payee;
+}
+
 function categorize(desc, isOutgoing = true) {
   const key = normalizeDesc(desc);
   if (presets[key]) {
@@ -4718,6 +4749,16 @@ function categorize(desc, isOutgoing = true) {
   for (const rule of KEYWORD_RULES) {
     const hit = rule.kws.find(kw => key.includes(kw));
     if (hit) return { debit: rule.debit, credit: rule.credit, confidence: 'high', reason: `Matched the keyword rule "${hit}" → ${rule.debit} / ${rule.credit}.` };
+  }
+  // Outgoing payment "TO" a plain person's name (not a company) — a payment boilerplate prefix
+  // ("BILL PAYMENT TO", "DIRECT DEBIT PAYMENT TO", etc.) followed by what looks like a first +
+  // last name, with none of the usual company-identifying words, is very often a wage/salary
+  // payment paid directly rather than through a formal payroll run. Best-effort, same as every
+  // other keyword rule — the user reviews before posting, this just saves the click for the
+  // common case of paying staff by name.
+  if (isOutgoing) {
+    const nameGuess = guessPersonNamePayee(desc);
+    if (nameGuess) return { debit: 'Wages', credit: 'Cash', confidence: 'high', reason: `"${nameGuess}" looks like a person's name, not a company — assumed to be a wage/salary payment. Check this is right.` };
   }
   // No keyword/preset/rule signal at all — fall back on whether the statement itself marked
   // this as money out (debit an expense, credit Cash) or money in (debit Cash, credit the
