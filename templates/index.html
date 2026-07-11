@@ -4781,6 +4781,38 @@ function parseAmount(token) { return parseFloat(String(token).replace(/[,£$]/g,
 // transaction rows and must keep matching.
 const STATEMENT_BOILERPLATE_RE = /\b(statement of account|opening balance|closing balance|available balance|cleared balance|balance brought forward|balance carried forward|balance b\/f|balance c\/f|total (payments|receipts|deposits|withdrawals)|page \d+ of \d+|sort code|account number|\biban\b|\bswift\b|vat (no|number)|registered (in|office)|terms and conditions|customer services|calls may be recorded|overdraft (limit|rate)|interest rate)\b/i;
 
+// Bank statement PDFs routinely wrap a long description onto a second visual line/row with no
+// date and no amount of its own — e.g. "16/09/2025 DIRECT DEBIT PAYMENT TO" on one row, then
+// "EON ENERGY LTD REF 48213" on the very next row. Since extractPdfTextLines() (and pasted/typed
+// freeform text) hands each visual row to parseMovementLine() independently, and parseMovementLine
+// requires a date to accept a row as a transaction at all, that continuation row — carrying the
+// one thing that actually identifies the payee — was silently dropped entirely. This merges any
+// no-date row into the row above it before parsing, unless it looks like statement boilerplate
+// (which must stay excluded, not get glued onto a real transaction's description).
+const DATE_RE_FOR_MERGE = /(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/;
+function mergeWrappedStatementLines(lines) {
+  const merged = [];
+  let lastRealIdx = -1; // last line that's a real transaction start, not boilerplate — a
+  // continuation line must attach to THIS, never to a boilerplate line that happened to sit
+  // between a wrapped description and its own amount (e.g. a page-break "Page 3 of 12" landing
+  // between "DIRECT DEBIT PAYMENT TO EON" and its amount on the next visual row).
+  for (const raw of lines) {
+    const line = (raw || '').trim();
+    if (!line) continue;
+    if (STATEMENT_BOILERPLATE_RE.test(line)) {
+      merged.push(line); // kept as its own isolated entry — parseMovementLine still filters it out, it just never becomes an attachment target
+      continue;
+    }
+    if (DATE_RE_FOR_MERGE.test(line) || lastRealIdx === -1) {
+      merged.push(line);
+      lastRealIdx = merged.length - 1;
+    } else {
+      merged[lastRealIdx] = merged[lastRealIdx] + ' ' + line;
+    }
+  }
+  return merged;
+}
+
 function parseMovementLine(line) {
   line = line.trim();
   if (!line) return null;
@@ -4919,9 +4951,10 @@ function parseReceiptText(lines) {
 
 function parseFreeformMovements() {
   const text = document.getElementById('movement-text').value;
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const rawLines = text.split('\n').map(l => l.trim()).filter(Boolean);
   const statusEl = document.getElementById('inbox-status');
-  if (!lines.length) { statusEl.textContent = 'Nothing to parse — write a movement first.'; return; }
+  if (!rawLines.length) { statusEl.textContent = 'Nothing to parse — write a movement first.'; return; }
+  const lines = mergeWrappedStatementLines(rawLines);
   const parsed = lines.map(parseMovementLine).filter(Boolean);
   candidates = candidates.concat(parsed);
   statusEl.textContent = `${parsed.length} of ${lines.length} line(s) parsed. Review and post below.`;
@@ -4986,7 +5019,7 @@ async function handlePdfUpload(event) {
   statusEl.textContent = 'Reading PDF…';
   try {
     const allLines = await extractPdfTextLines(file);
-    const parsed = allLines.map(parseMovementLine).filter(Boolean);
+    const parsed = mergeWrappedStatementLines(allLines).map(parseMovementLine).filter(Boolean);
     candidates = candidates.concat(parsed);
     document.getElementById('movement-text').value = allLines.filter(l => l.trim()).join('\n');
     statusEl.textContent = `Extracted ${parsed.length} of ${allLines.length} line(s) as transactions — the rest looked like statement headers/footers and were skipped. The raw lines are also in the box above — click "Analyze with AI" for a smarter pass.`;
@@ -5471,8 +5504,9 @@ async function parseBrecLines() {
   const account = document.getElementById('brec-account').value.trim();
   const statusEl = document.getElementById('brec-status');
   if (!account) { statusEl.textContent = 'Pick which cash/bank account this statement belongs to.'; return; }
-  const lines = document.getElementById('brec-text').value.split('\n').map(l => l.trim()).filter(Boolean);
-  if (!lines.length) { statusEl.textContent = 'Nothing to import — paste statement lines first.'; return; }
+  const rawLines = document.getElementById('brec-text').value.split('\n').map(l => l.trim()).filter(Boolean);
+  if (!rawLines.length) { statusEl.textContent = 'Nothing to import — paste statement lines first.'; return; }
+  const lines = mergeWrappedStatementLines(rawLines);
   const items = lines.map(l => parseBrecLine(l, account)).filter(Boolean);
   const isForeign = document.getElementById('brec-foreign-currency').checked;
   if (isForeign) {
