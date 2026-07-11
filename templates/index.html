@@ -254,6 +254,10 @@
   table.inbox input, table.inbox select { padding: 5px 6px; font-size: 12.5px; }
   table.inbox td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-family: var(--font-mono); }
   table.inbox td.chk { width: 26px; text-align: center; }
+  /* The statement-import candidates table (#inbox-table-wrap) uses a fixed colgroup so
+     Description gets the dominant share of the row — inputs need width:100% to actually fill
+     that wider cell instead of sitting at the browser's default ~20-character input size. */
+  #inbox-table-wrap input[type="text"], #inbox-table-wrap input[type="date"], #inbox-table-wrap input[type="number"] { width: 100%; box-sizing: border-box; }
   .confidence { font-size: 10px; padding: 1px 6px; border-radius: 999px; font-weight: 600; }
   .confidence.high { background: rgba(75,123,92,.13); color: var(--good); }
   .confidence.low { background: var(--bad-soft); color: var(--bad); }
@@ -1006,7 +1010,16 @@
       <div class="sub" style="margin-top:6px;">Needs an AI provider turned on under Settings → AI Features (Claude, paid, or Ollama, free and local).</div>
       <div id="inbox-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
       <div id="inbox-table-wrap" style="display:none;">
-        <table class="inbox">
+        <table class="inbox" style="table-layout:fixed; width:100%;">
+          <colgroup>
+            <col style="width:26px;">
+            <col style="width:9%;">
+            <col style="width:38%;">
+            <col style="width:9%;">
+            <col style="width:15%;">
+            <col style="width:15%;">
+            <col>
+          </colgroup>
           <thead><tr><th class="chk"><input type="checkbox" id="inbox-select-all" onchange="toggleAllCandidates(this.checked)"></th><th>Date</th><th>Description</th><th class="num">Amount</th><th>Debit</th><th>Credit</th><th></th></tr></thead>
           <tbody id="inbox-body"></tbody>
         </table>
@@ -1694,6 +1707,7 @@
       <a href="#" data-settings-tab="ai" onclick="showSettingsSubpage('ai'); return false;">AI Features</a>
       <a href="#" data-settings-tab="integrations" onclick="showSettingsSubpage('integrations'); return false;">Integrations</a>
       <a href="#" data-settings-tab="team" onclick="showSettingsSubpage('team'); return false;">Notifications &amp; Team</a>
+      <a href="#" data-settings-tab="danger" onclick="showSettingsSubpage('danger'); return false;" style="color:var(--bad);">Danger Zone</a>
     </div>
     <div data-settings-subpage="general">
     <div class="panel">
@@ -1985,6 +1999,14 @@ ollama pull llama3.2-vision</pre>
       </div>
       <button class="btn-primary" id="team-invite-btn" onclick="inviteMember()">Invite</button>
       <div id="team-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
+    </div>
+    </div>
+    <div data-settings-subpage="danger">
+    <div class="panel" style="margin-top:20px; border:1px solid var(--bad);">
+      <h2 style="color:var(--bad);">Danger Zone</h2>
+      <div class="sub" style="margin-bottom:12px;">Clears every transaction (voided, not hard-deleted — still visible in the Audit Log) and deletes every account for this company. The company itself, its name, and its settings are kept — this is for starting the ledger over from scratch, not deleting the company. This cannot be undone from here.</div>
+      <button class="btn-danger" onclick="resetCompanyData()">Reset company data — clear all accounts &amp; transactions</button>
+      <div id="reset-company-status" style="font-size:12px; color:var(--muted); margin-top:6px;"></div>
     </div>
     </div>
   </div>
@@ -3183,7 +3205,7 @@ function showActionToast(message, buttonLabel, onClick) {
 const PAGE_NAMES = ['dashboard', 'transactions', 'bank', 'accounts', 'ledgers', 'invoices', 'reports', 'settings', 'audit'];
 
 const REPORTS_SUBPAGES = ['statements', 'tax', 'funds-depts', 'health'];
-const SETTINGS_SUBPAGES = ['general', 'ai', 'integrations', 'team'];
+const SETTINGS_SUBPAGES = ['general', 'ai', 'integrations', 'team', 'danger'];
 
 function showPage(name, subpage) {
   if (!PAGE_NAMES.includes(name)) name = 'dashboard';
@@ -3747,6 +3769,37 @@ async function unreviewTransaction(id) {
 async function clearAll() {
   const result = await api(`/api/companies/${currentCompany.id}/transactions/clear`, { method: 'POST' });
   if (result.skippedLocked) alert(`${result.skippedLocked} transaction(s) in locked periods were kept; ${result.deleted} were cleared.`);
+  await refreshAll();
+}
+
+async function resetCompanyData() {
+  // Typing the company's own name is a higher bar than a plain confirm() for something this
+  // destructive — the same "are you sure you're sure" friction used for one-off account deletion
+  // this session, just applied up front instead of per-account.
+  const typed = prompt(`This clears every transaction and deletes every account for "${currentCompany.name}". Type the company name exactly to confirm:`);
+  if (typed !== currentCompany.name) {
+    if (typed !== null) showToast('Name did not match — nothing was changed.', 'error');
+    return;
+  }
+  const statusEl = document.getElementById('reset-company-status');
+  statusEl.textContent = 'Clearing transactions…';
+  const clearResult = await api(`/api/companies/${currentCompany.id}/transactions/clear`, { method: 'POST' });
+
+  statusEl.textContent = 'Deleting accounts…';
+  const accounts = await api(`/api/companies/${currentCompany.id}/accounts`);
+  let deleted = 0, failed = [];
+  for (const a of accounts) {
+    try {
+      await api(`/api/companies/${currentCompany.id}/accounts/${a.id}`, { method: 'DELETE' });
+      deleted++;
+    } catch (e) {
+      failed.push(a.name);
+    }
+  }
+
+  statusEl.textContent = `Cleared ${clearResult.deleted} transaction(s), deleted ${deleted} of ${accounts.length} account(s).` +
+    (failed.length ? ` Couldn't delete: ${failed.join(', ')} — still referenced by a transaction somewhere (check the Audit Log/locked periods).` : '');
+  showToast('Company data reset.', 'success');
   await refreshAll();
 }
 
@@ -5026,12 +5079,24 @@ function updateCandidate(id, field, value) {
 function removeCandidate(id) { candidates = candidates.filter(c => c.id != id); renderCandidates(); }
 
 async function postSelectedCandidates() {
-  const toPost = candidates.filter(c => c.selected && c.date && c.desc && c.amount > 0 && c.debit && c.credit && c.debit !== c.credit);
-  if (!toPost.length) { document.getElementById('inbox-status').textContent = 'Nothing valid selected.'; return; }
+  // "Uncategorized" is a placeholder, not a real account choice — without excluding it here it
+  // passes the plain truthy check below (it's a non-empty string) and could get posted as if it
+  // were a literal account named "Uncategorized".
+  const toPost = candidates.filter(c =>
+    c.selected && c.date && c.desc && c.amount > 0 && c.debit && c.credit && c.debit !== c.credit &&
+    c.debit !== 'Uncategorized' && c.credit !== 'Uncategorized'
+  );
+  if (!toPost.length) { document.getElementById('inbox-status').textContent = 'Nothing valid selected — still-uncategorized rows are skipped, not posted.'; return; }
   const result = await api(`/api/companies/${currentCompany.id}/transactions/bulk`, { method: 'POST', body: JSON.stringify(toPost) });
-  candidates = candidates.filter(c => !c.selected);
+  // Only remove rows that were ACTUALLY posted — a selected-but-still-"Uncategorized" row used to
+  // vanish from the list here too just because it was checked, even though it was silently
+  // excluded from toPost above and never reached the ledger. Leaving it visible is the whole
+  // point: what's left in the list after posting IS the "what's still missing" view.
+  const postedIds = new Set(toPost.map(c => c.id));
+  candidates = candidates.filter(c => !postedIds.has(c.id));
   document.getElementById('inbox-status').textContent = `Posted ${result.inserted} transaction(s) to the ledger.` +
-    (result.skippedLocked ? ` ${result.skippedLocked} fell in a locked period and were skipped.` : '');
+    (result.skippedLocked ? ` ${result.skippedLocked} fell in a locked period and were skipped.` : '') +
+    (candidates.length ? ` ${candidates.length} still need a category — still in the list below.` : '');
   renderCandidates();
   await refreshAll();
 }
