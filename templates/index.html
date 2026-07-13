@@ -4698,12 +4698,16 @@ const KEYWORD_RULES = [
   { kws: ['office', 'security equipment'], debit: 'Office Expenses', credit: 'Cash' },
   { kws: ['maintenance'], debit: 'Maintenance Expense', credit: 'Cash' },
   { kws: ['invoice', 'sale'], debit: 'Trade Recievables', credit: 'Sales' },
-  { kws: ['payment received', 'received payment', 'receipt'], debit: 'Cash', credit: 'Trade Recievables' },
   // CareBlue-specific: money IN via a Faster Payment on this statement comes from a debit card
   // terminal — sales taken card-in-hand, not an invoice being settled — so it's booked straight
   // to Sales rather than clearing a Trade Receivables balance. dir: 'in' keeps this from ever
   // matching an outgoing "BILL PAYMENT VIA FASTER" line, which is a completely different thing.
+  // Positioned BEFORE the generic "receipt"/"payment received" rule below: a line reading
+  // "FASTER PAYMENT RECEIPT FROM..." contains both phrases, and this one must win — it was
+  // previously listed after, so the generic rule intercepted it first and wrongly credited
+  // Trade Receivables instead of Sales.
   { kws: ['faster payment'], debit: 'Cash', credit: 'Sales', dir: 'in' },
+  { kws: ['payment received', 'received payment', 'receipt'], debit: 'Cash', credit: 'Trade Recievables' },
 
   // ---- Expanded from a supplied UK chart-of-accounts merchant mapping. Payment-processor names
   // that appear ambiguously in that mapping (Stripe, PayPal, SumUp, Square — used for BOTH
