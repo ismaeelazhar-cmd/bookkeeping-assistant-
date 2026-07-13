@@ -4707,7 +4707,13 @@ const KEYWORD_RULES = [
   // previously listed after, so the generic rule intercepted it first and wrongly credited
   // Trade Receivables instead of Sales.
   { kws: ['faster payment'], debit: 'Cash', credit: 'Sales', dir: 'in' },
-  { kws: ['payment received', 'received payment', 'receipt'], debit: 'Cash', credit: 'Trade Recievables' },
+  // Was Cash/Trade Recievables, assuming any generic "payment received"/"receipt" wording on a
+  // bank line meant an invoice being settled. For a business that gets paid immediately (like
+  // CareBlue) that's the wrong default — most money in is a fresh sale, not a debtor clearing.
+  // A genuine invoice settlement is already handled better by the dedicated invoice-payment
+  // matching feature elsewhere (which matches the amount against an actual open invoice, rather
+  // than guessing off a generic word), so this keyword fallback defaults to Sales instead.
+  { kws: ['payment received', 'received payment', 'receipt'], debit: 'Cash', credit: 'Sales', dir: 'in' },
 
   // ---- Expanded from a supplied UK chart-of-accounts merchant mapping. Payment-processor names
   // that appear ambiguously in that mapping (Stripe, PayPal, SumUp, Square — used for BOTH
