@@ -4699,6 +4699,11 @@ const KEYWORD_RULES = [
   { kws: ['maintenance'], debit: 'Maintenance Expense', credit: 'Cash' },
   { kws: ['invoice', 'sale'], debit: 'Trade Recievables', credit: 'Sales' },
   { kws: ['payment received', 'received payment', 'receipt'], debit: 'Cash', credit: 'Trade Recievables' },
+  // CareBlue-specific: money IN via a Faster Payment on this statement comes from a debit card
+  // terminal — sales taken card-in-hand, not an invoice being settled — so it's booked straight
+  // to Sales rather than clearing a Trade Receivables balance. dir: 'in' keeps this from ever
+  // matching an outgoing "BILL PAYMENT VIA FASTER" line, which is a completely different thing.
+  { kws: ['faster payment'], debit: 'Cash', credit: 'Sales', dir: 'in' },
 ];
 
 // Words that mean the payee is a company/organisation, not an individual — must NOT match
@@ -4747,6 +4752,11 @@ function categorize(desc, isOutgoing = true) {
     return { debit: userRule.debit, credit: userRule.credit, confidence: 'high', reason: `Matched your rule: "${userRule.keyword}" → ${userRule.debit} / ${userRule.credit}.` };
   }
   for (const rule of KEYWORD_RULES) {
+    // rule.dir (optional): 'in' only applies to incoming money, 'out' only to outgoing — without
+    // this a rule meant for one direction could wrongly fire on the other (e.g. a generic "faster
+    // payment" rule for money IN must never also catch an outgoing "BILL PAYMENT VIA FASTER" line).
+    if (rule.dir === 'in' && isOutgoing) continue;
+    if (rule.dir === 'out' && !isOutgoing) continue;
     const hit = rule.kws.find(kw => key.includes(kw));
     if (hit) return { debit: rule.debit, credit: rule.credit, confidence: 'high', reason: `Matched the keyword rule "${hit}" → ${rule.debit} / ${rule.credit}.` };
   }
