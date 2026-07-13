@@ -198,3 +198,52 @@ def test_preset_updates_on_repost_with_different_accounts(client):
     post_transaction(client, cid, desc="Ambiguous item", debit="Travel Expense", credit="Cash")
     presets = client.get(f"/api/companies/{cid}/presets").get_json()
     assert presets["ambiguous item"]["debit"] == "Travel Expense"
+
+
+def test_correct_preset_fixes_a_wrongly_learned_mapping(client):
+    cid = make_company(client)
+    post_transaction(client, cid, desc="Faster payment from J Smith", debit="Cash", credit="Trade Recievables")
+    res = client.put(f"/api/companies/{cid}/presets/faster payment from j smith", json={"debit": "Cash", "credit": "Sales"})
+    assert res.status_code == 200
+    presets = client.get(f"/api/companies/{cid}/presets").get_json()
+    assert presets["faster payment from j smith"] == {"debit": "Cash", "credit": "Sales"}
+
+
+def test_correct_preset_404s_for_unknown_description(client):
+    cid = make_company(client)
+    res = client.put(f"/api/companies/{cid}/presets/nonexistent desc", json={"debit": "Cash", "credit": "Sales"})
+    assert res.status_code == 404
+
+
+def test_correct_preset_rejects_same_debit_and_credit(client):
+    cid = make_company(client)
+    post_transaction(client, cid, desc="Some item", debit="Office Expenses", credit="Cash")
+    res = client.put(f"/api/companies/{cid}/presets/some item", json={"debit": "Cash", "credit": "Cash"})
+    assert res.status_code == 400
+
+
+def test_delete_preset(client):
+    cid = make_company(client)
+    post_transaction(client, cid, desc="Some item", debit="Office Expenses", credit="Cash")
+    res = client.delete(f"/api/companies/{cid}/presets/some item")
+    assert res.status_code == 200
+    presets = client.get(f"/api/companies/{cid}/presets").get_json()
+    assert "some item" not in presets
+
+
+def test_bulk_correct_presets_fixes_every_matching_row(client):
+    cid = make_company(client)
+    post_transaction(client, cid, desc="Faster payment from Alice", debit="Cash", credit="Trade Recievables")
+    post_transaction(client, cid, desc="Faster payment from Bob", debit="Cash", credit="Trade Recievables")
+    post_transaction(client, cid, desc="Unrelated expense", debit="Office Expenses", credit="Cash")
+
+    res = client.post(f"/api/companies/{cid}/presets/bulk-correct", json={
+        "matchField": "credit", "matchValue": "Trade Recievables", "newDebit": "Cash", "newCredit": "Sales",
+    })
+    assert res.status_code == 200
+    assert res.get_json()["updated"] == 2
+
+    presets = client.get(f"/api/companies/{cid}/presets").get_json()
+    assert presets["faster payment from alice"] == {"debit": "Cash", "credit": "Sales"}
+    assert presets["faster payment from bob"] == {"debit": "Cash", "credit": "Sales"}
+    assert presets["unrelated expense"] == {"debit": "Office Expenses", "credit": "Cash"}  # untouched

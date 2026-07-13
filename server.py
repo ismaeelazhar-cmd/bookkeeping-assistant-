@@ -4444,6 +4444,67 @@ def list_presets(company_id):
     return jsonify({r["desc_key"]: {"debit": r["debit"], "credit": r["credit"]} for r in rows})
 
 
+@app.route("/api/companies/<int:company_id>/presets/<path:desc_key>", methods=["PUT"])
+@login_required
+@company_required
+@write_required
+def correct_preset(company_id, desc_key):
+    """A preset is learned silently from whatever debit/credit a description happened to be
+    posted with the first time — if that first posting was wrong (or the business's own
+    convention changes later, e.g. "we've decided all Faster Payments are now Sales, not
+    receivables"), every future line with that exact wording keeps repeating the mistake, since
+    presets are checked before any keyword rule. This lets a wrong preset be corrected directly
+    rather than needing to delete-and-repost a real transaction just to overwrite the learned
+    value."""
+    data = request.get_json(force=True) or {}
+    debit, credit = data.get("debit"), data.get("credit")
+    if not debit or not credit or debit == credit:
+        return jsonify({"error": "Provide a debit and credit account, and they must differ."}), 400
+    db = get_db()
+    cur = db.execute(
+        "UPDATE presets SET debit = ?, credit = ? WHERE company_id = ? AND desc_key = ?",
+        (debit, credit, company_id, desc_key.lower()),
+    )
+    db.commit()
+    if not cur.rowcount:
+        return jsonify({"error": "No preset with that exact description exists."}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/presets/<path:desc_key>", methods=["DELETE"])
+@login_required
+@company_required
+@write_required
+def delete_preset(company_id, desc_key):
+    db = get_db()
+    db.execute("DELETE FROM presets WHERE company_id = ? AND desc_key = ?", (company_id, desc_key.lower()))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/presets/bulk-correct", methods=["POST"])
+@login_required
+@company_required
+@write_required
+def bulk_correct_presets(company_id):
+    """Fix every preset whose CURRENT credit (or debit) matches an old value in one call — e.g.
+    "every preset that currently says Trade Recievables should say Sales instead" after a policy
+    change, without hand-editing each learned description one at a time."""
+    data = request.get_json(force=True) or {}
+    match_field = data.get("matchField")  # "debit" or "credit"
+    match_value = data.get("matchValue")
+    new_debit, new_credit = data.get("newDebit"), data.get("newCredit")
+    if match_field not in ("debit", "credit") or not match_value or not new_debit or not new_credit:
+        return jsonify({"error": "matchField ('debit' or 'credit'), matchValue, newDebit, and newCredit are all required."}), 400
+    db = get_db()
+    cur = db.execute(
+        f"UPDATE presets SET debit = ?, credit = ? WHERE company_id = ? AND {match_field} = ?",
+        (new_debit, new_credit, company_id, match_value),
+    )
+    db.commit()
+    return jsonify({"ok": True, "updated": cur.rowcount})
+
+
 # ---------- categorisation rules ("Amazon always -> Office Supplies") ----------
 
 @app.route("/api/companies/<int:company_id>/categorization-rules", methods=["GET"])
