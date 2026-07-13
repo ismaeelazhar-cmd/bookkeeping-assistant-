@@ -5113,6 +5113,23 @@ function descSimilarityKey(desc) {
     .trim();
 }
 
+// Persists a manual categorization decision as a real rule so it's remembered for the NEXT
+// statement/import too, not just applied within the batch currently on screen — "Categorize
+// similar" and directly editing a row's debit/credit both teach the system this way now, same
+// as manually posting the same thing twice already does via maybeSuggestCategorizationRule.
+// Silent (no prompt) since the user just explicitly made this exact decision one click ago —
+// asking them to confirm it again would be the opposite of "the system learns from me".
+async function learnCategorizationRule(desc, debit, credit) {
+  const key = descSimilarityKey(desc);
+  if (!key || key.length < 4) return; // too generic a fragment to trust as a standing rule
+  const alreadyCovered = (categorizationRules || []).some(r => key.includes(r.keyword) || r.keyword.includes(key));
+  if (alreadyCovered) return;
+  try {
+    await api(`/api/companies/${currentCompany.id}/categorization-rules`, { method: 'POST', body: JSON.stringify({ keyword: key, debit, credit }) });
+    await loadCategorizationRules();
+  } catch (e) { /* best-effort — a failed rule save shouldn't block the categorization the user just did */ }
+}
+
 function categorizeSimilarCandidates(id) {
   const c = candidates.find(x => x.id == id);
   if (!c) return;
@@ -5125,7 +5142,8 @@ function categorizeSimilarCandidates(id) {
   const matches = candidates.filter(x => descSimilarityKey(x.desc) === key);
   matches.forEach(x => { x.debit = debit; x.credit = credit; });
   renderCandidates();
-  showToast(`Applied ${debit} / ${credit} to ${matches.length} similarly-worded line(s).`, 'success');
+  learnCategorizationRule(c.desc, debit, credit);
+  showToast(`Applied ${debit} / ${credit} to ${matches.length} similarly-worded line(s) — remembered for next time too.`, 'success');
 }
 
 function setCandidateSelected(id, val) { const c = candidates.find(c => c.id == id); if (c) c.selected = val; }
@@ -5147,6 +5165,7 @@ function updateCandidate(id, field, value) {
         renderCandidates();
         showToast(`Applied ${c.debit} / ${c.credit} to ${matches.length} similarly-worded line(s) too.`, 'success');
       }
+      learnCategorizationRule(c.desc, c.debit, c.credit);
     }
   }
 }
