@@ -4704,6 +4704,40 @@ const KEYWORD_RULES = [
   // to Sales rather than clearing a Trade Receivables balance. dir: 'in' keeps this from ever
   // matching an outgoing "BILL PAYMENT VIA FASTER" line, which is a completely different thing.
   { kws: ['faster payment'], debit: 'Cash', credit: 'Sales', dir: 'in' },
+
+  // ---- Expanded from a supplied UK chart-of-accounts merchant mapping. Payment-processor names
+  // that appear ambiguously in that mapping (Stripe, PayPal, SumUp, Square — used for BOTH
+  // incoming sales payouts and outgoing processing fees, with nothing in the description alone
+  // to tell which) are deliberately NOT added as keyword rules — that's a real ambiguity worth a
+  // human glance, not a guess either way.
+  { kws: ['pret a manger', 'greggs', 'deliveroo for business', 'just eat for business'], debit: 'Staff Welfare', credit: 'Cash' },
+  { kws: ['uber', 'addison lee', 'premier inn', 'travelodge', 'easyjet', 'british airways'], debit: 'Travel & Subsistence', credit: 'Cash' },
+  { kws: ['kwik fit', 'halfords autocentre', 'ats euromaster', 'national tyres'], debit: 'Motor Repairs', credit: 'Cash' },
+  { kws: ['dbs check', 'disclosure and barring', 'indeed.com', 'linkedin jobs', 'reed.co.uk', 'totaljobs'], debit: 'Recruitment Costs', credit: 'Cash' },
+  { kws: ['ryman', 'staples', 'amazon business', 'whsmith', 'viking direct'], debit: 'Office Expenses', credit: 'Cash' },
+  { kws: ['wework', 'regus'], debit: 'Rent Expenses', credit: 'Cash' },
+  { kws: ['thames water', 'severn trent'], debit: 'Utilities', credit: 'Cash' },
+  { kws: ['hiscox', 'simply business', 'direct line for business', 'markel'], debit: 'Insurance', credit: 'Cash' },
+  { kws: ['deloitte', 'azets'], debit: 'Accountancy Fees', credit: 'Cash' },
+  { kws: ['natwest', 'barclays', 'hsbc', 'lloyds', 'starling', 'monzo business', 'tide.co', 'mettle'], debit: 'Bank Charges', credit: 'Cash' },
+  { kws: ['facebook ads', 'meta ads', 'google ads', 'linkedin ads'], debit: 'Marketing/Advertising', credit: 'Cash' },
+  { kws: ['b&q trade'], debit: 'Maintenance Expense', credit: 'Cash' },
+  { kws: ['kaplan', 'bpp ', 'linkedin learning', 'udemy'], debit: 'Training Costs', credit: 'Cash' },
+  { kws: ['royal mail', 'dpd', 'evri', 'hermes', 'parcelforce'], debit: 'Postage', credit: 'Cash' },
+  { kws: ['att ', 'ciot', 'acca', 'icaew', 'aat '], debit: 'Subscriptions', credit: 'Cash' },
+  { kws: ['funding circle', 'iwoca'], debit: 'Loan Interest', credit: 'Cash' },
+  { kws: ['nest pension', 'the peoples pension', "the people's pension", 'smart pension'], debit: 'Pension Costs', credit: 'Cash' },
+  { kws: ['barclaycard', 'amex business', 'capital on tap'], debit: 'Credit Card Liability', credit: 'Cash' },
+  { kws: ['wise transfer', 'revolut business'], debit: 'Bank Charges', credit: 'Cash' },
+  // Trade/builders' merchants — directly relevant to CareBlue's plumbing/heating trade, booked
+  // as materials cost rather than a generic office expense.
+  { kws: ['travis perkins', 'jewson', 'screwfix', "builders' merchant", 'builders merchant'], debit: 'Materials & Supplies', credit: 'Cash' },
+  { kws: ['hss hire', 'speedy hire', 'brandon hire'], debit: 'Plant & Equipment Hire', credit: 'Cash' },
+  { kws: ['arco', 'toolstation', 'machine mart'], debit: 'Tools & Equipment', credit: 'Cash' },
+  { kws: ['biffa', 'veolia'], debit: 'Cleaning & Waste Disposal', credit: 'Cash' },
+  { kws: ['godaddy', '123 reg', 'squarespace'], debit: 'Website/IT Costs', credit: 'Cash' },
+  { kws: ['companies house'], debit: 'Statutory Fees', credit: 'Cash' },
+  { kws: ['just giving', 'justgiving', ' caf ', 'charities aid foundation'], debit: 'Donations', credit: 'Cash' },
 ];
 
 // Words that mean the payee is a company/organisation, not an individual — must NOT match
