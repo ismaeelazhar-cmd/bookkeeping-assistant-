@@ -4911,6 +4911,13 @@ function mergeWrappedStatementLines(lines) {
 function parseMovementLine(line) {
   line = line.trim();
   if (!line) return null;
+  // A column-based direction hint (see extractPdfTextLines/detectMoneyColumns) is the most
+  // reliable signal available when present — it's a direct read of which column the amount was
+  // physically in, not an inference from wording — so it's consumed here, ahead of every other
+  // check, and overrides the sign/DR-CR/keyword chain below entirely for this line.
+  let columnHint = null;
+  if (line.startsWith(COLUMN_HINT_IN)) { columnHint = false; line = line.slice(COLUMN_HINT_IN.length).trim(); }
+  else if (line.startsWith(COLUMN_HINT_OUT)) { columnHint = true; line = line.slice(COLUMN_HINT_OUT.length).trim(); }
   if (STATEMENT_BOILERPLATE_RE.test(line)) return null;
   // Real transaction rows are short (a date, a merchant/reference string, an amount) — a long
   // line is almost always a wrapped disclaimer/T&Cs sentence that happens to contain numbers.
@@ -4966,7 +4973,9 @@ function parseMovementLine(line) {
   // outgoing vs incoming lines.
   const afterAmount = line.slice(line.indexOf(best[0]) + best[0].length, line.indexOf(best[0]) + best[0].length + 4);
   let isOutgoing;
-  if (signedAmount < 0 || /^\s*-/.test(afterAmount)) {
+  if (columnHint !== null) {
+    isOutgoing = columnHint;
+  } else if (signedAmount < 0 || /^\s*-/.test(afterAmount)) {
     isOutgoing = true;
   } else if (/^\s*DR\b/i.test(afterAmount)) {
     isOutgoing = true;
@@ -5057,11 +5066,56 @@ function parseFreeformMovements() {
   renderCandidates();
 }
 
+// Groups a page's raw pdf.js text items into visual rows, keeping each token's x-position
+// (item.transform[4]) instead of discarding it — needed so a two-column "Money In / Money Out"
+// statement layout (no sign, no DR/CR marker, direction shown purely by which column a number
+// sits in) can be told apart from a single combined-amount column later. Also fixes a latent
+// ordering bug: joining tokens in whatever order pdf.js returned them (not necessarily
+// left-to-right) could scramble a row's word order; sorting by x fixes that for every statement,
+// not just two-column ones.
+function buildRowsFromItems(items) {
+  const rows = {};
+  for (const item of items) {
+    const y = Math.round(item.transform[5]);
+    const x = item.transform[4];
+    if (!rows[y]) rows[y] = [];
+    rows[y].push({ str: item.str, x });
+  }
+  const ys = Object.keys(rows).map(Number).sort((a, b) => b - a);
+  return ys.map(y => ({ y, tokens: rows[y].slice().sort((a, b) => a.x - b.x) }));
+}
+
+// A one-off scan for a header row naming two amount columns ("Money In" / "Money Out", "Paid In"
+// / "Paid Out", "Credit" / "Debit", etc.) — when found, the x-position of each label is used as
+// an anchor to classify every later amount on the page by which side of the midpoint it falls
+// on. Deliberately narrow keyword lists (not "in"/"out" alone, which would match all sorts of
+// unrelated statement text) and returns null — no guess — when no such header exists, so a
+// statement without this layout is completely unaffected.
+const MONEY_IN_HEADER_RE = /\b(money in|paid in|amount in|credits?)\b/i;
+const MONEY_OUT_HEADER_RE = /\b(money out|paid out|amount out|debits?|withdrawals?)\b/i;
+function detectMoneyColumns(rows) {
+  for (const row of rows) {
+    let inX = null, outX = null;
+    for (const t of row.tokens) {
+      if (inX === null && MONEY_IN_HEADER_RE.test(t.str)) inX = t.x;
+      if (outX === null && MONEY_OUT_HEADER_RE.test(t.str)) outX = t.x;
+    }
+    if (inX !== null && outX !== null) return { inX, outX };
+  }
+  return null;
+}
+
+const AMOUNT_TOKEN_RE = /^-?£?\$?\d[\d,]*\.\d{2}$/;
+// Hidden, zero-width-ish markers prepended to a line's text when column position gives a
+// confident direction — parseMovementLine strips and consumes these before any of its other
+// sign/keyword heuristics run, so a column-based read always wins when one was possible.
+const COLUMN_HINT_IN = 'COLIN';
+const COLUMN_HINT_OUT = 'COLOUT';
+
 async function extractPdfTextLines(file) {
   // Shared by every "upload a PDF and pull real text out of it" flow (bank statement import,
   // bank reconciliation import, receipt scanning) — one pdf.js text-extraction routine instead
-  // of three copies drifting apart. Groups text items by their y-position on the page so words
-  // on the same visual line end up in the same string, in top-to-bottom reading order.
+  // of three copies drifting apart.
   pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   const buf = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
@@ -5069,14 +5123,22 @@ async function extractPdfTextLines(file) {
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
-    const rows = {};
-    for (const item of content.items) {
-      const y = Math.round(item.transform[5]);
-      if (!rows[y]) rows[y] = [];
-      rows[y].push(item.str);
+    const rows = buildRowsFromItems(content.items);
+    const columns = detectMoneyColumns(rows);
+    for (const row of rows) {
+      let hint = '';
+      if (columns) {
+        const amountToken = row.tokens.find(t => AMOUNT_TOKEN_RE.test(t.str.replace(/\s+/g, '')));
+        if (amountToken) {
+          // Nearest-anchor distance rather than a midpoint-side check — robust even when the two
+          // columns aren't symmetrically spaced around their midpoint.
+          const distIn = Math.abs(amountToken.x - columns.inX);
+          const distOut = Math.abs(amountToken.x - columns.outX);
+          hint = distIn <= distOut ? COLUMN_HINT_IN : COLUMN_HINT_OUT;
+        }
+      }
+      allLines.push(hint + row.tokens.map(t => t.str).join(' '));
     }
-    const ys = Object.keys(rows).map(Number).sort((a, b) => b - a);
-    for (const y of ys) allLines.push(rows[y].join(' '));
   }
   return allLines;
 }
